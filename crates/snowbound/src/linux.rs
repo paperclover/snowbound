@@ -762,7 +762,7 @@ pub fn cache_dir() -> Option<PathBuf> {
 pub fn smb_mount(path: &std::path::Path) -> Option<crate::library::Mount> {
     let mounts = std::fs::read_to_string("/proc/self/mounts").ok()?;
     // The mount holding the path is the one at its longest ancestor.
-    let (source, point, options) = mounts
+    let (source, point, options, within) = mounts
         .lines()
         .filter_map(|line| {
             let mut fields = line.split_whitespace();
@@ -772,16 +772,19 @@ pub fn smb_mount(path: &std::path::Path) -> Option<crate::library::Mount> {
                 fields.next()?,
                 fields.next()?,
             );
+            if !matches!(kind, "cifs" | "smb3") {
+                return None;
+            }
             let point = point.replace("\\040", " ");
-            (matches!(kind, "cifs" | "smb3") && path.starts_with(&point))
-                .then(|| (source.replace("\\040", " "), point, options.to_owned()))
+            let within = crate::library::within_mount(path, &point)?;
+            Some((
+                source.replace("\\040", " "),
+                point,
+                options.to_owned(),
+                within,
+            ))
         })
-        .max_by_key(|(_, point, _)| point.len())?;
-    let within = path
-        .strip_prefix(&point)
-        .ok()?
-        .to_string_lossy()
-        .into_owned();
+        .max_by_key(|(_, point, _, _)| point.len())?;
     crate::library::Mount::parse(&source, &within, &options)
 }
 

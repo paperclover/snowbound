@@ -19,17 +19,21 @@ x86_64)
     target=x86_64-win7-windows-gnu
     toolchain=+nightly
     # rustc would infer a bare ld from the name `link.sh`; it is a C compiler driver.
+    # raw-dylib imports (the windows crates) are made by llvm-mingw's dlltool. Cargo
+    # can't see link.sh's inputs; folding their hash into the flags relinks on change.
+    runtime=$(cat "$here/link.sh" "$here"/rt/* | shasum | cut -c1-12)
     set -- -Zbuild-std=std,panic_unwind \
         --config "target.$target.linker='$here/link.sh'" \
-        --config "target.$target.rustflags=['-C','linker-flavor=gcc']" "$@"
+        --config "target.$target.rustflags=['-C','linker-flavor=gcc','-C','metadata=rt-$runtime','-C','dlltool=$LLVM_MINGW/bin/x86_64-w64-mingw32-dlltool']" "$@"
     ;;
 aarch64)
     target=aarch64-pc-windows-gnullvm
     toolchain=+stable
     rustup target add --toolchain stable "$target" >/dev/null
-    # crt-static links libunwind in rather than beside the executable.
+    # crt-static links libunwind in rather than beside the executable. clang ignores
+    # rustc's -no-pie.
     set -- --config "target.$target.linker='$LLVM_MINGW/bin/aarch64-w64-mingw32-clang'" \
-        --config "target.$target.rustflags=['-C','target-feature=+crt-static']" "$@"
+        --config "target.$target.rustflags=['-C','target-feature=+crt-static','-C','link-arg=-Wno-unused-command-line-argument']" "$@"
     ;;
 *)
     echo "usage: $0 x86_64|aarch64 COMMAND ARGS..." >&2

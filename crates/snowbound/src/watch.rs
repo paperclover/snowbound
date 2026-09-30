@@ -1,6 +1,7 @@
 //! Changes below a notebook folder, as the system reports them: FSEvents on macOS, inotify on
-//! Linux. A notebook on a share learns of its changes from the server instead
-//! (`notebook::session::Background::smb`).
+//! Linux, ReadDirectoryChangesW on Windows. A notebook on a share learns of its changes from
+//! the server instead (`notebook::session::Background::smb`), except on Windows, whose own
+//! SMB client relays the server's change notifications.
 
 use std::path::{Path, PathBuf};
 
@@ -22,19 +23,7 @@ pub fn watch(root: &Path, changed: impl Fn(Vec<String>) + Send + Sync + 'static)
     let folders = if local(&volume) {
         vec![root.clone()]
     } else if smbfs(&volume) {
-        // smbfs reports another client's change only in a folder watched for itself, and
-        // names just that folder.
-        let mut folders = vec![root.clone()];
-        let mut at = 0;
-        while let Some(folder) = folders.get(at).cloned() {
-            at += 1;
-            for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
-                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-                    folders.push(entry.path());
-                }
-            }
-        }
-        folders
+        share_folders(&root)
     } else {
         return None;
     };
@@ -72,6 +61,30 @@ pub fn on_this_computer(path: &Path) -> bool {
     statfs(path).is_none_or(|volume| local(&volume))
 }
 
+/// smbfs reports another client's change only in a folder watched for itself, and names
+/// just that folder.
+#[cfg(unix)]
+fn share_folders(root: &Path) -> Vec<PathBuf> {
+    let mut folders = vec![root.to_owned()];
+    let mut at = 0;
+    while let Some(folder) = folders.get(at).cloned() {
+        at += 1;
+        for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                folders.push(entry.path());
+            }
+        }
+    }
+    folders
+}
+
+/// Windows' SMB client watches a whole tree for the server to report on.
+#[cfg(windows)]
+fn share_folders(root: &Path) -> Vec<PathBuf> {
+    vec![root.to_owned()]
+}
+
+#[cfg(unix)]
 fn statfs(path: &Path) -> Option<libc::statfs> {
     use std::os::unix::ffi::OsStrExt;
     let name = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
@@ -110,6 +123,30 @@ fn smbfs(volume: &libc::statfs) -> bool {
 #[cfg(target_os = "linux")]
 fn smbfs(_: &libc::statfs) -> bool {
     false
+}
+
+/// The type of the drive holding `path`, as `GetDriveTypeW` names it.
+#[cfg(windows)]
+fn statfs(path: &Path) -> Option<u32> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{GetDriveTypeW, GetVolumePathNameW};
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut root = [0u16; 1024];
+    unsafe {
+        (GetVolumePathNameW(path.as_ptr(), root.as_mut_ptr(), root.len() as u32) != 0)
+            .then(|| GetDriveTypeW(root.as_ptr()))
+    }
+}
+
+#[cfg(windows)]
+fn local(drive: &u32) -> bool {
+    *drive != windows_sys::Win32::System::WindowsProgramming::DRIVE_REMOTE
+}
+
+/// A network drive or UNC path, which Windows reaches over SMB.
+#[cfg(windows)]
+fn smbfs(drive: &u32) -> bool {
+    !local(drive)
 }
 
 type Changed = Box<dyn Fn(Vec<std::path::PathBuf>) + Send + Sync>;
@@ -463,6 +500,170 @@ mod platform {
                 libc::close(self.inotify);
                 libc::close(self.stop);
             }
+        }
+    }
+}
+
+#[cfg(windows)]
+mod platform {
+    use super::Changed;
+    use std::{io, os::windows::ffi::OsStrExt, path::PathBuf, thread::JoinHandle};
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0},
+        Storage::FileSystem::{
+            CreateFileW, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY,
+            FILE_NOTIFY_CHANGE_ATTRIBUTES, FILE_NOTIFY_CHANGE_DIR_NAME,
+            FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
+            FILE_NOTIFY_INFORMATION, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+            OPEN_EXISTING, ReadDirectoryChangesW,
+        },
+        System::{
+            IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED},
+            Threading::{CreateEventW, INFINITE, SetEvent, WaitForMultipleObjects},
+        },
+    };
+
+    /// A thread waiting on the folder's changes, or on being stopped.
+    pub struct Stream {
+        stop: HANDLE,
+        thread: Option<JoinHandle<()>>,
+    }
+
+    // The handle is only signalled and closed, each safe from any thread.
+    unsafe impl Send for Stream {}
+    unsafe impl Sync for Stream {}
+
+    /// Owns a handle for a thread that moves it.
+    struct Owned(HANDLE);
+    unsafe impl Send for Owned {}
+
+    impl Stream {
+        /// Watches the tree at `folders[0]`, which Windows reports on as a whole.
+        pub fn start(folders: &[PathBuf], changed: Changed) -> io::Result<Self> {
+            let root = folders[0].clone();
+            let name: Vec<u16> = root.as_os_str().encode_wide().chain([0]).collect();
+            let folder = unsafe {
+                CreateFileW(
+                    name.as_ptr(),
+                    FILE_LIST_DIRECTORY,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+                    std::ptr::null_mut(),
+                )
+            };
+            if folder == INVALID_HANDLE_VALUE {
+                return Err(io::Error::last_os_error());
+            }
+            let [stop, done] =
+                [(); 2].map(|_| unsafe { CreateEventW(std::ptr::null(), 1, 0, std::ptr::null()) });
+            if stop.is_null() || done.is_null() {
+                let error = io::Error::last_os_error();
+                unsafe { CloseHandle(folder) };
+                return Err(error);
+            }
+            let handles = [Owned(folder), Owned(stop), Owned(done)];
+            let thread = std::thread::Builder::new()
+                .name("snowbound-watch".into())
+                .spawn(move || {
+                    let [folder, stop, done] = handles.map(|handle| handle.0);
+                    watch(folder, stop, done, &root, &changed);
+                    unsafe {
+                        CloseHandle(folder);
+                        CloseHandle(done);
+                    }
+                })?;
+            Ok(Self {
+                stop,
+                thread: Some(thread),
+            })
+        }
+    }
+
+    /// Reports the changes below `root`, whose folder is open as `folder`, until `stop`.
+    fn watch(
+        folder: HANDLE,
+        stop: HANDLE,
+        done: HANDLE,
+        root: &std::path::Path,
+        changed: &Changed,
+    ) {
+        // 64 KiB, the most a change notification carries over SMB; DWORD-aligned.
+        let mut buffer = vec![0u32; 16 * 1024];
+        let filter = FILE_NOTIFY_CHANGE_FILE_NAME
+            | FILE_NOTIFY_CHANGE_DIR_NAME
+            | FILE_NOTIFY_CHANGE_ATTRIBUTES
+            | FILE_NOTIFY_CHANGE_SIZE
+            | FILE_NOTIFY_CHANGE_LAST_WRITE;
+        loop {
+            let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+            overlapped.hEvent = done;
+            let asked = unsafe {
+                ReadDirectoryChangesW(
+                    folder,
+                    buffer.as_mut_ptr().cast(),
+                    (buffer.len() * 4) as u32,
+                    1,
+                    filter,
+                    std::ptr::null_mut(),
+                    &mut overlapped,
+                    None,
+                )
+            };
+            if asked == 0 {
+                return;
+            }
+            let woken = unsafe { WaitForMultipleObjects(2, [done, stop].as_ptr(), 0, INFINITE) };
+            let mut read = 0;
+            let finished = woken == WAIT_OBJECT_0
+                && unsafe { GetOverlappedResult(folder, &overlapped, &mut read, 0) } != 0;
+            if !finished {
+                // The request must end before its buffer does.
+                unsafe {
+                    CancelIoEx(folder, &overlapped);
+                    GetOverlappedResult(folder, &overlapped, &mut read, 1);
+                }
+                return;
+            }
+            // Too many changes for the buffer: something below the root changed.
+            if read == 0 {
+                changed(vec![root.to_owned()]);
+                continue;
+            }
+            let bytes: &[u8] =
+                unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast(), read as usize) };
+            let mut paths = Vec::new();
+            let mut at = 0;
+            loop {
+                let entry: FILE_NOTIFY_INFORMATION =
+                    unsafe { std::ptr::read_unaligned(bytes[at..].as_ptr().cast()) };
+                let start = at + std::mem::offset_of!(FILE_NOTIFY_INFORMATION, FileName);
+                let end = (start + entry.FileNameLength as usize).min(bytes.len());
+                let name: Vec<u16> = bytes[start..end]
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect();
+                paths.push(root.join(String::from_utf16_lossy(&name)));
+                if entry.NextEntryOffset == 0 {
+                    break;
+                }
+                at += entry.NextEntryOffset as usize;
+                if at >= bytes.len() {
+                    break;
+                }
+            }
+            changed(paths);
+        }
+    }
+
+    impl Drop for Stream {
+        fn drop(&mut self) {
+            unsafe { SetEvent(self.stop) };
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+            unsafe { CloseHandle(self.stop) };
         }
     }
 }

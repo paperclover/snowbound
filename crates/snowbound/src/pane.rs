@@ -163,12 +163,15 @@ impl TagScope {
 fn local_day(time: u64) -> i64 {
     let unix = time as i64 + 315_532_800;
     // SAFETY: `localtime_r` writes only the `tm` it is given.
+    #[cfg(unix)]
     let offset = unsafe {
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&unix, &mut tm);
-        tm.tm_gmtoff
+        tm.tm_gmtoff as i64
     };
-    (unix + offset as i64).div_euclid(86_400)
+    #[cfg(windows)]
+    let offset = crate::platform::utc_offset(unix);
+    (unix + offset).div_euclid(86_400)
 }
 
 /// Day `day` counted from 1970 as a year, month and day.

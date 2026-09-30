@@ -39,6 +39,30 @@ objc2-app-kit = { version = "0.2.2", default-features = false, features = ["NSAl
 objc2-foundation = { version = "0.2.2", default-features = false, features = ["NSString", "NSThread", "NSAttributedString", "NSDate", "NSCalendar", "NSDateFormatter", "NSGeometry", "NSLocale", "NSPathUtilities", "NSTimeZone", "NSURL", "NSArray", "NSRange", "NSError", "NSFileCoordinator", "NSFilePresenter", "NSFileVersion", "NSFileManager", "NSNotification", "NSOperation", "block2"] }
 block2 = "0.5.1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_OpenGL",
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Credentials",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 accesskit_winit = { version = "0.34.0", default-features = false, features = ["accesskit_unix", "async-io"] }
 smithay-clipboard = "0.7.3"

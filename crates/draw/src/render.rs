@@ -1,4 +1,6 @@
-#[cfg(not(feature = "wgpu"))]
+#[cfg(all(feature = "wgpu", windows))]
+mod dual;
+#[cfg(any(windows, not(feature = "wgpu")))]
 mod gl;
 mod icon;
 mod text;
@@ -7,12 +9,16 @@ mod translucent;
 #[cfg(feature = "wgpu")]
 mod webgpu;
 
+#[cfg(all(feature = "wgpu", windows))]
+use dual as backend;
 #[cfg(not(feature = "wgpu"))]
 use gl as backend;
-#[cfg(feature = "wgpu")]
+#[cfg(all(feature = "wgpu", not(windows)))]
 use webgpu as backend;
 
 pub use backend::Target;
+#[cfg(all(feature = "wgpu", windows))]
+pub use gl::Target as GlTarget;
 pub use icon::{Palette, picture_icon};
 pub use text::{Decoration, Glyph, GlyphRun, Glyphs, paint_parley_run};
 #[cfg(feature = "wgpu")]
@@ -159,6 +165,14 @@ impl RasterImage {
     pub fn pixels(&self) -> &[u8] {
         self.pixels.as_ref()
     }
+}
+
+/// What a backend submits: the prepared vertices and batches, and the images they paint.
+struct Frame<'a> {
+    vertices: &'a [Vertex],
+    batches: &'a [Batch],
+    groups: &'a [Group],
+    images: &'a HashMap<u64, CachedImage>,
 }
 
 struct CachedImage {
@@ -483,10 +497,6 @@ pub struct Occupancy {
 }
 
 pub struct Renderer {
-    #[cfg(feature = "wgpu")]
-    pub device: wgpu::Device,
-    #[cfg(feature = "wgpu")]
-    pub queue: wgpu::Queue,
     gpu: backend::Gpu,
     vertices: Vec<Vertex>,
     glyphs: HashMap<AtlasKey, Option<AtlasGlyph>>,
@@ -501,16 +511,8 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    fn with_gpu(
-        #[cfg(feature = "wgpu")] device: wgpu::Device,
-        #[cfg(feature = "wgpu")] queue: wgpu::Queue,
-        gpu: backend::Gpu,
-    ) -> Self {
+    fn with_gpu(gpu: backend::Gpu) -> Self {
         let renderer = Self {
-            #[cfg(feature = "wgpu")]
-            device,
-            #[cfg(feature = "wgpu")]
-            queue,
             gpu,
             vertices: Vec::new(),
             glyphs: HashMap::new(),
@@ -522,15 +524,24 @@ impl Renderer {
             pen: [1, 0],
             row_height: 1,
         };
-        renderer.write_atlas([0, 0], [1, 1], &[255; 4]);
+        renderer.gpu.write_atlas([0, 0], [1, 1], &[255; 4]);
         renderer
+    }
+
+    /// The widest and tallest texture the device takes, in pixels.
+    pub fn max_texture_dimension(&self) -> u32 {
+        self.gpu.max_texture_dimension()
+    }
+
+    fn atlas_side(&self) -> u32 {
+        self.gpu.atlas_side()
     }
 
     /// Replaces the atlas with an empty one twice as wide and tall.
     fn grow_atlas(&mut self) {
-        self.new_atlas(self.atlas_side() * 2);
+        self.gpu.new_atlas(self.atlas_side() * 2);
         self.clear_glyph_cache();
-        self.write_atlas([0, 0], [1, 1], &[255; 4]);
+        self.gpu.write_atlas([0, 0], [1, 1], &[255; 4]);
     }
 
     fn glyph_limit(&self) -> usize {
@@ -666,7 +677,13 @@ impl Renderer {
                 break;
             }
         }
-        self.submit(target, size, clear);
+        let frame = Frame {
+            vertices: &self.vertices,
+            batches: &self.batches,
+            groups: &self.groups,
+            images: &self.images,
+        };
+        self.gpu.submit(&frame, target, size, clear);
         Ok(())
     }
 
@@ -740,12 +757,13 @@ impl Renderer {
             return Err(RenderError::FrameTooLarge);
         }
         let from = self.vertices.len() as u32;
+        let flipped = self.gpu.flipped();
         let corner = |x: f32, y: f32| {
             let [shown_x, shown_y] = motion.project([x, y], height);
             let v = y / height;
             Vertex {
                 position: [shown_x * 2.0 / width - 1.0, 1.0 - shown_y * 2.0 / height],
-                uv: [x / width, if backend::FLIPPED { 1.0 - v } else { v }],
+                uv: [x / width, if flipped { 1.0 - v } else { v }],
                 color: [motion.opacity; 4],
                 local: [0.0; 2],
                 shape: [0.0; 4],
@@ -946,7 +964,7 @@ impl Renderer {
         self.images.insert(
             image.id(),
             CachedImage {
-                texture: self.upload_image(image),
+                texture: self.gpu.upload_image(image),
                 bytes,
                 pixels: image.pixels.downgrade(),
             },
@@ -1123,7 +1141,8 @@ impl Renderer {
                 .collect(),
             _ => image.data,
         };
-        self.write_atlas([cached.x, cached.y], [p.width, p.height], &rgba);
+        self.gpu
+            .write_atlas([cached.x, cached.y], [p.width, p.height], &rgba);
         self.pen[0] += p.width + 1;
         self.row_height = self.row_height.max(p.height);
         Ok(cached)
@@ -1928,7 +1947,9 @@ mod tests {
         }
 
         fn capture(&self, renderer: &Renderer) -> Vec<u8> {
-            let mut encoder = renderer.device.create_command_encoder(&Default::default());
+            let mut encoder = renderer
+                .device()
+                .create_command_encoder(&Default::default());
             encoder.copy_texture_to_buffer(
                 self.texture.as_image_copy(),
                 wgpu::TexelCopyBufferInfo {
@@ -1945,14 +1966,14 @@ mod tests {
                     depth_or_array_layers: 1,
                 },
             );
-            renderer.queue.submit([encoder.finish()]);
+            renderer.queue().submit([encoder.finish()]);
             let (sender, receiver) = std::sync::mpsc::channel();
             self.readback
                 .map_async(wgpu::MapMode::Read, .., move |result| {
                     sender.send(result).unwrap();
                 });
             renderer
-                .device
+                .device()
                 .poll(wgpu::PollType::Wait {
                     submission_index: None,
                     timeout: Some(Duration::from_secs(5)),
@@ -2130,7 +2151,8 @@ mod tests {
                 renderer.clear_glyph_cache();
                 renderer.images.clear();
             } else if pass == 3 {
-                renderer = Renderer::new(renderer.device.clone(), renderer.queue.clone(), format);
+                renderer =
+                    Renderer::new(renderer.device().clone(), renderer.queue().clone(), format);
             }
             let clipping = [
                 Primitive::Text {

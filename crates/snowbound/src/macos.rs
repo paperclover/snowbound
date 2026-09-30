@@ -340,8 +340,8 @@ pub fn smb_mount(path: &std::path::Path) -> Option<crate::library::Mount> {
     if text(&mount.f_fstypename) != "smbfs" {
         return None;
     }
-    let within = path.strip_prefix(text(&mount.f_mntonname)).ok()?;
-    crate::library::Mount::parse(&text(&mount.f_mntfromname), &within.to_string_lossy(), "")
+    let within = crate::library::within_mount(path, &text(&mount.f_mntonname))?;
+    crate::library::Mount::parse(&text(&mount.f_mntfromname), &within, "")
 }
 
 #[allow(non_camel_case_types)]

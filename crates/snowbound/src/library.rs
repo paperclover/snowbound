@@ -57,10 +57,24 @@ pub struct Mount {
     pub root: String,
 }
 
+/// Where `path` sits below the mount point `point`, matched on its resolved path since
+/// the system reports mount points with symlinks (`/tmp`, `/var`) resolved.
+#[cfg(unix)]
+pub fn within_mount(path: &std::path::Path, point: &str) -> Option<String> {
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    Some(
+        path.strip_prefix(point)
+            .ok()?
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
 impl Mount {
     /// The mount of `source` (`//[domain;][user[:…]@]server/share[/folder]`), holding the
     /// folder `within` its mount point; `options` are the mount's (`username=`, `user=`,
     /// `domain=`), where the source names no account.
+    #[cfg_attr(windows, allow(dead_code))]
     pub fn parse(source: &str, within: &str, options: &str) -> Option<Self> {
         let source = source.strip_prefix("//")?;
         let (account, rest) = match source.rsplit_once('@') {
@@ -875,6 +889,22 @@ pub fn locate(path: &Path) -> Located {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn within_mount_resolves_symlinks() {
+        let base = std::env::temp_dir().join(format!("snowbound-within-{}", std::process::id()));
+        let point = base.join("point");
+        std::fs::create_dir_all(point.join("notes")).unwrap();
+        std::os::unix::fs::symlink(&point, base.join("link")).unwrap();
+        let point = std::fs::canonicalize(&point).unwrap();
+        let point = point.to_str().unwrap();
+        let found = within_mount(&base.join("link/notes"), point);
+        let missing = within_mount(&base.join("link/gone"), point);
+        std::fs::remove_dir_all(&base).unwrap();
+        assert_eq!(found.as_deref(), Some("notes"));
+        assert_eq!(missing, None);
+    }
 
     /// Removes the folder at `path` on the share and everything in it.
     fn remove_tree(client: &Client, path: &str) {

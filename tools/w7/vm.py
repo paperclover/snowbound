@@ -10,6 +10,7 @@ import re
 import secrets
 import shutil
 import socket
+import struct
 import subprocess
 import tempfile
 import time
@@ -30,12 +31,18 @@ IMAGES = VM_HOME / "images"
 MEDIA = VM_HOME / "media"
 INSTANCES = VM_HOME / "instances"
 RUN = VM_HOME / "run"
-DISK = IMAGES / "win7-office-build.qcow2"
-BASE_DISK = IMAGES / "win7-office-base.qcow2"
-BASE_MANIFEST = IMAGES / "win7-office-base.json"
 AGENT_ISO = MEDIA / "win7-agent.iso"
 TARGETS = VM_HOME / "targets.json"
+# Image stem and build-VM control port. Windows 7 is installed by hand from licensed
+# media; Windows 10 (x64) and 11 (arm64) install unattended from windows_media.py ISOs.
+BASES = {
+    "win7": ("win7-office", 18777),
+    "win10": ("win10", 18774),
+    "win11": ("win11", 18775),
+}
 BUILD = "win7-build"
+UNATTEND = Path(__file__).with_name("unattend")
+FIRMWARE = Path("/opt/homebrew/share/qemu")
 NAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,9}[a-z0-9])?")
 HOSTNAME = re.compile(r"[A-Z0-9](?:[A-Z0-9-]{0,13}[A-Z0-9])?")
 
@@ -54,6 +61,18 @@ def require_vm_home():
         volume = Path("/Volumes") / VM_HOME.parts[2]
         if not os.path.ismount(volume):
             raise SystemExit("VM volume is not mounted: %s" % volume)
+
+
+def build_disk(base):
+    return IMAGES / ("%s-build.qcow2" % BASES[base][0])
+
+
+def base_disk(base):
+    return IMAGES / ("%s-base.qcow2" % BASES[base][0])
+
+
+def base_manifest(base):
+    return IMAGES / ("%s-base.json" % BASES[base][0])
 
 
 def runtime(name):
@@ -91,7 +110,72 @@ def qmp(name, command, arguments=None):
                 raise SystemExit(response["error"]["desc"])
 
 
-def launch(name, disk, port, mac, cpus, memory_mb, display, drives):
+def uefi_vars(path, template, width=1024, height=768):
+    """Write an edk2 variable store whose PlatformConfig sets the GOP resolution.
+
+    Windows keeps the firmware's framebuffer mode, and 1024x768 is the largest mode
+    edk2 offers for ramfb on arm64."""
+    image = bytearray(template.read_bytes())
+    offset = struct.unpack_from("<H", image, 0x30)[0] + 28
+    while struct.unpack_from("<H", image, offset)[0] == 0x55AA:
+        name_size, data_size = struct.unpack_from("<II", image, offset + 36)
+        offset = (offset + 60 + name_size + data_size + 3) & ~3
+    name = "PlatformConfig\0".encode("utf-16-le")
+    data = struct.pack("<II", width, height)
+    guid = uuid.UUID("7235c51c-0c80-4cab-87ac-3b084a6304b1").bytes_le
+    record = struct.pack("<HBBIQ16sIII16s", 0x55AA, 0x3F, 0, 7, 0, bytes(16), 0,
+                         len(name), len(data), guid) + name + data
+    image[offset:offset + len(record)] = record
+    path.write_bytes(image)
+
+
+def machine(base, disk):
+    if base == "win7":
+        return [qemu("qemu-system-x86_64"), "-machine", "pc", "-accel", "tcg,thread=multi",
+                "-cpu", os.environ.get("ONE_VM_CPU", "qemu64"),
+                "-vga", "std", "-usb", "-device", "usb-tablet",
+                "-drive", "file=%s,if=ide,format=qcow2,cache=writeback" % disk], "e1000"
+    variables = disk.with_suffix(".vars.fd")
+    if base == "win10":
+        if not variables.exists():
+            uefi_vars(variables, FIRMWARE / "edk2-i386-vars.fd")
+        return [qemu("qemu-system-x86_64"), "-machine", "q35", "-accel", "tcg,thread=multi",
+                "-cpu", "max",
+                "-drive", "if=pflash,format=raw,readonly=on,file=%s" % (FIRMWARE / "edk2-x86_64-code.fd"),
+                "-drive", "if=pflash,format=raw,file=%s" % variables,
+                "-vga", "std", "-usb", "-device", "usb-tablet",
+                "-drive", "file=%s,if=none,id=disk,format=qcow2,cache=writeback" % disk,
+                "-device", "ide-hd,drive=disk,bus=ide.0,bootindex=0"], "e1000"
+    if not variables.exists():
+        uefi_vars(variables, FIRMWARE / "edk2-arm-vars.fd")
+    # Windows on Arm has inbox NVMe and xHCI drivers; lab-setup.cmd adds NetKVM.
+    return [qemu("qemu-system-aarch64"), "-machine", "virt", "-accel", "hvf", "-cpu", "host",
+            "-drive", "if=pflash,format=raw,readonly=on,file=%s" % (FIRMWARE / "edk2-aarch64-code.fd"),
+            "-drive", "if=pflash,format=raw,file=%s" % variables,
+            "-device", "ramfb", "-device", "qemu-xhci",
+            "-device", "usb-kbd", "-device", "usb-tablet",
+            "-drive", "file=%s,if=none,id=disk,format=qcow2,cache=writeback" % disk,
+            "-device", "nvme,drive=disk,serial=one,bootindex=0"], "virtio-net-pci"
+
+
+def cdroms(base, images):
+    """Attach read-only discs. UEFI guests try the disk first, so an installer CD
+    boots only until Windows has made the disk bootable."""
+    drives = []
+    for index, image in enumerate(images, 1):
+        drive = "file=%s,file.locking=off,media=cdrom,readonly=on" % image
+        if base == "win7":
+            drives += ["-drive", drive + ",if=ide"]
+            continue
+        drives += ["-drive", drive + ",if=none,id=cd%d" % index, "-device"]
+        if base == "win10":
+            drives.append("ide-cd,drive=cd%d,bus=ide.%d,bootindex=%d" % (index, index, index))
+        else:
+            drives.append("usb-storage,drive=cd%d,bootindex=%d" % (index, index))
+    return drives
+
+
+def launch(name, base, disk, port, mac, cpus, memory_mb, display, images, answers=None):
     require_vm_home()
     if running(name):
         raise SystemExit("Windows is already running: %s" % name)
@@ -99,30 +183,26 @@ def launch(name, disk, port, mac, cpus, memory_mb, display, drives):
     root.mkdir(parents=True, exist_ok=True)
     qmp_socket.unlink(missing_ok=True)
     lab_socket = ensure_hub(VM_HOME)
-    command = [
-        qemu("qemu-system-x86_64"),
+    command, nic = machine(base, disk)
+    command += [
+        # crash.py matches this name to confirm a process belongs to the clone.
         "-name", "OneNote Windows 7 " + name,
-        "-machine", "pc",
-        "-accel", "tcg,thread=multi",
-        "-cpu", "qemu64",
         "-smp", str(cpus),
         "-m", str(memory_mb),
-        "-drive", "file=%s,if=ide,format=qcow2,cache=writeback" % disk,
-        "-vga", "std",
         "-display", display,
-        "-usb",
-        "-device", "usb-tablet",
         "-netdev", "user,id=control,hostfwd=tcp:127.0.0.1:%d-:8777" % port,
-        "-device", "e1000,netdev=control,mac=%s" % mac,
+        "-device", "%s,netdev=control,mac=%s" % (nic, mac),
         "-netdev", "vde,id=lab,sock=%s" % lab_socket,
-        "-device", "e1000,netdev=lab,mac=%s" % lab_mac(name),
+        "-device", "%s,netdev=lab,mac=%s" % (nic, lab_mac(name)),
         "-uuid", uuid_for(name),
         "-rtc", "base=localtime,clock=host,driftfix=slew",
         "-qmp", "unix:%s,server=on,wait=off" % qmp_socket,
         "-pidfile", str(pid),
-    ]
-    for drive in drives:
-        command += ["-drive", drive]
+    ] + cdroms(base, images)
+    if answers:
+        # Setup reads autounattend.xml from the root of a removable drive.
+        command += ["-drive", "file=fat:%s,format=raw,if=none,id=answers,readonly=on" % answers,
+                    "-device", "usb-storage,drive=answers,removable=on"]
     with log_path.open("ab") as log:
         subprocess.Popen(
             command,
@@ -139,23 +219,45 @@ def launch(name, disk, port, mac, cpus, memory_mb, display, drives):
     raise SystemExit("Windows did not open. Check: %s" % log_path)
 
 
-def start_build(install):
-    if install and not ISO.is_file():
-        raise SystemExit("Windows ISO not found: %s" % ISO)
-    if not DISK.exists():
+def stage_answers(base):
+    """Copy unattend/ into the build's runtime directory with this base filled in."""
+    root = runtime(base + "-build")[0] / "answers"
+    shutil.rmtree(root, ignore_errors=True)
+    shutil.copytree(UNATTEND, root)
+    answers = root / "autounattend.xml"
+    text = answers.read_text().replace("{arch}", "arm64" if base == "win11" else "amd64")
+    answers.write_text(text.replace("{hostname}", "ONE-" + base.upper()))
+    if base == "win11":
+        shutil.copytree(MEDIA / "netkvm-arm64", root / "netkvm")
+    return root
+
+
+def start_build(base, install, display):
+    disk = build_disk(base)
+    iso = ISO if base == "win7" else MEDIA / ("%s.iso" % base)
+    if install and not iso.is_file():
+        raise SystemExit("Windows ISO not found: %s (run ./windows_media.py %s)" % (iso, base))
+    if not disk.exists():
         if not install:
-            raise SystemExit("No Windows disk found. Run: ./vm.py install")
+            raise SystemExit("No Windows disk found. Run: ./vm.py install --base %s" % base)
         IMAGES.mkdir(parents=True, exist_ok=True)
         subprocess.run(
-            [qemu("qemu-img"), "create", "-f", "qcow2", str(DISK), "64G"],
+            [qemu("qemu-img"), "create", "-f", "qcow2", str(disk), "64G"],
             check=True,
         )
-    drives = []
+    images, answers = [], None
     if install:
-        drives.append("file=%s,file.locking=off,if=ide,media=cdrom,readonly=on" % ISO)
+        images.append(iso)
+        if base != "win7":
+            build_agent_iso()
+            images.append(AGENT_ISO)
+            answers = stage_answers(base)
     elif AGENT_ISO.exists():
-        drives.append("file=%s,file.locking=off,if=ide,media=cdrom,readonly=on" % AGENT_ISO)
-    launch(BUILD, DISK, 18777, "52:54:00:10:77:01", 4, 4096, "cocoa", drives)
+        images.append(AGENT_ISO)
+    port = BASES[base][1]
+    # The Windows 7 build is finished by hand, so it opens a window by default.
+    launch(base + "-build", base, disk, port, mac_for(port), 4, 4096,
+           "cocoa" if display or base == "win7" else "none", images, answers)
 
 
 def instance_path(name):
@@ -197,7 +299,7 @@ def configs():
 
 
 def available_port(requested=None):
-    used = {18777}
+    used = {port for _stem, port in BASES.values()}
     used.update(config["port"] for _name, config in configs())
     candidates = [requested] if requested else range(18778, 18878)
     for port in candidates:
@@ -271,10 +373,10 @@ def update_target(name, port=None, token=None):
     TARGETS.chmod(0o600)
 
 
-def create_instance(name, hostname=None, cpus=2, memory_mb=4096, port=None):
+def create_instance(name, hostname=None, cpus=2, memory_mb=4096, port=None, base="win7"):
     require_vm_home()
     validate_name(name)
-    if name in ("local", BUILD):
+    if name == "local" or name in ("%s-build" % b for b in BASES):
         raise SystemExit("VM name is reserved: %s" % name)
     hostname = (hostname or ("ONE-" + name)).upper()
     if not HOSTNAME.fullmatch(hostname):
@@ -283,8 +385,9 @@ def create_instance(name, hostname=None, cpus=2, memory_mb=4096, port=None):
         raise SystemExit("CPU count must be between 1 and 16")
     if not 1024 <= memory_mb <= 65536:
         raise SystemExit("Memory must be between 1024 and 65536 MiB")
-    if not BASE_DISK.is_file() or not BASE_MANIFEST.is_file():
-        raise SystemExit("No sealed base image. Finish the build, then run: ./vm.py seal")
+    if not base_disk(base).is_file() or not base_manifest(base).is_file():
+        raise SystemExit("No sealed %s base image. Finish the build, then run: "
+                         "./vm.py seal --base %s" % (base, base))
     VM_HOME.mkdir(parents=True, exist_ok=True)
     with (VM_HOME / ".lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -303,13 +406,13 @@ def create_instance(name, hostname=None, cpus=2, memory_mb=4096, port=None):
         try:
             subprocess.run([
                 qemu("qemu-img"), "create", "-f", "qcow2", "-F", "qcow2",
-                "-b", str(BASE_DISK), str(temporary),
+                "-b", str(base_disk(base)), str(temporary),
             ], check=True)
             make_instance_iso(instance_iso, hostname, token)
             instance_iso.chmod(0o600)
             temporary.replace(overlay)
-            config = {"cpus": cpus, "hostname": hostname, "memory_mb": memory_mb,
-                      "port": port, "token": token}
+            config = {"base": base, "cpus": cpus, "hostname": hostname,
+                      "memory_mb": memory_mb, "port": port, "token": token}
             atomic_json(instance_path(name), config)
             instance_path(name).chmod(0o600)
             update_target(name, port, token)
@@ -319,8 +422,8 @@ def create_instance(name, hostname=None, cpus=2, memory_mb=4096, port=None):
             overlay.unlink(missing_ok=True)
             instance_path(name).unlink(missing_ok=True)
             raise
-    print(json.dumps({"cpus": cpus, "hostname": hostname, "memory_mb": memory_mb,
-                      "name": name, "port": port}, sort_keys=True))
+    print(json.dumps({"base": base, "cpus": cpus, "hostname": hostname,
+                      "memory_mb": memory_mb, "name": name, "port": port}, sort_keys=True))
 
 
 def start_instance(name, display=False):
@@ -329,12 +432,9 @@ def start_instance(name, display=False):
     instance_iso = MEDIA / "instances" / (name + ".iso")
     if not overlay.is_file() or not instance_iso.is_file():
         raise SystemExit("VM artifacts are incomplete: %s" % name)
-    drives = []
-    for drive in (AGENT_ISO, instance_iso):
-        if drive.is_file():
-            drives.append("file=%s,file.locking=off,if=ide,media=cdrom,readonly=on" % drive)
-    launch(name, overlay, config["port"], mac_for(config["port"]), config["cpus"],
-           config["memory_mb"], "cocoa" if display else "none", drives)
+    images = [image for image in (AGENT_ISO, instance_iso) if image.is_file()]
+    launch(name, config.get("base", "win7"), overlay, config["port"], mac_for(config["port"]),
+           config["cpus"], config["memory_mb"], "cocoa" if display else "none", images)
 
 
 def wait_instance(name, timeout):
@@ -391,6 +491,7 @@ def delete_instance(name):
         if running(name):
             raise SystemExit("Shut down Windows before deleting: %s" % name)
         (IMAGES / "instances" / (name + ".qcow2")).unlink(missing_ok=True)
+        (IMAGES / "instances" / (name + ".vars.fd")).unlink(missing_ok=True)
         (MEDIA / "instances" / (name + ".iso")).unlink(missing_ok=True)
         instance_path(name).unlink()
         shutil.rmtree(runtime(name)[0], ignore_errors=True)
@@ -398,37 +499,39 @@ def delete_instance(name):
     print("Deleted VM: %s" % name)
 
 
-def seal():
+def seal(base="win7"):
     require_vm_home()
-    if running(BUILD):
+    disk, sealed, manifest = build_disk(base), base_disk(base), base_manifest(base)
+    if running(base + "-build"):
         raise SystemExit("Shut down Windows before sealing the base image")
-    if not DISK.exists():
+    if not disk.exists():
         raise SystemExit("No Windows build disk found")
-    temporary = BASE_DISK.with_suffix(".tmp.qcow2")
-    if BASE_DISK.exists() or temporary.exists():
+    temporary = sealed.with_suffix(".tmp.qcow2")
+    if sealed.exists() or temporary.exists():
         raise SystemExit("Move the existing base image before sealing another")
-    subprocess.run([qemu("qemu-img"), "check", str(DISK)], check=True)
+    subprocess.run([qemu("qemu-img"), "check", str(disk)], check=True)
     subprocess.run([qemu("qemu-img"), "convert", "-p", "-O", "qcow2",
-                    "-o", "lazy_refcounts=off", str(DISK), str(temporary)], check=True)
+                    "-o", "lazy_refcounts=off", str(disk), str(temporary)], check=True)
     subprocess.run([qemu("qemu-img"), "check", str(temporary)], check=True)
-    temporary.replace(BASE_DISK)
+    temporary.replace(sealed)
     digest = hashlib.sha256()
-    with BASE_DISK.open("rb") as image:
+    with sealed.open("rb") as image:
         while chunk := image.read(8 * 1024 * 1024):
             digest.update(chunk)
     info = json.loads(subprocess.check_output([
-        qemu("qemu-img"), "info", "--output=json", str(BASE_DISK),
+        qemu("qemu-img"), "info", "--output=json", str(sealed),
     ]))
-    atomic_json(BASE_MANIFEST, {"file": BASE_DISK.name, "format": info["format"],
-                               "sha256": digest.hexdigest(),
-                               "virtual_size": info["virtual-size"]})
-    BASE_DISK.chmod(0o444)
-    print(BASE_MANIFEST)
+    atomic_json(manifest, {"file": sealed.name, "format": info["format"],
+                           "sha256": digest.hexdigest(),
+                           "virtual_size": info["virtual-size"]})
+    sealed.chmod(0o444)
+    print(manifest)
 
 
-def fetch_base(manifest_url):
+def fetch_base(manifest_url, base="win7"):
     require_vm_home()
-    if BASE_DISK.exists() or BASE_MANIFEST.exists():
+    sealed, manifest_path = base_disk(base), base_manifest(base)
+    if sealed.exists() or manifest_path.exists():
         raise SystemExit("Move the existing base image before fetching another")
     headers = {}
     if os.environ.get("ONE_VM_AUTHORIZATION"):
@@ -440,7 +543,7 @@ def fetch_base(manifest_url):
         raise SystemExit("Base manifest has no valid SHA-256")
     image_url = urllib.parse.urljoin(manifest_url, manifest.get("file", ""))
     IMAGES.mkdir(parents=True, exist_ok=True)
-    temporary = BASE_DISK.with_suffix(".download.qcow2")
+    temporary = sealed.with_suffix(".download.qcow2")
     digest = hashlib.sha256()
     try:
         with urllib.request.urlopen(urllib.request.Request(image_url, headers=headers)) as response:
@@ -452,13 +555,13 @@ def fetch_base(manifest_url):
             temporary.unlink(missing_ok=True)
             raise SystemExit("Downloaded base image failed SHA-256 verification")
         subprocess.run([qemu("qemu-img"), "check", str(temporary)], check=True)
-        temporary.replace(BASE_DISK)
-        BASE_DISK.chmod(0o444)
-        atomic_json(BASE_MANIFEST, dict(manifest, file=BASE_DISK.name))
+        temporary.replace(sealed)
+        sealed.chmod(0o444)
+        atomic_json(manifest_path, dict(manifest, file=sealed.name))
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
-    print(BASE_MANIFEST)
+    print(manifest_path)
 
 
 def list_instances():
@@ -468,25 +571,29 @@ def list_instances():
         return
     for name, config in rows:
         state = "running" if running(name) else "stopped"
-        print("%-11s %-15s %-7s http://127.0.0.1:%d" %
-              (name, config["hostname"], state, config["port"]))
+        print("%-11s %-5s %-15s %-7s http://127.0.0.1:%d" %
+              (name, config.get("base", "win7"), config["hostname"], state, config["port"]))
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Run OneNote Windows 7 VMs")
+    parser = argparse.ArgumentParser(description="Run OneNote Windows lab VMs")
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("install")
-    commands.add_parser("run")
+    base_option = {"choices": sorted(BASES), "default": "win7"}
+    for verb in ("install", "run"):
+        build = commands.add_parser(verb)
+        build.add_argument("--base", **base_option)
+        build.add_argument("--display", action="store_true")
     status = commands.add_parser("status")
     status.add_argument("name", nargs="?")
     power = commands.add_parser("poweroff")
     power.add_argument("name", nargs="?", default=BUILD)
     shot = commands.add_parser("screenshot")
     shot.add_argument("name", nargs="?", default=BUILD)
-    commands.add_parser("seal")
+    commands.add_parser("seal").add_argument("--base", **base_option)
     commands.add_parser("media")
     up = commands.add_parser("up")
     up.add_argument("name")
+    up.add_argument("--base", **base_option)
     up.add_argument("--hostname")
     up.add_argument("--cpus", type=int, default=2)
     up.add_argument("--memory", type=int, default=4096, dest="memory_mb")
@@ -500,14 +607,13 @@ def main():
     down.add_argument("--preserve-machine", action="store_true")
     fetch = commands.add_parser("fetch")
     fetch.add_argument("manifest_url")
+    fetch.add_argument("--base", **base_option)
     args = parser.parse_args()
-    if args.command == "install":
-        start_build(True)
-    elif args.command == "run":
-        start_build(False)
+    if args.command in ("install", "run"):
+        start_build(args.base, args.command == "install", args.display)
     elif args.command == "status":
         if args.name:
-            if args.name == BUILD:
+            if args.name in ("%s-build" % b for b in BASES):
                 print("running" if running(args.name) else "stopped")
             elif not instance_path(args.name).exists():
                 print("absent")
@@ -521,12 +627,13 @@ def main():
     elif args.command == "screenshot":
         screenshot(args.name)
     elif args.command == "seal":
-        seal()
+        seal(args.base)
     elif args.command == "media":
         build_agent_iso()
     elif args.command == "up":
         if not instance_path(args.name).exists():
-            create_instance(args.name, args.hostname, args.cpus, args.memory_mb, args.port)
+            create_instance(args.name, args.hostname, args.cpus, args.memory_mb, args.port,
+                            args.base)
         if running(args.name):
             print("Windows already running: %s" % args.name)
         else:
@@ -545,7 +652,7 @@ def main():
             else:
                 delete_instance(args.name)
     else:
-        fetch_base(args.manifest_url)
+        fetch_base(args.manifest_url, args.base)
 
 
 if __name__ == "__main__":

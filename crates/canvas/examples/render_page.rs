@@ -85,7 +85,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &[viewport.layer(&primitives)],
         )
         .map_err(|e| format!("Page comparison rendering failed: {e:?}"))?;
-    let mut encoder = renderer.device.create_command_encoder(&Default::default());
+    let mut encoder = renderer
+        .device()
+        .create_command_encoder(&Default::default());
     encoder.copy_texture_to_buffer(
         target.as_image_copy(),
         wgpu::TexelCopyBufferInfo {
@@ -102,12 +104,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             depth_or_array_layers: 1,
         },
     );
-    renderer.queue.submit([encoder.finish()]);
+    renderer.queue().submit([encoder.finish()]);
     let (sender, receiver) = std::sync::mpsc::channel();
     buffer.map_async(wgpu::MapMode::Read, .., move |result| {
         let _ = sender.send(result);
     });
-    renderer.device.poll(wgpu::PollType::Wait {
+    renderer.device().poll(wgpu::PollType::Wait {
         submission_index: None,
         timeout: Some(Duration::from_secs(10)),
     })?;

@@ -10,7 +10,7 @@ fn main() {
 
 fn run() {
     let _context = context::current();
-    let mut renderer = draw::Renderer::new().unwrap_or_else(|error| panic!("{error}"));
+    let mut renderer = draw::Renderer::opengl().unwrap_or_else(|error| panic!("{error}"));
     let target = draw::Target::new(scene::SIZE).unwrap();
     let checker = scene::checker();
     let primitives = scene::primitives(&checker);

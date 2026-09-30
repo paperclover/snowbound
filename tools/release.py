@@ -17,7 +17,10 @@ PUBLISHED = Path('/Volumes/clover/Documents/Public/Snowbound')
 URL = 'https://file.paperclover.net/shr/snowbound/'
 KEY = Path.home() / '.config/snowbound/release-key'
 ZONE = ZoneInfo('America/Los_Angeles')
-PLATFORMS = ['macos-aarch64', 'macos-10.6', 'linux-x86_64', 'linux-aarch64']
+PLATFORMS = ['macos-aarch64', 'macos-10.6', 'linux-x86_64', 'linux-aarch64', 'windows-x86_64',
+             'windows-aarch64']
+# Windows 7 to 11 on x86_64 (nightly's tier-3 win7 target), and Windows 11 on Arm.
+WINDOWS = {'x86_64': 'x86_64-win7-windows-gnu', 'aarch64': 'aarch64-pc-windows-gnullvm'}
 CHECKS = [
     ['cargo', 'clippy', '--workspace', '--all-targets', '--all-features', '--', '-D', 'warnings'],
     ['cargo', 'clippy', '-p', 'snowbound', '--no-default-features', '--', '-D', 'warnings'],
@@ -128,6 +131,17 @@ def build_linux(architectures):
     return {f'linux-{arch}': ROOT / f'target/{arch}-unknown-linux-gnu/release/snowbound' for arch in architectures}
 
 
+def build_windows(architectures):
+    """The executables, each all of Snowbound for its architecture, one running on every
+    Windows it supports."""
+    built = {}
+    for arch in architectures:
+        run(['sh', ROOT / 'platform/windows/cargo.sh', arch, 'build', '--release', '-p', 'snowbound'],
+            env={**os.environ, 'CARGO_PROFILE_RELEASE_STRIP': 'symbols'})
+        built[f'windows-{arch}'] = ROOT / f'target/windows/{WINDOWS[arch]}/release/snowbound.exe'
+    return built
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--dry-run', action='store_true',
@@ -178,6 +192,9 @@ def main():
         linux = [platform.removeprefix('linux-') for platform in args.platforms if platform.startswith('linux')]
         if linux:
             built |= build_linux(linux)
+        windows = [platform.removeprefix('windows-') for platform in args.platforms if platform.startswith('windows')]
+        if windows:
+            built |= build_windows(windows)
         clean(args.dry_run, 'after the build')
         files = {}
         for platform, source in built.items():

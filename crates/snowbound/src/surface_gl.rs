@@ -69,7 +69,7 @@ impl Surface {
             }
             context
         };
-        let renderer = Renderer::new()?;
+        let renderer = Renderer::opengl()?;
         eprintln!("Canvas GPU: OpenGL");
         let size = window.inner_size();
         Ok((

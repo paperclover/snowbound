@@ -1,4 +1,4 @@
-//! iCloud Drive is Apple's; on Linux no folder is in it.
+//! iCloud Drive is Apple's; on Linux and Windows no folder is in it.
 
 use notebook::session::{Background, Notebook, Section};
 use std::path::{Path, PathBuf};

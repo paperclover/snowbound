@@ -35,7 +35,7 @@ pub fn primitives(checker: &RasterImage) -> Vec<Primitive<'_>> {
 }
 
 pub fn layer<'a>(primitives: &'a [Primitive<'a>]) -> Layer<'a> {
-    Layer { scale: 1.0, origin: [0.0; 2], clip: None, backdrop: None, motion: None, primitives }
+    Layer { scale: 1.0, origin: [0.0; 2], clip: None, backdrop: None, round: None, motion: None, primitives }
 }
 
 /// Lines of interface text through `ui`: black on white like a Cocoa label, the same in

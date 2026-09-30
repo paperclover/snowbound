@@ -7,7 +7,7 @@ mod scene;
 fn main() {
     objc2::rc::autoreleasepool(|_| {
         let _context = context::current();
-        let mut renderer = draw::Renderer::new().unwrap_or_else(|error| panic!("{error}"));
+        let mut renderer = draw::Renderer::opengl().unwrap_or_else(|error| panic!("{error}"));
         let target = draw::Target::new(scene::TEXT_SIZE).unwrap();
         let ui = scene::interface(1.0);
         let layers = ui.layers();

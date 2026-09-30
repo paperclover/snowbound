@@ -1,7 +1,8 @@
 //! Submission through OpenGL 2.1 with EXT_framebuffer_object, EXT_framebuffer_blit and
 //! the sRGB extensions, which every Mac OS X 10.6 driver has and OpenGL.framework
-//! exports. Frames draw into an sRGB framebuffer object, so blending happens in linear
-//! light as it does in wgpu's sRGB targets.
+//! exports; on Windows, where opengl32.dll exports only OpenGL 1.1, the driver supplies
+//! them through `wglGetProcAddress`. Frames draw into an sRGB framebuffer object, so
+//! blending happens in linear light as it does in wgpu's sRGB targets.
 #![allow(non_snake_case)]
 use super::*;
 use std::{
@@ -53,8 +54,95 @@ const COLOR_ATTACHMENT0: GLenum = 0x8CE0;
 const FRAMEBUFFER: GLenum = 0x8D40;
 const FRAMEBUFFER_SRGB: GLenum = 0x8DB9;
 
-#[cfg_attr(target_os = "macos", link(name = "OpenGL", kind = "framework"))]
-unsafe extern "C" {
+/// The entry points: linked where the system library exports them all, and on Windows
+/// loaded with the first context and called through `FUNCTIONS`.
+macro_rules! functions {
+    ($(fn $name:ident($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)?;)*) => {
+        #[cfg(not(windows))]
+        #[cfg_attr(target_os = "macos", link(name = "OpenGL", kind = "framework"))]
+        unsafe extern "C" {
+            $(fn $name($($arg: $ty),*) $(-> $ret)?;)*
+        }
+
+        #[cfg(windows)]
+        struct Functions {
+            $($name: unsafe extern "system" fn($($ty),*) $(-> $ret)?,)*
+        }
+
+        #[cfg(windows)]
+        static FUNCTIONS: std::sync::OnceLock<Functions> = std::sync::OnceLock::new();
+
+        /// Loads the entry points from the context current on this thread.
+        #[cfg(windows)]
+        fn load() -> Result<(), String> {
+            if FUNCTIONS.get().is_none() {
+                let functions = Functions {
+                    $($name: unsafe {
+                        std::mem::transmute::<
+                            *const c_void,
+                            unsafe extern "system" fn($($ty),*) $(-> $ret)?,
+                        >(windows::address(concat!(stringify!($name), "\0"))?)
+                    },)*
+                };
+                let _ = FUNCTIONS.set(functions);
+            }
+            Ok(())
+        }
+
+        $(
+            #[cfg(windows)]
+            #[allow(clippy::too_many_arguments)]
+            unsafe fn $name($($arg: $ty),*) $(-> $ret)? {
+                unsafe { (FUNCTIONS.get().expect("OpenGL is loaded").$name)($($arg),*) }
+            }
+        )*
+    };
+}
+
+#[cfg(not(windows))]
+fn load() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+mod windows {
+    use std::ffi::{c_char, c_void};
+
+    #[link(name = "opengl32")]
+    unsafe extern "system" {
+        fn wglGetProcAddress(name: *const c_char) -> *const c_void;
+    }
+
+    unsafe extern "system" {
+        fn GetModuleHandleA(name: *const c_char) -> *mut c_void;
+        fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *const c_void;
+    }
+
+    /// OpenGL function `name`, NUL-terminated: from the driver, or opengl32.dll's own for
+    /// OpenGL 1.1. An `EXT` name the driver lacks falls back to its core name.
+    pub(super) fn address(name: &str) -> Result<*const c_void, String> {
+        let find = |name: &str| unsafe {
+            let driver = wglGetProcAddress(name.as_ptr().cast());
+            // Some drivers answer a missing name with a small integer rather than null.
+            if !matches!(driver as isize, -1..=3) {
+                return Some(driver);
+            }
+            let system = GetProcAddress(
+                GetModuleHandleA(c"opengl32.dll".as_ptr()),
+                name.as_ptr().cast(),
+            );
+            (!system.is_null()).then_some(system)
+        };
+        find(name)
+            .or_else(|| {
+                let core = name.strip_suffix("EXT\0")?;
+                find(&format!("{core}\0"))
+            })
+            .ok_or_else(|| format!("OpenGL has no {}", name.trim_end_matches('\0')))
+    }
+}
+
+functions! {
     fn glEnable(cap: GLenum);
     fn glDisable(cap: GLenum);
     fn glGetIntegerv(name: GLenum, value: *mut GLint);
@@ -203,6 +291,12 @@ impl Drop for Image {
     }
 }
 
+impl AsRef<Image> for Image {
+    fn as_ref(&self) -> &Image {
+        self
+    }
+}
+
 /// An offscreen frame a window shows by `present`, the context's default framebuffer
 /// being no sRGB target.
 pub struct Target {
@@ -290,9 +384,6 @@ impl Drop for Target {
     }
 }
 
-/// Whether an offscreen picture's rows run bottom first.
-pub(super) const FLIPPED: bool = true;
-
 pub(super) struct Gpu {
     program: GLuint,
     buffer: GLuint,
@@ -318,10 +409,24 @@ const ATTRIBUTES: [(&CStr, GLint, usize); 9] = [
     (c"blur", 1, offset_of!(Vertex, blur)),
 ];
 
+#[cfg(not(feature = "wgpu"))]
 impl Renderer {
     /// Draws with the OpenGL context current on this thread, which must stay current
     /// whenever the renderer or a `Target` is used.
-    pub fn new() -> Result<Self, String> {
+    pub fn opengl() -> Result<Self, String> {
+        Gpu::new().map(Self::with_gpu)
+    }
+
+    /// Copies `target` to the context's window, the same size, premultiplying each pixel
+    /// again in sRGB, as a window server compositing a transparent surface needs.
+    pub fn present_translucent(&self, target: &Target) {
+        self.gpu.present_translucent(target);
+    }
+}
+
+impl Gpu {
+    pub(super) fn new() -> Result<Self, String> {
+        load()?;
         let names: Vec<_> = ATTRIBUTES.iter().map(|(name, _, _)| *name).collect();
         let draw = unsafe { program(include_str!("../draw.glsl"), &names)? };
         let translucent = unsafe { program(include_str!("translucent.glsl"), &[c"position"])? };
@@ -340,7 +445,7 @@ impl Renderer {
             );
             glGetIntegerv(MAX_TEXTURE_SIZE, &mut max_texture);
         }
-        Ok(Self::with_gpu(Gpu {
+        Ok(Gpu {
             program: draw,
             buffer,
             translucent,
@@ -348,14 +453,12 @@ impl Renderer {
             atlas: Image::new([ATLAS_SIZE; 2], NEAREST, None),
             max_texture: max_texture as u32,
             groups: Vec::new(),
-        }))
+        })
     }
 
-    /// Copies `target` to the context's window, the same size, premultiplying each pixel
-    /// again in sRGB, as a window server compositing a transparent surface needs.
-    pub fn present_translucent(&self, target: &Target) {
+    pub(super) fn present_translucent(&self, target: &Target) {
         let [width, height] = target.size().map(|side| side as f32);
-        let program = self.gpu.translucent;
+        let program = self.translucent;
         unsafe {
             glBindFramebufferEXT(FRAMEBUFFER, 0);
             glDisable(FRAMEBUFFER_SRGB);
@@ -371,7 +474,7 @@ impl Renderer {
             );
             glActiveTexture(TEXTURE0);
             glBindTexture(TEXTURE_2D, target.texture.name);
-            glBindBuffer(ARRAY_BUFFER, self.gpu.triangle);
+            glBindBuffer(ARRAY_BUFFER, self.triangle);
             for index in 1..ATTRIBUTES.len() {
                 glDisableVertexAttribArray(index as GLuint);
             }
@@ -381,22 +484,26 @@ impl Renderer {
         }
     }
 
-    /// The widest and tallest texture the driver takes, in pixels.
-    pub fn max_texture_dimension(&self) -> u32 {
-        self.gpu.max_texture
+    /// Offscreen pictures' rows run bottom first.
+    pub(super) fn flipped(&self) -> bool {
+        true
+    }
+
+    pub(super) fn max_texture_dimension(&self) -> u32 {
+        self.max_texture
     }
 
     pub(super) fn atlas_side(&self) -> u32 {
-        self.gpu.atlas.size[0]
+        self.atlas.size[0]
     }
 
     pub(super) fn new_atlas(&mut self, side: u32) {
-        self.gpu.atlas = Image::new([side; 2], NEAREST, None);
+        self.atlas = Image::new([side; 2], NEAREST, None);
     }
 
     pub(super) fn write_atlas(&self, origin: [u32; 2], size: [u32; 2], rgba: &[u8]) {
         unsafe {
-            glBindTexture(TEXTURE_2D, self.gpu.atlas.name);
+            glBindTexture(TEXTURE_2D, self.atlas.name);
             glTexSubImage2D(
                 TEXTURE_2D,
                 0,
@@ -417,23 +524,28 @@ impl Renderer {
 
     /// Clears `target`, `size` device pixels, to linear `clear` and draws the prepared
     /// batches, each group's offscreen first.
-    pub(super) fn submit(&mut self, target: &Target, size: [u32; 2], clear: [f32; 4]) {
+    pub(super) fn submit(
+        &mut self,
+        frame: &Frame<'_>,
+        target: &Target,
+        size: [u32; 2],
+        clear: [f32; 4],
+    ) {
         if self
-            .gpu
             .groups
             .first()
             .is_some_and(|picture| picture.size() != size)
         {
-            self.gpu.groups.clear();
+            self.groups.clear();
         }
-        while self.gpu.groups.len() < self.groups.len() {
+        while self.groups.len() < frame.groups.len() {
             match Target::new(size) {
                 Ok(picture) => unsafe {
                     // Filtered, so a picture leaning back stays smooth.
                     glBindTexture(TEXTURE_2D, picture.texture.name);
                     glTexParameteri(TEXTURE_2D, TEXTURE_MIN_FILTER, LINEAR);
                     glTexParameteri(TEXTURE_2D, TEXTURE_MAG_FILTER, LINEAR);
-                    self.gpu.groups.push(picture);
+                    self.groups.push(picture);
                 },
                 Err(error) => {
                     eprintln!("{error}");
@@ -442,7 +554,7 @@ impl Renderer {
             }
         }
         let [width, height] = size.map(|side| side as GLsizei);
-        let gpu = &self.gpu;
+        let gpu = &*self;
         let begin = |target: &Target, clear: [f32; 4]| unsafe {
             glBindFramebufferEXT(FRAMEBUFFER, target.framebuffer);
             glDisable(SCISSOR_TEST);
@@ -459,7 +571,10 @@ impl Renderer {
                         gpu.atlas.name,
                         [SRC_ALPHA, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA],
                     ),
-                    Blend::Image(id) => (self.images[&id].texture.name, PREMULTIPLIED),
+                    Blend::Image(id) => {
+                        let image: &Image = frame.images[&id].texture.as_ref();
+                        (image.name, PREMULTIPLIED)
+                    }
                     Blend::Erase => (
                         gpu.atlas.name,
                         [ZERO, ONE_MINUS_SRC_ALPHA, ZERO, ONE_MINUS_SRC_ALPHA],
@@ -486,8 +601,8 @@ impl Renderer {
             glBindBuffer(ARRAY_BUFFER, gpu.buffer);
             glBufferData(
                 ARRAY_BUFFER,
-                size_of_val(self.vertices.as_slice()) as isize,
-                self.vertices.as_ptr().cast(),
+                size_of_val(frame.vertices) as isize,
+                frame.vertices.as_ptr().cast(),
                 STREAM_DRAW,
             );
             for (index, (_, components, offset)) in ATTRIBUTES.iter().enumerate() {
@@ -502,14 +617,14 @@ impl Renderer {
                 );
             }
             glEnable(BLEND);
-            for (group, picture) in self.groups.iter().zip(&gpu.groups) {
+            for (group, picture) in frame.groups.iter().zip(&gpu.groups) {
                 begin(picture, [0.0; 4]);
-                draw(&self.batches[group.batches.clone()]);
+                draw(&frame.batches[group.batches.clone()]);
             }
             begin(target, clear);
             let mut next = 0;
-            for (group, picture) in self.groups.iter().zip(&gpu.groups) {
-                draw(&self.batches[next..group.batches.start]);
+            for (group, picture) in frame.groups.iter().zip(&gpu.groups) {
+                draw(&frame.batches[next..group.batches.start]);
                 glScissor(0, 0, width, height);
                 let [src_rgb, dst_rgb, src_alpha, dst_alpha] = PREMULTIPLIED;
                 glBlendFuncSeparate(src_rgb, dst_rgb, src_alpha, dst_alpha);
@@ -521,7 +636,7 @@ impl Renderer {
                 );
                 next = group.batches.end;
             }
-            draw(&self.batches[next..]);
+            draw(&frame.batches[next..]);
             glDisable(SCISSOR_TEST);
             glDisable(BLEND);
             glBindFramebufferEXT(FRAMEBUFFER, 0);
@@ -547,10 +662,7 @@ unsafe fn program(source: &str, attributes: &[&CStr]) -> Result<GLuint, String> 
         let mut linked = 0;
         glGetProgramiv(program, LINK_STATUS, &mut linked);
         if linked == 0 {
-            return Err(format!(
-                "Linking a shader failed: {}",
-                log(program, glGetProgramiv, glGetProgramInfoLog)
-            ));
+            return Err(format!("Linking a shader failed: {}", log(program, false)));
         }
         Ok(program)
     }
@@ -565,25 +677,28 @@ unsafe fn compile(kind: GLenum, source: &str) -> Result<GLuint, String> {
         let mut compiled = 0;
         glGetShaderiv(shader, COMPILE_STATUS, &mut compiled);
         if compiled == 0 {
-            return Err(format!(
-                "Compiling a shader failed: {}",
-                log(shader, glGetShaderiv, glGetShaderInfoLog)
-            ));
+            return Err(format!("Compiling a shader failed: {}", log(shader, true)));
         }
         Ok(shader)
     }
 }
 
-unsafe fn log(
-    object: GLuint,
-    get: unsafe extern "C" fn(GLuint, GLenum, *mut GLint),
-    read: unsafe extern "C" fn(GLuint, GLsizei, *mut GLsizei, *mut c_char),
-) -> String {
+/// The info log of `object`, a shader or else a program.
+unsafe fn log(object: GLuint, shader: bool) -> String {
     unsafe {
         let mut length = 0;
-        get(object, INFO_LOG_LENGTH, &mut length);
+        if shader {
+            glGetShaderiv(object, INFO_LOG_LENGTH, &mut length);
+        } else {
+            glGetProgramiv(object, INFO_LOG_LENGTH, &mut length);
+        }
         let mut text = vec![0u8; length.max(1) as usize];
-        read(object, length, ptr::null_mut(), text.as_mut_ptr().cast());
+        let log = text.as_mut_ptr().cast();
+        if shader {
+            glGetShaderInfoLog(object, length, ptr::null_mut(), log);
+        } else {
+            glGetProgramInfoLog(object, length, ptr::null_mut(), log);
+        }
         String::from_utf8_lossy(&text)
             .trim_end_matches('\0')
             .to_owned()

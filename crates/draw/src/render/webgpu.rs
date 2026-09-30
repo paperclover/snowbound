@@ -2,14 +2,21 @@
 use super::*;
 
 /// What a frame is drawn into.
+#[cfg(not(windows))]
 pub type Target = wgpu::TextureView;
 
-pub(super) type Image = wgpu::BindGroup;
+/// A picture's texture, as its batches bind it.
+pub(super) struct Image(wgpu::BindGroup);
 
-/// Whether an offscreen picture's rows run bottom first.
-pub(super) const FLIPPED: bool = false;
+impl AsRef<Image> for Image {
+    fn as_ref(&self) -> &Image {
+        self
+    }
+}
 
 pub(super) struct Gpu {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
     image_pipeline: wgpu::RenderPipeline,
     erase_pipeline: wgpu::RenderPipeline,
@@ -24,8 +31,27 @@ pub(super) struct Gpu {
     groups_size: [u32; 2],
 }
 
+#[cfg(not(windows))]
 impl Renderer {
     pub fn new(device: wgpu::Device, queue: wgpu::Queue, format: wgpu::TextureFormat) -> Self {
+        Self::with_gpu(Gpu::new(device, queue, format))
+    }
+
+    pub fn device(&self) -> &wgpu::Device {
+        &self.gpu.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.gpu.queue
+    }
+}
+
+impl Gpu {
+    pub(super) fn new(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        format: wgpu::TextureFormat,
+    ) -> Self {
         let shader = device.create_shader_module(wgpu::include_wgsl!("../draw.wgsl"));
         let binding_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Draw texture"),
@@ -126,36 +152,37 @@ impl Renderer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
-        Self::with_gpu(
+        Self {
             device,
             queue,
-            Gpu {
-                pipeline,
-                image_pipeline,
-                erase_pipeline,
-                multiply_pipeline,
-                atlas,
-                bind_group,
-                image_sampler,
-                vertex_buffer,
-                format,
-                groups: Vec::new(),
-                groups_size: [0; 2],
-            },
-        )
+            pipeline,
+            image_pipeline,
+            erase_pipeline,
+            multiply_pipeline,
+            atlas,
+            bind_group,
+            image_sampler,
+            vertex_buffer,
+            format,
+            groups: Vec::new(),
+            groups_size: [0; 2],
+        }
     }
 
-    /// The widest and tallest texture the device takes, in pixels.
-    pub fn max_texture_dimension(&self) -> u32 {
+    pub(super) fn flipped(&self) -> bool {
+        false
+    }
+
+    pub(super) fn max_texture_dimension(&self) -> u32 {
         self.device.limits().max_texture_dimension_2d
     }
 
     pub(super) fn atlas_side(&self) -> u32 {
-        self.gpu.atlas.width()
+        self.atlas.width()
     }
 
     pub(super) fn new_atlas(&mut self, side: u32) {
-        (self.gpu.atlas, self.gpu.bind_group) = atlas(&self.device, &self.gpu.pipeline, side);
+        (self.atlas, self.bind_group) = atlas(&self.device, &self.pipeline, side);
     }
 
     pub(super) fn write_atlas(&self, origin: [u32; 2], size: [u32; 2], rgba: &[u8]) {
@@ -166,7 +193,7 @@ impl Renderer {
                     y: origin[1],
                     z: 0,
                 },
-                ..self.gpu.atlas.as_image_copy()
+                ..self.atlas.as_image_copy()
             },
             rgba,
             wgpu::TexelCopyBufferLayout {
@@ -208,9 +235,9 @@ impl Renderer {
             },
             size,
         );
-        self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        Image(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Draw image"),
-            layout: &self.gpu.pipeline.get_bind_group_layout(0),
+            layout: &self.pipeline.get_bind_group_layout(0),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -220,21 +247,21 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.gpu.image_sampler),
+                    resource: wgpu::BindingResource::Sampler(&self.image_sampler),
                 },
             ],
-        })
+        }))
     }
 
     /// An offscreen picture `size` large for each group, kept for later frames.
-    fn group_pictures(&mut self, size: [u32; 2]) {
-        let gpu = &mut self.gpu;
+    fn group_pictures(&mut self, size: [u32; 2], count: usize) {
+        let gpu = self;
         if gpu.groups_size != size {
             gpu.groups.clear();
             gpu.groups_size = size;
         }
-        while gpu.groups.len() < self.groups.len() {
-            let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+        while gpu.groups.len() < count {
+            let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Draw group"),
                 size: wgpu::Extent3d {
                     width: size[0],
@@ -250,7 +277,7 @@ impl Renderer {
                 view_formats: &[],
             });
             let view = texture.create_view(&Default::default());
-            let binding = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let binding = gpu.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("Draw group"),
                 layout: &gpu.pipeline.get_bind_group_layout(0),
                 entries: &[
@@ -270,19 +297,28 @@ impl Renderer {
 
     /// Clears `target`, `size` device pixels, to linear `clear` and draws the prepared
     /// batches, each group's offscreen first.
-    pub(super) fn submit(&mut self, target: &Target, size: [u32; 2], clear: [f32; 4]) {
-        self.group_pictures(size);
-        let gpu = &self.gpu;
-        self.queue
-            .write_buffer(&gpu.vertex_buffer, 0, bytemuck::cast_slice(&self.vertices));
-        let mut encoder = self.device.create_command_encoder(&Default::default());
+    pub(super) fn submit(
+        &mut self,
+        frame: &Frame<'_>,
+        target: &wgpu::TextureView,
+        size: [u32; 2],
+        clear: [f32; 4],
+    ) {
+        self.group_pictures(size, frame.groups.len());
+        let gpu = &*self;
+        gpu.queue
+            .write_buffer(&gpu.vertex_buffer, 0, bytemuck::cast_slice(frame.vertices));
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
         let draw = |pass: &mut wgpu::RenderPass, batches: &[Batch]| {
             for batch in batches {
                 let [x, y, width, height] = batch.scissor;
                 pass.set_scissor_rect(x, y, width, height);
                 let (pipeline, binding) = match batch.blend {
                     Blend::Over => (&gpu.pipeline, &gpu.bind_group),
-                    Blend::Image(id) => (&gpu.image_pipeline, &self.images[&id].texture),
+                    Blend::Image(id) => {
+                        let image: &Image = frame.images[&id].texture.as_ref();
+                        (&gpu.image_pipeline, &image.0)
+                    }
                     Blend::Erase => (&gpu.erase_pipeline, &gpu.bind_group),
                     Blend::Multiply => (&gpu.multiply_pipeline, &gpu.bind_group),
                 };
@@ -309,23 +345,23 @@ impl Renderer {
             pass.set_vertex_buffer(0, gpu.vertex_buffer.slice(..));
             pass.forget_lifetime()
         };
-        for (group, (view, _)) in self.groups.iter().zip(&gpu.groups) {
+        for (group, (view, _)) in frame.groups.iter().zip(&gpu.groups) {
             let mut pass = begin(&mut encoder, view, [0.0; 4]);
-            draw(&mut pass, &self.batches[group.batches.clone()]);
+            draw(&mut pass, &frame.batches[group.batches.clone()]);
         }
         let mut pass = begin(&mut encoder, target, clear);
         let mut next = 0;
-        for (group, (_, binding)) in self.groups.iter().zip(&gpu.groups) {
-            draw(&mut pass, &self.batches[next..group.batches.start]);
+        for (group, (_, binding)) in frame.groups.iter().zip(&gpu.groups) {
+            draw(&mut pass, &frame.batches[next..group.batches.start]);
             pass.set_scissor_rect(0, 0, size[0], size[1]);
             pass.set_pipeline(&gpu.image_pipeline);
             pass.set_bind_group(0, binding, &[]);
             pass.draw(group.composite.clone(), 0..1);
             next = group.batches.end;
         }
-        draw(&mut pass, &self.batches[next..]);
+        draw(&mut pass, &frame.batches[next..]);
         drop(pass);
-        self.queue.submit([encoder.finish()]);
+        gpu.queue.submit([encoder.finish()]);
     }
 }
 

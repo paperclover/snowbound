@@ -1,0 +1,3 @@
+// The executable's icon, which winit gives the window too, and its manifest.
+1 ICON "snowbound.ico"
+1 24 "snowbound.manifest"

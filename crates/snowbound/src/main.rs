@@ -1,16 +1,17 @@
+#![cfg_attr(windows, windows_subsystem = "windows")]
 #[cfg(target_os = "macos")]
 mod aqua;
 mod art;
 mod attachment;
 mod background;
 mod commands;
-#[cfg(all(test, feature = "wgpu"))]
+#[cfg(all(test, feature = "wgpu", not(windows)))]
 mod conflict_render;
 #[cfg(target_os = "linux")]
 #[path = "desktop_linux.rs"]
 mod desktop;
 mod history;
-#[cfg_attr(target_os = "linux", path = "icloud_linux.rs")]
+#[cfg_attr(not(target_os = "macos"), path = "icloud_linux.rs")]
 #[cfg_attr(target_os = "macos", path = "icloud_macos.rs")]
 mod icloud;
 mod library;
@@ -18,6 +19,7 @@ mod link;
 mod manage;
 #[cfg_attr(target_os = "linux", path = "media_linux.rs")]
 #[cfg_attr(target_os = "macos", path = "media_macos.rs")]
+#[cfg_attr(windows, path = "media_windows.rs")]
 mod media;
 mod meeting;
 #[cfg(target_os = "macos")]
@@ -29,6 +31,7 @@ mod palette;
 mod pane;
 #[cfg_attr(target_os = "linux", path = "linux.rs")]
 #[cfg_attr(target_os = "macos", path = "macos.rs")]
+#[cfg_attr(windows, path = "windows.rs")]
 mod platform;
 mod recording;
 mod rename;
@@ -39,8 +42,10 @@ mod settings;
 mod sidebar;
 #[cfg_attr(target_os = "linux", path = "spell_linux.rs")]
 #[cfg_attr(target_os = "macos", path = "spell_macos.rs")]
+#[cfg_attr(windows, path = "spell_windows.rs")]
 mod spell;
 #[cfg_attr(not(feature = "wgpu"), path = "surface_gl.rs")]
+#[cfg_attr(windows, path = "surface_windows.rs")]
 mod surface;
 mod sync;
 mod tags;
@@ -154,6 +159,7 @@ const ROW_GAP: f32 = 3.0;
 /// Space between the page and a page tab that isn't open.
 const PILL_MARGIN: f32 = 3.0;
 /// Why the platform's date dialog could not change the page's date.
+#[cfg_attr(windows, allow(dead_code))]
 const DATE_UNCHOSEN: &str = "Choose another date or time.";
 const DATE_OUT_OF_RANGE: &str = "This date is outside the notebook's supported range.";
 

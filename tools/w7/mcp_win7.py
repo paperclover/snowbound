@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 
 from env import ROOT, setting
+from vm import BASES
 
 DEFAULT_TARGET = os.environ.get("WIN7_TARGET", "local")
 TARGETS_PATH = Path(setting("WIN7_TARGETS_FILE") or Path(setting("ONE_VM_HOME") or ROOT / "lab-unset") / "targets.json").expanduser()
@@ -25,6 +26,8 @@ class Win7Error(Exception):
 
 def resolve_target(name):
     targets = {"local": {"base": "http://127.0.0.1:18777"}}
+    targets.update({base + "-build": {"base": "http://127.0.0.1:%d" % port}
+                    for base, (_stem, port) in BASES.items()})
     if TARGETS_PATH.exists():
         try:
             configured = json.loads(TARGETS_PATH.read_text())
@@ -288,15 +291,17 @@ TOOLS += [
     {
         "name": "win7_vm_up",
         "description": (
-            "Create a named Windows 7 clone when absent, then boot it. Creation settings "
-            "are ignored for an existing clone. Set wait to return only when its "
-            "authenticated desktop agent reports the expected hostname."
+            "Create a named Windows clone when absent, then boot it. base picks Windows 7 "
+            "(x64, OneNote 2010), 10 (x64, emulated and slow) or 11 (arm64, native speed). "
+            "Creation settings are ignored for an existing clone. Set wait to return only "
+            "when its authenticated desktop agent reports the expected hostname."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "name": {"type": "string",
                          "description": "Unique 1-11 character lowercase VM name."},
+                "base": {"type": "string", "enum": sorted(BASES), "default": "win7"},
                 "hostname": {"type": "string", "description": "Optional Windows hostname."},
                 "cpus": {"type": "integer", "default": 2, "minimum": 1, "maximum": 16},
                 "memory_mb": {"type": "integer", "default": 4096,
@@ -375,7 +380,7 @@ def vm_tool(name, args):
         argv = ["status"] + ([args["name"]] if args.get("name") else [])
     elif verb == "up":
         argv = ["up", args["name"]]
-        for key, option in (("hostname", "--hostname"), ("cpus", "--cpus"),
+        for key, option in (("base", "--base"), ("hostname", "--hostname"), ("cpus", "--cpus"),
                             ("memory_mb", "--memory"), ("port", "--port")):
             if args.get(key) is not None:
                 argv += [option, str(args[key])]

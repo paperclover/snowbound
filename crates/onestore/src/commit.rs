@@ -14,7 +14,13 @@ use std::os::windows::fs::FileExt;
 
 #[cfg(any(unix, windows))]
 struct FileIo {
+    #[cfg(unix)]
     file: File,
+    #[cfg(windows)]
+    file: std::sync::Arc<File>,
+    /// OneNote's coordination bytes, unlocked when dropped.
+    #[cfg(windows)]
+    locks: Vec<file_guard::FileGuard<std::sync::Arc<File>>>,
     _process: MutexGuard<'static, ()>,
     unlock_on_drop: bool,
 }
@@ -43,20 +49,46 @@ impl FileIo {
             };
             options.custom_flags(lock | nix::libc::O_NONBLOCK);
         }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // As OneNote opens a section: a reader shares it with everyone, a writer denies
+            // other writers (FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE).
+            options.share_mode(if write { 0x1 | 0x4 } else { 0x1 | 0x2 | 0x4 });
+        }
+        #[cfg(windows)]
+        let file = std::sync::Arc::new(options.open(path).map_err(|error| {
+            // ERROR_SHARING_VIOLATION: another writer has it open.
+            match error.raw_os_error() {
+                Some(32) => ErrorKind::WouldBlock.into(),
+                _ => error,
+            }
+        })?);
+        #[cfg(unix)]
         let file = options.open(path)?;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(all(unix, not(target_os = "macos")))]
         file.try_lock()?;
         Ok(Self {
+            #[cfg(windows)]
+            locks: onenote_locks(&file, write)?,
             file,
             _process: process,
             unlock_on_drop: true,
         })
     }
 
+    #[cfg(unix)]
     fn release(&mut self) -> io::Result<()> {
         // A failed unlock may have reached the server; Drop must not repeat it.
         self.unlock_on_drop = false;
         self.file.unlock()
+    }
+
+    #[cfg(windows)]
+    fn release(&mut self) -> io::Result<()> {
+        self.unlock_on_drop = false;
+        self.locks.clear();
+        Ok(())
     }
 
     fn finish(mut self, result: Result<(), CommitError>) -> Result<(), CommitError> {
@@ -69,13 +101,35 @@ impl FileIo {
     }
 }
 
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 impl Drop for FileIo {
     fn drop(&mut self) {
         if self.unlock_on_drop {
             let _ = self.file.unlock();
         }
     }
+}
+
+/// Windows takes OneNote 2010's own locks on the file, one byte each past any data, so
+/// neither app's locks bar the other's reads: the reader byte shared, and to write, the
+/// writer byte exclusively, as `notebook::smb` takes them on a share.
+#[cfg(windows)]
+fn onenote_locks(
+    file: &std::sync::Arc<File>,
+    write: bool,
+) -> io::Result<Vec<file_guard::FileGuard<std::sync::Arc<File>>>> {
+    use file_guard::Lock;
+    let reader = file_guard::try_lock(file.clone(), Lock::Shared, 0xffff_fffb, 1)?;
+    let mut locks = vec![reader];
+    if write {
+        locks.push(file_guard::try_lock(
+            file.clone(),
+            Lock::Exclusive,
+            0xffff_fffd,
+            1,
+        )?);
+    }
+    Ok(locks)
 }
 
 /// Places a file in its notebook the way OneNote does on adoption: the header's
@@ -527,5 +581,60 @@ mod tests {
             stable(reader(b"unfinished", 0), 100).unwrap(),
             b"unfinished"
         );
+    }
+
+    /// OneNote's reads go on through Snowbound's reads and writes, and its writers wait for
+    /// Snowbound's, as its opens and coordination bytes meet Snowbound's.
+    #[cfg(windows)]
+    #[test]
+    fn windows_takes_onenote_s_opens_and_bytes() {
+        use file_guard::Lock;
+        use std::io::Read;
+        use std::os::windows::fs::OpenOptionsExt;
+        let folder = std::env::temp_dir().join(format!("onestore-locks-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("Locks.one");
+        std::fs::write(&path, b"section").unwrap();
+        let onenote = |write: bool| {
+            File::options()
+                .read(true)
+                .write(write)
+                .share_mode(if write { 0x5 } else { 0x7 })
+                .open(&path)
+                .map(std::sync::Arc::new)
+        };
+        let busy = |result: io::Result<file_guard::FileGuard<std::sync::Arc<File>>>| {
+            result.is_err_and(|error| error.kind() == ErrorKind::WouldBlock)
+        };
+
+        let reading = FileIo::open(&path, false).unwrap();
+        let writer = onenote(true).unwrap();
+        let reader_byte = file_guard::try_lock(writer.clone(), Lock::Shared, 0xffff_fffb, 1);
+        assert!(reader_byte.is_ok(), "OneNote writes beside a reader");
+        drop((reader_byte, writer));
+        assert!(!busy(file_guard::try_lock(
+            onenote(false).unwrap(),
+            Lock::Exclusive,
+            0xffff_fffd,
+            1
+        )));
+        drop(reading);
+
+        let writing = FileIo::open(&path, true).unwrap();
+        let mut text = String::new();
+        (&*onenote(false).unwrap())
+            .read_to_string(&mut text)
+            .unwrap();
+        assert_eq!(text, "section", "OneNote reads through a commit");
+        assert!(onenote(true).is_err(), "a second writer can't open it");
+        let other = onenote(false).unwrap();
+        assert!(busy(file_guard::try_lock(
+            other,
+            Lock::Exclusive,
+            0xffff_fffd,
+            1
+        )));
+        drop(writing);
+        std::fs::remove_dir_all(&folder).unwrap();
     }
 }

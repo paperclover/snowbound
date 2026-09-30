@@ -207,6 +207,8 @@ fn staging(install: &Path) -> Option<PathBuf> {
 fn staged(folder: &Path) -> PathBuf {
     folder.join(if cfg!(target_os = "macos") {
         "Snowbound.app"
+    } else if cfg!(windows) {
+        "snowbound.exe"
     } else {
         "snowbound"
     })
@@ -236,6 +238,7 @@ fn stage(bytes: &[u8], folder: &Path, version: &Version) -> std::io::Result<Path
         }
     } else {
         std::fs::write(&item, bytes)?;
+        #[cfg(unix)]
         std::fs::set_permissions(&item, std::os::unix::fs::PermissionsExt::from_mode(0o755))?;
     }
     std::fs::write(folder.join("version"), version.name())?;
@@ -246,17 +249,23 @@ fn stage(bytes: &[u8], folder: &Path, version: &Version) -> std::io::Result<Path
 /// place, then removes the staging folder.
 fn apply(staged: &Path, install: &Path) -> std::io::Result<()> {
     let folder = staging(install).ok_or_else(|| std::io::Error::other("No install name"))?;
+    let old = folder.with_extension("old");
     if install.is_dir() {
-        let old = folder.with_extension("old");
-        let _ = std::fs::remove_dir_all(&old);
-        std::fs::rename(install, &old)?;
-        if let Err(error) = std::fs::rename(staged, install) {
-            std::fs::rename(&old, install)?;
-            return Err(error);
-        }
         let _ = std::fs::remove_dir_all(&old);
     } else {
-        std::fs::rename(staged, install)?;
+        let _ = std::fs::remove_file(&old);
+    }
+    // Windows renames a running executable, as the finisher is, but doesn't replace it.
+    std::fs::rename(install, &old)?;
+    if let Err(error) = std::fs::rename(staged, install) {
+        std::fs::rename(&old, install)?;
+        return Err(error);
+    }
+    if install.is_dir() {
+        let _ = std::fs::remove_dir_all(&old);
+    } else {
+        // Where it is still running, the next update removes it.
+        let _ = std::fs::remove_file(&old);
     }
     let _ = std::fs::remove_dir_all(folder);
     Ok(())
@@ -536,16 +545,11 @@ pub fn relaunch(staged: &Path) -> std::io::Result<()> {
 /// for the app to quit, swaps the update in and opens the app, updated or not.
 pub fn finish(mut args: impl Iterator<Item = OsString>) -> Result<(), Box<dyn std::error::Error>> {
     let usage = "Usage: snowbound --finish-update PID STAGED INSTALL [ARGUMENT]...";
-    let pid: libc::pid_t = args.next().ok_or(usage)?.to_str().ok_or(usage)?.parse()?;
+    let pid: u32 = args.next().ok_or(usage)?.to_str().ok_or(usage)?.parse()?;
     let staged = PathBuf::from(args.next().ok_or(usage)?);
     let install = PathBuf::from(args.next().ok_or(usage)?);
-    let deadline = Instant::now() + Duration::from_secs(60);
-    // Signal 0 only asks whether the process is still there.
-    while unsafe { libc::kill(pid, 0) } == 0 {
-        if Instant::now() > deadline {
-            return Err("Snowbound didn’t quit, so the update wasn’t installed.".into());
-        }
-        std::thread::sleep(Duration::from_millis(100));
+    if !quits(pid, Duration::from_secs(60)) {
+        return Err("Snowbound didn’t quit, so the update wasn’t installed.".into());
     }
     let applied = apply(&staged, &install);
     let mut open = if cfg!(target_os = "macos") {
@@ -563,6 +567,38 @@ pub fn finish(mut args: impl Iterator<Item = OsString>) -> Result<(), Box<dyn st
     };
     open.spawn()?;
     Ok(applied?)
+}
+
+/// Whether process `pid` is gone within `patience`.
+#[cfg(unix)]
+fn quits(pid: u32, patience: Duration) -> bool {
+    let deadline = Instant::now() + patience;
+    // Signal 0 only asks whether the process is still there.
+    while unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        if Instant::now() > deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    true
+}
+
+#[cfg(windows)]
+fn quits(pid: u32, patience: Duration) -> bool {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, WAIT_TIMEOUT},
+        System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE, WaitForSingleObject},
+    };
+    unsafe {
+        let process = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        // A process that can't be opened has gone.
+        if process.is_null() {
+            return true;
+        }
+        let waited = WaitForSingleObject(process, patience.as_millis() as u32);
+        CloseHandle(process);
+        waited != WAIT_TIMEOUT
+    }
 }
 
 #[cfg(test)]
@@ -892,11 +928,7 @@ mod tests {
     #[ignore = "reads the published builds"]
     fn the_published_build_installs() {
         let folder = scratch("published");
-        let install = folder.join(if cfg!(target_os = "macos") {
-            "Snowbound.app"
-        } else {
-            "snowbound"
-        });
+        let install = staged(&folder);
         let old = version("2000-01-01-r1");
         let status = check(
             &download,

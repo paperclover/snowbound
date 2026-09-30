@@ -1,6 +1,6 @@
 use super::*;
 use rusqlite::backup::{Backup, StepResult};
-use std::{collections::BTreeMap, fs::File};
+use std::collections::BTreeMap;
 
 const RECOVERY_ID: u32 = 0x4f4e4552;
 
@@ -153,7 +153,9 @@ pub(crate) fn export(source: &Connection, path: &Path, replace: bool) -> Result<
             .persist_noclobber(path)
             .map_err(|error| error.error)?;
     }
-    File::open(parent)?.sync_all()?;
+    // Windows opens no folder as a file; NTFS journals the rename.
+    #[cfg(unix)]
+    std::fs::File::open(parent)?.sync_all()?;
     Ok(())
 }
 

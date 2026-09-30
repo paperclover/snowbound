@@ -683,7 +683,7 @@ impl View {
         let config = surface
             .get_default_config(&gpu.adapter, pixels[0], pixels[1])
             .ok_or("No supported surface configuration")?;
-        surface.configure(&gpu.renderer.device, &config);
+        surface.configure(gpu.renderer.device(), &config);
         let (page, read_only) = section.shared.page(space)?;
         let frame = Arc::<Frame>::default();
         #[cfg_attr(not(target_os = "ios"), expect(unused_mut))]
@@ -712,7 +712,7 @@ impl View {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&renderer.device, &self.config);
+                self.surface.configure(renderer.device(), &self.config);
                 return Ok(());
             }
             _ => return Ok(()),
@@ -731,7 +731,7 @@ impl View {
                 &[canvas.page.viewport.layer(&primitives)],
             )
             .map_err(|error| format!("Page drawing failed: {error:?}"))?;
-        renderer.queue.present(frame);
+        renderer.queue().present(frame);
         Ok(())
     }
 
@@ -842,7 +842,7 @@ pub extern "C" fn sb_view_resize(view: &mut View, width: f32, height: f32, scale
     view.config.width = pixels[0];
     view.config.height = pixels[1];
     if let Some(gpu) = &*gpu() {
-        view.surface.configure(&gpu.renderer.device, &view.config);
+        view.surface.configure(gpu.renderer.device(), &view.config);
     }
 }
 

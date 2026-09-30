@@ -26,6 +26,7 @@ def tool(name):
     return path
 
 
+# Volume-license media install without asking for a product key and stay unactivated.
 def catalog_entry(base, work):
     url, arch = CATALOGS[base]
     cab = work / "products.cab"
@@ -34,9 +35,9 @@ def catalog_entry(base, work):
     for entry in ET.parse(work / "products.xml").getroot().iter("File"):
         field = lambda key: entry.findtext(key) or ""
         if (field("LanguageCode") == "en-us" and field("Architecture") == arch
-                and "CLIENTCONSUMER_RET" in field("FileName")):
+                and "CLIENTBUSINESS_VOL" in field("FileName")):
             return field("FilePath"), field("Sha1").lower()
-    raise SystemExit("The %s catalog has no en-us %s consumer image" % (base, arch))
+    raise SystemExit("The %s catalog has no en-us %s volume-license image" % (base, arch))
 
 
 def download(url, sha1, path):
@@ -61,12 +62,36 @@ def pro_index(esd):
     raise SystemExit("No Professional edition in %s" % esd)
 
 
+# Windows on Arm has no inbox driver for any network card QEMU emulates.
+VIRTIO_WIN = ("https://fedorapeople.org/groups/virt/virtio-win/direct-downloads/"
+              "stable-virtio/virtio-win.iso")
+NETKVM = ("netkvm.inf", "netkvm.cat", "netkvm.sys", "netkvmco.exe", "netkvmp.exe")
+
+
+def fetch_netkvm(media):
+    """Keep only Red Hat's signed arm64 virtio-net driver from the virtio-win disc."""
+    with tempfile.TemporaryDirectory(prefix="one-media-", dir=media) as temporary:
+        work = Path(temporary)
+        iso = work / "virtio-win.iso"
+        urllib.request.urlretrieve(VIRTIO_WIN, iso)
+        target = work / "netkvm-arm64"
+        target.mkdir()
+        for name in NETKVM:
+            subprocess.run([tool("xorriso"), "-osirrox", "on", "-indev", str(iso), "-extract",
+                            "/NetKVM/w11/ARM64/" + name, str(target / name)], check=True)
+            (target / name).chmod(0o644)
+        target.replace(media / "netkvm-arm64")
+
+
 def build(base):
     media = Path(require("ONE_VM_HOME")).expanduser() / "media"
     iso = media / ("%s.iso" % base)
-    if iso.exists():
-        raise SystemExit("Move the existing ISO first: %s" % iso)
     media.mkdir(parents=True, exist_ok=True)
+    if base == "win11" and not (media / "netkvm-arm64").exists():
+        fetch_netkvm(media)
+    if iso.exists():
+        print(iso)
+        return
     wim = tool("wimlib-imagex")
     with tempfile.TemporaryDirectory(prefix="one-media-", dir=media) as temporary:
         work = Path(temporary)
@@ -81,7 +106,6 @@ def build(base):
                         "--compress=LZX"], check=True)
         subprocess.run([wim, "export", str(esd), "3", str(sources / "boot.wim"),
                         "--boot"], check=True)
-        # Solid LZMS keeps install.esd under the 4 GiB ISO 9660 file limit.
         subprocess.run([wim, "export", str(esd), pro_index(esd),
                         str(sources / "install.esd"), "--compress=LZMS", "--solid"],
                        check=True)
@@ -89,6 +113,7 @@ def build(base):
         partial = work / "out.iso"
         # The no-prompt loader boots unattended instead of waiting for a key press.
         subprocess.run([
+            # Level 3 stores the 4+ GiB install.esd as multiple extents, which Setup reads.
             tool("xorriso"), "-as", "mkisofs", "-quiet", "-iso-level", "3", "-J",
             "-joliet-long", "-V", base.upper(),
             "-e", "efi/microsoft/boot/efisys_noprompt.bin", "-no-emul-boot",

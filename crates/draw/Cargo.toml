@@ -7,7 +7,8 @@ publish = false
 [features]
 default = ["wgpu"]
 # The renderer; `edit` needs only parley. It submits through wgpu, or without it through
-# OpenGL 2.1, for Mac OS X 10.6.
+# OpenGL 2.1, for Mac OS X 10.6. On Windows it has both, and its maker picks one, as
+# Windows 7 has no Direct3D 12.
 render = ["dep:base64", "dep:bytemuck", "dep:image", "dep:linebender_resource_handle", "dep:roxmltree", "dep:swash"]
 wgpu = ["render", "dep:wgpu"]
 

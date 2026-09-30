@@ -118,7 +118,7 @@ fn renderer_cost() {
                 .unwrap();
             let submitted = start.elapsed().as_nanos();
             renderer
-                .device
+                .device()
                 .poll(wgpu::PollType::Wait {
                     submission_index: None,
                     timeout: Some(Duration::from_secs(10)),
@@ -335,7 +335,7 @@ fn frame_cost() {
             let drawn = start.elapsed();
             drop(primitives);
             renderer
-                .device
+                .device()
                 .poll(wgpu::PollType::Wait {
                     submission_index: None,
                     timeout: Some(Duration::from_secs(10)),

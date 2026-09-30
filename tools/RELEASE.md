@@ -18,7 +18,7 @@ development builds, which never update themselves.
 ## The published folder
 
 ```text
-latest.json                    {"macos-aarch64": "2026-09-29-r10", "macos-10.6": ..., "linux-x86_64": ..., "linux-aarch64": ...}
+latest.json                    {"macos-aarch64": "2026-09-29-r10", "macos-10.6": ..., "linux-x86_64": ..., "windows-x86_64": ..., ...}
 2026-09-29.r10/
   build.json                   version, commit, and per platform: file, size, sha256, signature
   build.json.sig               ed25519 signature of build.json, hex
@@ -26,6 +26,8 @@ latest.json                    {"macos-aarch64": "2026-09-29-r10", "macos-10.6":
   Snowbound-2026-09-29-r10-macos-10.6.zip
   snowbound-2026-09-29-r10-linux-x86_64         the executable itself
   snowbound-2026-09-29-r10-linux-aarch64
+  snowbound-2026-09-29-r10-windows-x86_64.exe   Windows 7 SP1 to 11
+  snowbound-2026-09-29-r10-windows-aarch64.exe  Windows 11 on Arm
 ```
 
 A build folder is written once, under a hidden `.2026-09-29.r10.partial` name renamed into
@@ -80,7 +82,7 @@ quarantine and open directly.
 ## Publishing
 
 ```sh
-python3 tools/release.py              # all four platforms
+python3 tools/release.py              # all six platforms
 python3 tools/release.py --ad-hoc     # the macOS app without Developer ID
 python3 tools/release.py --dry-run    # the same into a new temporary folder
 python3 tools/release.py --platforms macos-aarch64 linux-x86_64
@@ -89,14 +91,17 @@ python3 tools/release.py --platforms macos-aarch64 linux-x86_64
 The script refuses to run unless the working copy matches `main` (a dry run
 only warns), runs Clippy (workspace, and `snowbound` without default features)
 and the workspace tests, builds each platform with
-`tools/canvas/build_macos.py` (`--snow-leopard` for 10.6) and
-`crates/snowbound/linux/package.sh` (taking only its executables), then checks
+`tools/canvas/build_macos.py` (`--snow-leopard` for 10.6),
+`crates/snowbound/linux/package.sh` (taking only its executables) and
+`platform/windows/cargo.sh`, then checks
 the working copy didn't change meanwhile. It zips the apps with `ditto`, hashes and signs everything, and
 publishes as above. Run again for the same commit, it only brings
 `latest.json` up to date; a different commit that derives the same version is
 refused. The 10.6 build needs the SDK and nightly toolchain
 `platform/snow-leopard/cargo.sh` names; the Linux builds need `zig`, as the
-cross linker against glibc 2.31. All four build from an Apple silicon Mac.
+cross linker against glibc 2.31; the Windows builds need llvm-mingw, which
+`platform/windows/toolchain.sh` fetches, and nightly with `rust-src` for
+x86_64. All six build from an Apple silicon Mac.
 
 ## In the app
 
@@ -108,11 +113,14 @@ palette elsewhere) checks at once and reports what it found. A check reads
 downloads the archive for this platform, verifying size, SHA-256 and
 signature. It stages the update beside the install, so the swap is a rename:
 the app unpacked into `.Snowbound.app.update` next to the bundle on macOS, the
-executable into `.snowbound.update` next to it on Linux. The sync status icon gets a dot, and its popup offers
+executable into `.snowbound.update` next to it on Linux (`.snowbound.exe.update` on
+Windows). The sync status icon gets a dot, and its popup offers
 Build Folder and Restart to Update.
 
 Restart to Update quits the app and starts the old executable with
-`--finish-update`, which waits for the app to exit, renames the new bundle (or
-executable) over the old one, and opens it. Where the install can't be
+`--finish-update`, which waits for the app to exit, renames the old bundle (or
+executable) aside and the new one into its place, and opens it. Windows renames an
+executable while it runs, as this one does, but won't delete it: the old one waits beside
+the new as `.snowbound.exe.old` until the next update removes it. Where the install can't be
 written, and on Mac OS X 10.6, the popup and the check name the build and
 open its folder to download instead.

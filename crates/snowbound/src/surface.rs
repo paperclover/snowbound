@@ -9,6 +9,8 @@ pub struct Surface {
     /// Device pixels frames and snapshots are drawn at; `configure` gives the window it.
     pub size: [u32; 2],
     window: Arc<Window>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
@@ -17,14 +19,14 @@ pub struct Surface {
 }
 
 pub struct Frame {
-    pub target: wgpu::TextureView,
-    texture: wgpu::SurfaceTexture,
-    reconfigure: bool,
+    pub target: draw::Target,
+    pub(super) texture: wgpu::SurfaceTexture,
+    pub(super) reconfigure: bool,
 }
 
 pub struct Offscreen {
-    pub target: wgpu::TextureView,
-    texture: wgpu::Texture,
+    pub target: draw::Target,
+    pub(super) texture: wgpu::Texture,
 }
 
 impl Surface {
@@ -34,9 +36,20 @@ impl Surface {
         window: Arc<Window>,
         backdrop: bool,
     ) -> Result<(Self, Renderer), Box<dyn Error>> {
-        let instance = wgpu::Instance::new(
-            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone())),
-        );
+        #[cfg_attr(not(windows), expect(unused_mut))]
+        let mut descriptor =
+            wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone()));
+        // Direct3D 12, which Windows 10 and 11 always have, and through DirectComposition
+        // where the backdrop shows through; elsewhere `surface_windows` draws with OpenGL.
+        #[cfg(windows)]
+        {
+            descriptor.backends = wgpu::Backends::DX12;
+            if backdrop {
+                descriptor.backend_options.dx12.presentation_system =
+                    wgpu::Dx12SwapchainKind::DxgiFromVisual;
+            }
+        }
+        let instance = wgpu::Instance::new(descriptor);
         let surface = instance.create_surface(window.clone())?;
         platform::configure_presentation(&surface);
         let adapter = instance
@@ -50,27 +63,32 @@ impl Surface {
         let mut config = surface
             .get_default_config(&adapter, size.width, size.height)
             .ok_or("No supported canvas surface")?;
+        let alpha = surface.get_capabilities(&adapter).alpha_modes;
         let translucent = backdrop.then(|| {
-            // What wgpu calls post-multiplied is Core Animation's non-opaque layer, which
-            // composites colour premultiplied in sRGB, as `Translucent` leaves it.
-            config.alpha_mode = wgpu::CompositeAlphaMode::PostMultiplied;
+            // DirectComposition's premultiplied swap chains and Core Animation's non-opaque
+            // layers both composite colour premultiplied in sRGB, as `Translucent` leaves
+            // it; wgpu calls the second, the only one Metal offers, post-multiplied.
+            config.alpha_mode = if alpha.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+                wgpu::CompositeAlphaMode::PreMultiplied
+            } else {
+                wgpu::CompositeAlphaMode::PostMultiplied
+            };
             let window_format = config.format.remove_srgb_suffix();
             config.view_formats.push(window_format);
             draw::Translucent::new(&device, config.format, window_format)
         });
-        if platform::cuts_corners() {
-            let alpha = &surface.get_capabilities(&adapter).alpha_modes;
-            if alpha.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
-                config.alpha_mode = wgpu::CompositeAlphaMode::PreMultiplied;
-            }
+        if platform::cuts_corners() && alpha.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+            config.alpha_mode = wgpu::CompositeAlphaMode::PreMultiplied;
         }
         surface.configure(&device, &config);
         eprintln!("Canvas GPU: {:?}", adapter.get_info());
-        let renderer = Renderer::new(device, queue, config.format);
+        let renderer = Renderer::new(device.clone(), queue.clone(), config.format);
         Ok((
             Self {
                 size: [config.width, config.height],
                 window,
+                device,
+                queue,
                 instance,
                 surface,
                 config,
@@ -85,9 +103,9 @@ impl Surface {
         self.translucent.is_some()
     }
 
-    pub fn configure(&mut self, renderer: &Renderer) {
+    pub fn configure(&mut self, _: &Renderer) {
         [self.config.width, self.config.height] = self.size;
-        self.surface.configure(&renderer.device, &self.config);
+        self.surface.configure(&self.device, &self.config);
     }
 
     /// The window's next frame, or none to skip this one.
@@ -123,9 +141,10 @@ impl Surface {
             }
         };
         let target = match &mut self.translucent {
-            Some(translucent) => translucent.target(&renderer.device, self.size),
+            Some(translucent) => translucent.target(&self.device, self.size),
             None => texture.texture.create_view(&Default::default()),
         };
+        let target = target_of(target);
         Ok(Some(Frame {
             target,
             texture,
@@ -142,10 +161,10 @@ impl Surface {
                     format: Some(self.config.format.remove_srgb_suffix()),
                     ..Default::default()
                 });
-            translucent.present(&renderer.device, &renderer.queue, &window);
+            translucent.present(&self.device, &self.queue, &window);
         }
         self.window.pre_present_notify();
-        renderer.queue.present(frame.texture);
+        self.queue.present(frame.texture);
         platform::commit_presentation(&self.window);
         if frame.reconfigure {
             self.configure(renderer);
@@ -153,8 +172,8 @@ impl Surface {
     }
 
     /// A target the size of the window's frames that `read` reads back.
-    pub fn offscreen(&self, renderer: &Renderer) -> Result<Offscreen, Box<dyn Error>> {
-        let texture = renderer.device.create_texture(&wgpu::TextureDescriptor {
+    pub fn offscreen(&self, _: &Renderer) -> Result<Offscreen, Box<dyn Error>> {
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Snapshot"),
             size: wgpu::Extent3d {
                 width: self.size[0],
@@ -169,26 +188,22 @@ impl Surface {
             view_formats: &[],
         });
         Ok(Offscreen {
-            target: texture.create_view(&Default::default()),
+            target: target_of(texture.create_view(&Default::default())),
             texture,
         })
     }
 
     /// The offscreen target's sRGB RGBA rows, top first.
-    pub fn read(
-        &self,
-        renderer: &Renderer,
-        offscreen: Offscreen,
-    ) -> Result<Vec<u8>, Box<dyn Error>> {
+    pub fn read(&self, _: &Renderer, offscreen: Offscreen) -> Result<Vec<u8>, Box<dyn Error>> {
         let size = self.size;
         let row = (size[0] * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let buffer = renderer.device.create_buffer(&wgpu::BufferDescriptor {
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Snapshot readback"),
             size: u64::from(row) * u64::from(size[1]),
             usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
             mapped_at_creation: false,
         });
-        let mut encoder = renderer.device.create_command_encoder(&Default::default());
+        let mut encoder = self.device.create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
             offscreen.texture.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
@@ -201,9 +216,9 @@ impl Surface {
             },
             offscreen.texture.size(),
         );
-        renderer.queue.submit([encoder.finish()]);
+        self.queue.submit([encoder.finish()]);
         buffer.map_async(wgpu::MapMode::Read, .., |_| {});
-        renderer.device.poll(wgpu::PollType::Wait {
+        self.device.poll(wgpu::PollType::Wait {
             submission_index: None,
             timeout: Some(std::time::Duration::from_secs(5)),
         })?;
@@ -222,4 +237,11 @@ impl Surface {
         }
         Ok(pixels)
     }
+}
+
+/// `view` as what the renderer draws into, which is the view itself unless `draw` also
+/// paints through OpenGL, as on Windows.
+#[cfg_attr(not(windows), expect(clippy::useless_conversion))]
+fn target_of(view: wgpu::TextureView) -> draw::Target {
+    view.into()
 }

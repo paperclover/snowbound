@@ -1006,7 +1006,9 @@ mod tests {
                 &[viewport.layer(&primitives)],
             )
             .unwrap();
-        let mut encoder = renderer.device.create_command_encoder(&Default::default());
+        let mut encoder = renderer
+            .device()
+            .create_command_encoder(&Default::default());
         encoder.copy_texture_to_buffer(
             target.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
@@ -1023,10 +1025,10 @@ mod tests {
                 depth_or_array_layers: 1,
             },
         );
-        renderer.queue.submit([encoder.finish()]);
+        renderer.queue().submit([encoder.finish()]);
         readback.map_async(wgpu::MapMode::Read, .., |result| result.unwrap());
         renderer
-            .device
+            .device()
             .poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: Some(Duration::from_secs(5)),

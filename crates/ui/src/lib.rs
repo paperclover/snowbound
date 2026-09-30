@@ -761,6 +761,10 @@ impl Ui {
 
     /// Queues input for the next frame.
     pub fn event(&mut self, event: Event) {
+        // A chord the host looks up before the next frame reads the modifiers held now.
+        if let Event::Modifiers(modifiers) = event {
+            self.modifiers = modifiers;
+        }
         self.queue.push(event);
     }
 

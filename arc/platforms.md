@@ -6,24 +6,24 @@ platform is the window, the input plumbing, and how much of the interface is
 drawn by Snowbound versus the operating system.
 
 ```text
-                 macOS                 Linux                  iOS
-shell            snowbound + ui        snowbound + ui         UIKit (apps/ios, Swift)
-glue             snowbound/src/macos   snowbound/src/linux    crates/mobile (C ABI, staticlib)
-page             canvas ─────────────────────────────────────────────────────►
-paint            draw (wgpu: Metal)    draw (Vulkan or GL)    draw (Metal, CAMetalLayer)
-data             notebook::session + embedded SMB client ────────────────────►
-format           onestore ───────────────────────────────────────────────────►
+         macOS                Linux                Windows                  iOS
+shell    snowbound + ui       snowbound + ui       snowbound + ui           UIKit (apps/ios)
+glue     snowbound/src/macos  snowbound/src/linux  snowbound/src/windows    crates/mobile (C ABI)
+page     canvas ─────────────────────────────────────────────────────────────────────►
+paint    draw (wgpu: Metal)   draw (Vulkan or GL)  draw (D3D12, or GL on 7) draw (Metal)
+data     notebook::session + embedded SMB client ────────────────────────────────────►
+format   onestore ───────────────────────────────────────────────────────────────────►
 ```
 
 ## Desktop: `snowbound`
 
 The desktop app is a winit window with the `ui` kit's chrome and a `canvas`
 page inside it. `snowbound` picks a platform module at compile time
-(`macos.rs` or `linux.rs`, both mounted as `platform`), and everything else
-in the crate is shared: library and settings, the sidebar, menus, page and
-section management, templates, and screenshot and replay support.
-Accessibility goes through AccessKit's winit adapter on both: the interface's
-tree, with the page's grafted into it.
+(`macos.rs`, `linux.rs` or `windows.rs`, each mounted as `platform`), and
+everything else in the crate is shared: library and settings, the sidebar,
+menus, page and section management, templates, and screenshot and replay
+support. Accessibility goes through AccessKit's winit adapter on all three:
+the interface's tree, with the page's grafted into it.
 `commands.rs` is the one table of commands: each one's title, its chords on
 macOS and elsewhere, when it is enabled or checked, and what it does. The
 keyboard, the toolbar and the macOS menu bar all run commands from it.
@@ -94,14 +94,42 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   executable to `~/.local/bin` and writes the visible entry under the same
   name, so the menu never lists two; Uninstall in Options removes it.
 
-### Windows and older macOS
+### Windows
 
-The readme names both as goals. Nothing platform-specific exists for them yet.
-Keeping `ui` and `draw` free of platform toolkits is what keeps them within
-reach.
-The chrome's fill already has its seam: `platform::install_backdrop` lays a
-system material under a transparent surface, as Mica or Aero glass would,
-and `platform::titlebar` names opaque fills where the system has those.
+- One executable runs on Windows 7 SP1 through 11. It is built from macOS
+  with llvm-mingw against `msvcrt.dll`, which every Windows has
+  (`platform/windows/cargo.sh`): x86_64 on nightly's tier-3
+  `x86_64-win7-windows-gnu`, whose standard library avoids Windows 8's
+  imports, and aarch64 for Windows 11 on Arm. The few imports of Windows 8
+  and later that dependencies still name are answered by
+  `platform/windows/rt/shims.c`; everything newer is looked up at run time.
+- `draw` builds both backends on Windows and the surface picks one:
+  Direct3D 12 through wgpu where Windows has it (10 and 11), otherwise
+  OpenGL 2.1 on a WGL context, as on Windows 7 (`surface_windows.rs`).
+- The toolbar's row is the title bar wherever the desktop composes windows.
+  On Windows 7 with Aero and on 11, the system's frame keeps its sides,
+  its caption gives way to the row, its material (Aero glass, Mica) lies
+  under the whole window, and the system hit-tests and runs its own
+  caption buttons over the row, which brings 11's snap layouts. 7 draws
+  them over the glass; 11 doesn't over the Direct3D surface, so the row
+  draws them as 11 does, lit where the system reports the pointer. On 8
+  and 10, whose frames are opaque, the window has no system frame and the
+  row draws and runs caption buttons as 10 does, over acrylic on 10. With
+  Windows 7's basic or classic theme the system draws the title bar and
+  the row lies beneath it, as on KDE.
+- A notebook on a share opens by its UNC path through Windows' own SMB
+  client, which takes OneNote's opens and locks natively: `onestore` opens a
+  section as OneNote does (a reader shares it with everyone, a writer denies
+  other writers) and takes OneNote's coordination bytes with byte-range
+  locks, so both apps can have a section open on one machine.
+  ReadDirectoryChangesW reports changes below a notebook, including other
+  clients' on a share. Open Notebook from Server… still uses the embedded
+  client, its passwords in the Credential Manager.
+- The common file dialogs, task dialogs, the date and time picker, and the
+  Spell Checking API (from Windows 8) are the system's; audio plays and
+  records through MCI. Dates follow the user's locale as OneNote's do.
+  Windows has no menu bar: the toolbar and the command palette run the
+  command table, with OneNote 2010's Ctrl chords.
 
 ## iOS: native around the canvas
 

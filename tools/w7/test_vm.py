@@ -12,8 +12,7 @@ import vm
 class VmLifecycleTest(unittest.TestCase):
     def setUp(self):
         self.original = {name: getattr(vm, name) for name in (
-            "VM_HOME", "IMAGES", "MEDIA", "INSTANCES", "RUN", "DISK",
-            "BASE_DISK", "BASE_MANIFEST", "AGENT_ISO", "TARGETS",
+            "VM_HOME", "IMAGES", "MEDIA", "INSTANCES", "RUN", "AGENT_ISO", "TARGETS",
         )}
         self.temporary = tempfile.TemporaryDirectory(prefix="one-vm-test-")
         home = Path(self.temporary.name)
@@ -22,17 +21,16 @@ class VmLifecycleTest(unittest.TestCase):
         vm.MEDIA = home / "media"
         vm.INSTANCES = home / "instances"
         vm.RUN = home / "run"
-        vm.DISK = vm.IMAGES / "win7-office-build.qcow2"
-        vm.BASE_DISK = vm.IMAGES / "win7-office-base.qcow2"
-        vm.BASE_MANIFEST = vm.IMAGES / "win7-office-base.json"
         vm.AGENT_ISO = vm.MEDIA / "win7-agent.iso"
         vm.TARGETS = home / "targets.json"
         vm.IMAGES.mkdir(parents=True)
-        subprocess.run([
-            vm.qemu("qemu-img"), "create", "-q", "-f", "qcow2", str(vm.DISK), "64M"
-        ], check=True)
-        with contextlib.redirect_stdout(io.StringIO()):
-            vm.seal()
+        for base in ("win7", "win11"):
+            subprocess.run([
+                vm.qemu("qemu-img"), "create", "-q", "-f", "qcow2",
+                str(vm.build_disk(base)), "64M",
+            ], check=True)
+            with contextlib.redirect_stdout(io.StringIO()):
+                vm.seal(base)
 
     def tearDown(self):
         self.temporary.cleanup()
@@ -66,6 +64,18 @@ class VmLifecycleTest(unittest.TestCase):
     def test_reserved_target_name_is_rejected(self):
         with self.assertRaisesRegex(SystemExit, "reserved"):
             vm.create_instance("local")
+        with self.assertRaisesRegex(SystemExit, "reserved"):
+            vm.create_instance("win11-build")
+
+    def test_clone_records_its_base(self):
+        with contextlib.redirect_stdout(io.StringIO()):
+            vm.create_instance("arm", base="win11")
+        self.assertEqual(json.loads(vm.instance_path("arm").read_text())["base"], "win11")
+        backing = json.loads(subprocess.check_output([
+            vm.qemu("qemu-img"), "info", "--output=json",
+            str(vm.IMAGES / "instances" / "arm.qcow2"),
+        ]))["backing-filename"]
+        self.assertEqual(backing, str(vm.base_disk("win11")))
 
 
 if __name__ == "__main__":

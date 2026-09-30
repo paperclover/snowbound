@@ -457,10 +457,20 @@ fn write_ahead(connection: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// FILETIME now, as an edit's `at`.
+/// FILETIME now, as an edit's `at`: later than any this process took before, as Windows 7's
+/// clock ticks only every 15.6 ms and a later edit must still order after an earlier one.
 pub(crate) fn now() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
     let unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
-    (unix.as_secs() + 11_644_473_600) * 10_000_000 + u64::from(unix.subsec_nanos() / 100)
+    let clock =
+        (unix.as_secs() + 11_644_473_600) * 10_000_000 + u64::from(unix.subsec_nanos() / 100);
+    let previous = LAST
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |last| {
+            Some(clock.max(last + 1))
+        })
+        .unwrap_or_default();
+    clock.max(previous + 1)
 }

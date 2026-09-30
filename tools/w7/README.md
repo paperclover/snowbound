@@ -96,6 +96,37 @@ The control agent starts minimized after login. Its taskbar button remains
 available for diagnosis without covering OneNote or changing screenshot-based
 test coordinates.
 
+## Windows 10 and 11
+
+`win10` (22H2 x64, emulated like Windows 7, so slow) and `win11` (24H2 arm64,
+hardware-virtualized) are further bases for clones. They install unattended and
+headless from Microsoft's Media Creation Tool catalog: Pro from the
+volume-license image, which installs without a product key and stays
+unactivated, with local administrator `one` / `one`. Setup's first logon runs
+[unattend/lab-setup.cmd](unattend/lab-setup.cmd), which installs the agent like
+the Windows 7 build and restarts into it.
+
+```sh
+./windows_media.py win11                 # -> $ONE_VM_HOME/media/win11.iso (brew: wimlib xorriso)
+./vm.py install --base win11             # headless; add --display to watch
+./mcp_win7.py --target win11-build health  # answers once the build reaches its desktop
+./vm.py poweroff win11-build
+./vm.py seal --base win11
+./vm.py up w11 --base win11 --wait       # clones work as above; --base is kept per clone
+./mcp_win7.py --target w11 shot
+```
+
+A Windows 11 install reaches its agent in about 10 minutes and a new clone in
+one; Windows 10 takes about 55 minutes and 7, so pass `--timeout 900` to its
+`up --wait`.
+
+Screens are 1024x768, the largest mode edk2 offers the arm64 guest's framebuffer.
+The arm64 guest runs x64 programs, including the agent, through Windows' own
+emulation. Windows on Arm has no inbox driver for any NIC QEMU emulates, so
+`windows_media.py win11` also keeps Red Hat's signed NetKVM driver from the
+virtio-win disc. Transparency is on and DWM's `ForceEffectMode` is set, so Mica
+and Acrylic render on the emulated display adapter.
+
 ## Abrupt-stop recovery tests
 
 `python3 tools/w7/crash.py windows NAME` and `python3 tools/w7/crash.py linux NAME`
@@ -147,6 +178,8 @@ a physical or network-reachable Windows machine.
 
 ## Gotchas
 
+- `-cpu qemu64` lacks SSSE3, which Mesa's llvmpipe (software OpenGL for Snowbound on a clone)
+  needs: `ONE_VM_CPU=Nehalem ./vm.py up NAME --wait` picks another model.
 - Keep Windows display scaling at 100%. Anything else and the screenshot
   coordinates no longer match where clicks land.
 - The listener must run in the interactive logged-in session — as a scheduled
