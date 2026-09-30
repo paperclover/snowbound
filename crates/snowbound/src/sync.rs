@@ -18,8 +18,12 @@ fn button() -> Id {
     Id::ROOT.child("sync-button")
 }
 
-/// The status's label and icon, and what the reader can do about an error.
-fn describe(sync: &SyncStatus) -> (&'static str, &'static [&'static str], Option<&'static str>) {
+/// The status's label and icon, and what the reader can do about an error; `mounted` where
+/// the notebook syncs through the system's mount because Snowbound's client couldn't sign in.
+fn describe(
+    sync: &SyncStatus,
+    mounted: bool,
+) -> (&'static str, &'static [&'static str], Option<&'static str>) {
     if library::offline() {
         return (
             "Working offline",
@@ -53,6 +57,9 @@ fn describe(sync: &SyncStatus) -> (&'static str, &'static [&'static str], Option
         SyncState::Unreadable => ("Can’t read this section", art::SYNC_ERROR, None),
         SyncState::Failed => ("Unable to sync", art::SYNC_ERROR, None),
         SyncState::Syncing => ("Syncing…", art::SYNC_BUSY, None),
+        SyncState::UpToDate if mounted => {
+            ("Using the system’s connection", art::SYNC_WARNING, None)
+        }
         SyncState::UpToDate => ("Up to date", art::SYNC_DONE, None),
     }
 }
@@ -137,15 +144,13 @@ fn update_note(update: &update::Status) -> Option<String> {
 /// and a dot on it says a newer build is ready.
 pub(crate) fn control(ui: &mut Ui, session: &Session, update: &update::Status, theme: &Theme) {
     let sync = overall(&sections(session));
-    let strong = ui.popup_open(id()) || sync.error.is_some() && !library::offline();
-    let (label, icon, _) = describe(&sync);
+    let (label, icon, _) = describe(&sync, session.library.notice.is_some());
     ui.open_as(
         button(),
         Spec {
             flags: Flags::CLICKABLE,
             size: [px(TOOL), px(TOOL)],
             icon: Some(icon),
-            color: Some(if strong { theme.text } else { theme.text_dim }),
             hover_fill: Some(theme.hover()),
             radius: 4.0,
             center: true,
@@ -210,7 +215,7 @@ impl State {
         let offline = library::offline();
         let sections = sections(session);
         let sync = overall(&sections);
-        let (progress, _, advice) = describe(&sync);
+        let (progress, _, advice) = describe(&sync, session.library.notice.is_some());
         ui.open_as(
             id(),
             Spec {
@@ -287,8 +292,23 @@ impl State {
         if let Some(advice) = advice {
             text(ui, "advice", advice, theme.text, false);
         }
+        let mut sign_in = None;
+        if let Some(notice) = &session.library.notice {
+            let notice = format!("Snowbound’s SMB client couldn’t sign in: {notice}");
+            text(ui, "notice", &notice, theme.text_dim, false);
+            if ui::button(ui, "sign-in", "Sign In\u{2026}").clicked {
+                sign_in = Some(session.library.location.clone());
+            }
+        }
         text(ui, "sections", "Sections", theme.text, true);
-        for (index, (path, sync)) in sections.iter().enumerate() {
+        // OneNote's sync dialog leaves out the recycle bin, unless something is wrong there.
+        let listed = sections.iter().filter(|(path, sync)| {
+            sync.error.is_some()
+                || !path
+                    .rsplit_once('/')
+                    .is_some_and(|(folder, _)| library::recycle_bin(folder))
+        });
+        for (index, (path, sync)) in listed.enumerate() {
             ui.open(
                 format!("section-{index}"),
                 Spec {
@@ -308,8 +328,8 @@ impl State {
                 },
             );
             let status = match sync.queued {
-                0 => describe(sync).0.to_owned(),
-                queued => format!("{}, {}", describe(sync).0, changes(queued)),
+                0 => describe(sync, false).0.to_owned(),
+                queued => format!("{}, {}", describe(sync, false).0, changes(queued)),
             };
             ui.leaf(
                 "status",
@@ -325,10 +345,6 @@ impl State {
                 let part = format!("section-{index}-error");
                 text(ui, &part, &error.to_string(), theme.text_dim, false);
             }
-        }
-        if let Some(notice) = &session.library.notice {
-            let notice = format!("Snowbound’s SMB client couldn’t sign in: {notice}");
-            text(ui, "notice", &notice, theme.text_dim, false);
         }
         let (mut folder, mut restart) = (false, false);
         if let Some(note) = update_note(&update) {
@@ -413,6 +429,11 @@ impl State {
         }
         if let Some(file) = file.filter(|_| show) {
             platform::show_file(&file);
+        }
+        if let Some(location) = sign_in {
+            self.ui.close_popup(id());
+            self.commands
+                .push(crate::Command::OpenFromServer(Some(location)));
         }
         match update {
             update::Status::Downloading(version)

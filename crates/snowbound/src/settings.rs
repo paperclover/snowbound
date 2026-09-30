@@ -30,6 +30,9 @@ pub struct Settings {
     pub tags: Option<Vec<canvas::editor::NoteTag>>,
     /// Checks for updates only when Check for Updates… asks.
     pub manual_updates: bool,
+    /// Draws a tablet pen's strokes at its width, as OneNote 2010 with "Use pen pressure
+    /// sensitivity" off.
+    pub ignore_pen_pressure: bool,
 }
 
 /// What the toolbar's buttons apply from their menus' last picks.
@@ -140,6 +143,7 @@ impl crate::State {
             search_scope: self.search.default,
             tags: (self.tags != canvas::editor::NoteTag::defaults()).then(|| self.tags.clone()),
             manual_updates: !self.updates.automatic(),
+            ignore_pen_pressure: !self.pen_pressure,
         };
         if let Err(error) = settings.save(path) {
             eprintln!("Cannot save the settings in {}: {error}", path.display());
@@ -199,6 +203,7 @@ mod tests {
                 art: Some(format!("{}.png", "ab".repeat(32))),
             }]),
             manual_updates: true,
+            ignore_pen_pressure: true,
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);

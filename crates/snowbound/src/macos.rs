@@ -344,6 +344,88 @@ pub fn smb_mount(path: &std::path::Path) -> Option<crate::library::Mount> {
     crate::library::Mount::parse(&text(&mount.f_mntfromname), &within.to_string_lossy(), "")
 }
 
+#[allow(non_camel_case_types)]
+type DNSServiceResolveReply = extern "C" fn(
+    service: *mut std::ffi::c_void,
+    flags: u32,
+    interface: u32,
+    error: i32,
+    name: *const libc::c_char,
+    host: *const libc::c_char,
+    port: u16,
+    txt_length: u16,
+    txt: *const u8,
+    context: *mut std::ffi::c_void,
+);
+
+unsafe extern "C" {
+    fn DNSServiceResolve(
+        service: *mut *mut std::ffi::c_void,
+        flags: u32,
+        interface: u32,
+        name: *const libc::c_char,
+        kind: *const libc::c_char,
+        domain: *const libc::c_char,
+        reply: DNSServiceResolveReply,
+        context: *mut std::ffi::c_void,
+    ) -> i32;
+    fn DNSServiceRefSockFD(service: *mut std::ffi::c_void) -> i32;
+    fn DNSServiceProcessResult(service: *mut std::ffi::c_void) -> i32;
+    fn DNSServiceRefDeallocate(service: *mut std::ffi::c_void);
+}
+
+/// The `host:port` the SMB service Bonjour names `instance` answers at.
+pub fn bonjour_endpoint(instance: &str) -> Option<String> {
+    extern "C" fn resolved(
+        _: *mut std::ffi::c_void,
+        _: u32,
+        _: u32,
+        error: i32,
+        _: *const libc::c_char,
+        host: *const libc::c_char,
+        port: u16,
+        _: u16,
+        _: *const u8,
+        context: *mut std::ffi::c_void,
+    ) {
+        if error != 0 || host.is_null() {
+            return;
+        }
+        let host = unsafe { std::ffi::CStr::from_ptr(host) }.to_string_lossy();
+        let found = format!("{}:{}", host.trim_end_matches('.'), u16::from_be(port));
+        unsafe { *context.cast::<Option<String>>() = Some(found) };
+    }
+    let name = std::ffi::CString::new(instance).ok()?;
+    let mut service = std::ptr::null_mut();
+    let mut found: Option<String> = None;
+    let status = unsafe {
+        DNSServiceResolve(
+            &mut service,
+            0,
+            0,
+            name.as_ptr(),
+            c"_smb._tcp".as_ptr(),
+            c"local.".as_ptr(),
+            resolved,
+            (&raw mut found).cast(),
+        )
+    };
+    if status != 0 {
+        return None;
+    }
+    let mut ready = libc::pollfd {
+        fd: unsafe { DNSServiceRefSockFD(service) },
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // As long as the Finder waits to connect.
+    if unsafe { libc::poll(&mut ready, 1, 5000) } == 1 {
+        unsafe { DNSServiceProcessResult(service) };
+    }
+    unsafe { DNSServiceRefDeallocate(service) };
+    found
+}
+
 #[link(name = "Security", kind = "framework")]
 unsafe extern "C" {
     fn SecKeychainFindInternetPassword(
@@ -1293,5 +1375,15 @@ mod tests {
         unsafe { SecKeychainDelete(keychain) };
         let _ = std::fs::remove_file(&path);
         assert_eq!(read.unwrap().password, "second");
+    }
+
+    /// A server the Finder mounted by its Bonjour service resolves to where it answers.
+    #[test]
+    #[ignore = "requires SNOWBOUND_TEST_BONJOUR naming an SMB service on this network"]
+    fn bonjour_services_resolve_to_their_host() {
+        let instance = std::env::var("SNOWBOUND_TEST_BONJOUR").unwrap();
+        let endpoint = super::bonjour_endpoint(&instance).unwrap();
+        assert!(endpoint.contains(".local:"), "{endpoint}");
+        assert_eq!(super::bonjour_endpoint("snowbound-no-such-service"), None);
     }
 }

@@ -69,6 +69,7 @@ pub const SYNC_BUSY: &[&str] = art!("icons/sync-busy");
 pub const SYNC_DONE: &[&str] = art!("icons/sync-done");
 pub const SYNC_ERROR: &[&str] = art!("icons/sync-error");
 pub const SYNC_OFFLINE: &[&str] = art!("icons/sync-offline");
+pub const SYNC_WARNING: &[&str] = art!("icons/sync-warning");
 
 pub const ERASER: &[&str] = art!("icons/eraser");
 pub const LASSO: &[&str] = art!("icons/lasso");

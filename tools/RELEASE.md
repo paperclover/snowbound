@@ -47,9 +47,14 @@ build with the new public half, signed with the old key.
 
 The macOS app is signed with Clover's Developer ID Application certificate
 (team 9R7DPNW28H), named in `release.py` by its SHA-1 hash, since its name is
-the account holder's legal name, which nothing here prints or stores. It gets
-hardened runtime, a secure timestamp, and the microphone and camera
-entitlements recording needs. `--ad-hoc` signs ad hoc instead; the 10.6 bundle
+the account holder's legal name, which nothing here prints or stores.
+`build_macos.py --sign developer-id` signs it, embedding the Developer ID
+provisioning profile for `net.paperclover.snowbound` ("Snowbound Developer ID",
+found where Xcode keeps profiles) as `Contents/embedded.provisionprofile`, with
+hardened runtime, a secure timestamp, the production iCloud container
+`iCloud.net.paperclover.snowbound` that Use iCloud Drive needs, and the
+microphone and camera entitlements recording needs. It fails rather than fall
+back to ad hoc. `--ad-hoc` signs ad hoc instead, without iCloud; the 10.6 bundle
 stays unsigned, as it predates Developer ID. codesign fails with
 `errSecInternalComponent` where it can't ask to use the private key, as from an
 agent's shell; `security set-key-partition-list -S apple-tool:,apple:,codesign:
@@ -90,7 +95,8 @@ the working copy didn't change meanwhile. It zips the apps with `ditto`, hashes 
 publishes as above. Run again for the same commit, it only brings
 `latest.json` up to date; a different commit that derives the same version is
 refused. The 10.6 build needs the SDK and nightly toolchain
-`platform/snow-leopard/cargo.sh` names; the Linux builds need `zig`.
+`platform/snow-leopard/cargo.sh` names; the Linux builds need `zig`, as the
+cross linker against glibc 2.31. All four build from an Apple silicon Mac.
 
 ## In the app
 

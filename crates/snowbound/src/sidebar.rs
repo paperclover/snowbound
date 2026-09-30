@@ -1042,6 +1042,18 @@ impl crate::State {
         {
             return;
         }
+        self.read_notebook(location, section, open, read);
+    }
+
+    /// Shows `section`, or the first section, of the notebook at `location`, `open` or read
+    /// with `read`, in place of the notebook listed there.
+    pub(crate) fn read_notebook(
+        &mut self,
+        location: String,
+        section: Option<String>,
+        open: Option<Arc<Library>>,
+        read: impl FnOnce(&str, &std::path::Path) -> Result<Library, String> + Send + 'static,
+    ) {
         let (cache, notify) = (self.cache.clone(), crate::notify(self.proxy.clone()));
         self.load(move || {
             let library = match open {

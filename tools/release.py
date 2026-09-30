@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import plistlib
 import shutil
 import subprocess
 import sys
@@ -29,11 +28,6 @@ CHECKS = [
 IDENTITY = 'BA308AA3591299E053E8824CEF1651F686F8908E'
 # The App Store Connect API key that notarizes it: {"key": P8 PATH, "key_id": ID, "issuer": ID}.
 NOTARY = Path('~/.config/snowbound/notary.json').expanduser()
-# What hardened runtime needs for Record Audio and Record Video.
-ENTITLEMENTS = {
-    'com.apple.security.device.audio-input': True,
-    'com.apple.security.device.camera': True,
-}
 
 
 def derive(release, commits):
@@ -109,21 +103,21 @@ def notary():
 
 
 def build_mac(platform, folder, developer_id, notarize):
-    """The zipped app; 10.6's stays unsigned, as it predates Developer ID."""
+    """The zipped app, which build_macos.py signs; 10.6's stays unsigned, as it predates Developer ID."""
     bundle = folder / 'Snowbound.app'
-    run([sys.executable, ROOT / 'tools/canvas/build_macos.py', '--release', '--output', bundle]
-        + (['--snow-leopard'] if platform == 'macos-10.6' else []))
+    if platform == 'macos-10.6':
+        signing = ['--snow-leopard']
+    elif developer_id:
+        signing = ['--sign', 'developer-id', '--sign-identity', IDENTITY]
+    else:
+        signing = ['--sign', 'ad-hoc']
+    run([sys.executable, ROOT / 'tools/canvas/build_macos.py', '--release', '--output', bundle, *signing])
     archive = folder / 'archive.zip'
-    if developer_id and platform != 'macos-10.6':
-        entitlements = folder / 'entitlements.plist'
-        entitlements.write_bytes(plistlib.dumps(ENTITLEMENTS))
-        run(['codesign', '--force', '--options', 'runtime', '--timestamp', '--entitlements', entitlements,
-             '--sign', IDENTITY, bundle])
-        if notarize:
-            zip_bundle(bundle, archive)
-            run(['xcrun', 'notarytool', 'submit', archive, *notarize, '--wait'])
-            run(['xcrun', 'stapler', 'staple', bundle])
-            archive.unlink()
+    if notarize and platform != 'macos-10.6':
+        zip_bundle(bundle, archive)
+        run(['xcrun', 'notarytool', 'submit', archive, *notarize, '--wait'])
+        run(['xcrun', 'stapler', 'staple', bundle])
+        archive.unlink()
     zip_bundle(bundle, archive)
     return archive
 
@@ -208,7 +202,8 @@ def main():
         shutil.rmtree(partial, ignore_errors=True)
         partial.mkdir()
         for file in [*files.values(), stage / 'build.json', stage / 'build.json.sig']:
-            shutil.copyfile(file, partial / file.name)
+            # copy() keeps the Linux executables executable for anyone running them off the share.
+            shutil.copy(file, partial / file.name)
         partial.rename(target)
         shutil.rmtree(stage)
         print(f'Published {target}')

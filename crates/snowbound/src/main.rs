@@ -614,6 +614,8 @@ struct State {
     /// The system's spell checker, where it has one.
     spelling: Option<canvas::spelling::Spelling>,
     hide_spelling: bool,
+    /// Options' "Use pen pressure sensitivity": a tablet pen's strokes follow its pressure.
+    pen_pressure: bool,
     /// The word the Spelling pane shows.
     correction: Option<canvas::interaction::Correction>,
     /// The strip's fill with the window focused and not, continuing the system's title bar.
@@ -980,6 +982,7 @@ impl State {
             page_grafted: false,
             spelling,
             hide_spelling: stored.hide_spelling,
+            pen_pressure: !stored.ignore_pen_pressure,
             correction: None,
         };
         // A notebook opened from its server that couldn't sign in asks to, as the Finder does.
@@ -2534,7 +2537,7 @@ impl State {
             let response = match event {
                 ui::Event::PointerMoved(point) => self.view.pointer_moved(device(point))?,
                 ui::Event::Pressure(pressure) => {
-                    self.view.set_pressure(pressure);
+                    self.view.set_pressure(pressure.filter(|_| self.pen_pressure));
                     continue;
                 }
                 ui::Event::PointerLeft => self.view.pointer_left(),

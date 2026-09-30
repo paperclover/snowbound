@@ -161,7 +161,10 @@ themes.
 A pen that reports pressure (a tablet on macOS, the Apple Pencil) draws and stores it as
 OneNote 2010 does with pressure sensitivity on: each point's width is the pen's times
 0.25 plus 1.5 times the pressure, and the stroke keeps NormalPressure beside X and Y
-(`corpus/ink-pressure`). A mouse or finger draws at the pen's width.
+(`corpus/ink-pressure`). A mouse, trackpad or finger draws at the pen's width, and so
+does every pen with OneNote's "Use pen pressure sensitivity" turned off (Options >
+Advanced on the desktop, the pen's colour menu on iOS; on by default). winit reports no
+tablet pressure on Linux.
 
 ## Tables and selections across them
 

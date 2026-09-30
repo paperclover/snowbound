@@ -14,7 +14,7 @@ cargo test -p draw -- --ignored
 cargo test -p canvas --features gpu gpu:: -- --ignored
 ```
 
-The builder signs and verifies the local bundle: with team `9R7DPNW28H`'s Developer ID Application identity (found in the keychain by team, chosen by SHA-1, or `--sign-identity SHA1`) and a Developer ID provisioning profile for `net.paperclover.snowbound` naming `iCloud.net.paperclover.snowbound` (found in Xcode's profile folders, or `--profile PATH`), with hardened runtime and the iCloud container, which Use iCloud Drive needs; without both, ad hoc. To preserve an existing app during review, provide a new bundle path and a distinct identifier together:
+The builder signs and verifies the local bundle: with team `9R7DPNW28H`'s Developer ID Application identity (found in the keychain by team, chosen by SHA-1, or `--sign-identity SHA1`) and a Developer ID provisioning profile for `net.paperclover.snowbound` naming `iCloud.net.paperclover.snowbound` (found in Xcode's profile folders, or `--profile PATH`), with hardened runtime and the iCloud container, which Use iCloud Drive needs; without both, ad hoc. `--sign developer-id` fails instead of falling back, and `--sign ad-hoc` skips Developer ID. To preserve an existing app during review, provide a new bundle path and a distinct identifier together:
 
 ```sh
 python3 tools/canvas/build_macos.py --release --output '/PATH/Snowbound Review.app' --bundle-id net.paperclover.snowbound.review

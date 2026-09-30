@@ -22,9 +22,13 @@ parser.add_argument('--sign-identity', metavar='SHA1',
                     help="A Developer ID Application certificate's SHA-1 hash; found in the keychain otherwise")
 parser.add_argument('--profile', type=Path,
                     help='A Developer ID provisioning profile for the app; found where Xcode keeps them otherwise')
+parser.add_argument('--sign', choices=['developer-id', 'ad-hoc'],
+                    help='Require Developer ID with the iCloud container, or sign ad hoc; Developer ID where available otherwise')
 args = parser.parse_args()
 if args.bundle_id and not args.output:
     parser.error('Use --bundle-id with --output.')
+if args.sign and args.snow_leopard:
+    parser.error('The 10.6 bundle stays unsigned.')
 if args.output and (args.output.suffix != '.app' or args.output.exists()):
     parser.error('Choose a new output path ending in .app.')
 root = Path(__file__).resolve().parents[2]
@@ -133,8 +137,8 @@ if build:
 } | versions | ({'LSMinimumSystemVersion': '10.6'} if args.snow_leopard else {})))
 # 10.6 runs the bundle unsigned.
 if not args.snow_leopard:
-    identity = args.sign_identity or developer_id()
-    profile = args.profile or developer_id_profile()
+    identity = args.sign != 'ad-hoc' and (args.sign_identity or developer_id())
+    profile = args.sign != 'ad-hoc' and (args.profile or developer_id_profile())
     if identity and profile and (args.bundle_id or BUNDLE_ID) == BUNDLE_ID:
         shutil.copy2(profile, bundle / 'Contents/embedded.provisionprofile')
         with tempfile.TemporaryDirectory() as scratch:
@@ -145,13 +149,18 @@ if not args.snow_leopard:
                 'com.apple.developer.icloud-services': ['CloudDocuments'],
                 'com.apple.developer.icloud-container-identifiers': [CONTAINER],
                 'com.apple.developer.ubiquity-container-identifiers': [CONTAINER],
+                'com.apple.developer.icloud-container-environment': 'Production',
                 # Hardened runtime's Record Audio and Record Video.
                 'com.apple.security.device.audio-input': True,
                 'com.apple.security.device.camera': True,
             }))
-            subprocess.run(['codesign', '--force', '--options', 'runtime', '--entitlements', entitlements,
+            # A release fails where the timestamp server can't be reached, as notarization needs it.
+            timestamp = ['--timestamp'] if args.sign == 'developer-id' else []
+            subprocess.run(['codesign', '--force', '--options', 'runtime', *timestamp, '--entitlements', entitlements,
                             '--sign', identity, str(bundle)], check=True)
         print(f'Signed with the Developer ID of team {TEAM}, with the iCloud container {CONTAINER}.')
+    elif args.sign == 'developer-id':
+        raise SystemExit(f'No Developer ID Application identity of team {TEAM} and profile for {BUNDLE_ID} with {CONTAINER}.')
     else:
         subprocess.run(['codesign', '--force', '--sign', '-', str(bundle)], check=True)
     subprocess.run(['codesign', '--verify', '--strict', str(bundle)], check=True)

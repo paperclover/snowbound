@@ -43,6 +43,9 @@ pub struct Connect {
     asked: u64,
     /// A notebook listed as open that could not sign in, which opens once it lists.
     reopen: bool,
+    /// The folder of a notebook read through the system's mount of the share, which moves to
+    /// the embedded client once it signs in.
+    mounted: Option<String>,
     replies: (mpsc::Sender<Reply>, mpsc::Receiver<Reply>),
 }
 
@@ -207,6 +210,7 @@ impl Connect {
             status: Status::Idle,
             asked: 0,
             reopen: false,
+            mounted: None,
             replies: mpsc::channel(),
         }
     }
@@ -357,12 +361,20 @@ fn domain_field() -> Id {
 
 impl State {
     /// Opens the dialog; on `location`, a notebook opened from its server that couldn't sign
-    /// in, at its sign-in with any password the keychain keeps tried first.
+    /// in, or read through the system's mount because Snowbound's client couldn't, at its
+    /// sign-in with any password the keychain keeps tried first.
     pub(crate) fn open_server(&mut self, location: Option<&str>) {
+        let mounted =
+            location.filter(|location| crate::library::server_address(location).is_none());
+        let address = match mounted {
+            Some(folder) => platform::smb_mount(Path::new(folder)).map(|mount| mount.url()),
+            None => location.map(str::to_owned),
+        };
         let mut connect = Connect::new(
-            location.unwrap_or_default().to_owned(),
+            address.unwrap_or_default(),
             platform::remember_label().map(|_| false),
         );
+        connect.mounted = mounted.map(str::to_owned);
         let mut request = None;
         if location.is_some() {
             connect.reopen = true;
@@ -409,15 +421,25 @@ impl State {
         });
     }
 
-    /// Opens the notebook at `mount` through the embedded client signed in as `login`, and
-    /// closes the dialog.
+    /// Opens the notebook at `mount` through the embedded client signed in as `login`, in
+    /// place of any reading it through the system's mount, and closes the dialog.
     fn open_from_server(&mut self, mount: Mount, login: Login) {
         self.ui.close_popup(id());
-        self.server = None;
-        let location = mount.url();
-        self.open_notebook_with(location, None, move |location, cache| {
-            Library::on_share(location, mount, login, cache)
-        });
+        let url = mount.url();
+        let read =
+            move |location: &str, cache: &Path| Library::on_share(location, mount, login, cache);
+        match self.server.take().and_then(|connect| connect.mounted) {
+            // The notebook stays where it was listed and shown, now read by Snowbound's client.
+            Some(folder) => {
+                let section = self
+                    .session
+                    .as_ref()
+                    .filter(|session| session.library.location == folder)
+                    .map(|session| session.tabs[session.tab].path.clone());
+                self.read_notebook(folder, section, None, read);
+            }
+            None => self.open_notebook_with(url, None, read),
+        }
     }
 
     /// Builds the dialog while it is open.

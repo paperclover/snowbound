@@ -28,8 +28,9 @@ What it shows, and `crates/onestore/tests/page_ink.rs` pins:
 
 Snowbound reads pressure the same way and draws it as OneNote does. A stroke drawn with a pen
 that reports pressure (a tablet on macOS, the Apple Pencil) stores X, Y and NormalPressure
-from 0 to 1023 without IgnorePressure, as OneNote does with the option on; a mouse's or a
-finger's stroke stays as OneNote's mouse ink.
+from 0 to 1023 without IgnorePressure, as OneNote does with the option on; a mouse's,
+trackpad's or finger's stroke, or any stroke with Snowbound's own "Use pen pressure
+sensitivity" off, stays as OneNote's mouse ink.
 
 `candidate` is `pressure_ink_is_written_as_onenote_keeps_it_and_survives_edits` in
 `page_ink.rs` (`ONESTORE_INK_PRESSURE_EXPORT`): the native file with the first drawing's

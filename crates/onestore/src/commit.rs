@@ -3,7 +3,6 @@ use std::io::{self, ErrorKind};
 #[cfg(any(unix, windows))]
 use std::{
     fs::File,
-    io::Read,
     path::Path,
     sync::{Mutex, MutexGuard},
 };
@@ -33,11 +32,14 @@ impl FileIo {
         {
             use std::os::unix::fs::OpenOptionsExt;
             // SMB can lose exclusion when separate opens race with flock. On smbfs these are
-            // share modes: a shared reader denies only writers, so OneNote's readers proceed.
-            let lock = if write {
-                nix::libc::O_EXLOCK
-            } else {
-                nix::libc::O_SHLOCK
+            // share modes, taken as OneNote takes them: a writer's shared lock denies only
+            // other writers, and a reader takes none, as `stable` sees past a commit.
+            let smb = nix::sys::statfs::statfs(path.as_ref())
+                .is_ok_and(|fs| fs.filesystem_type_name() == "smbfs");
+            let lock = match (write, smb) {
+                (true, false) => nix::libc::O_EXLOCK,
+                (false, true) => 0,
+                _ => nix::libc::O_SHLOCK,
             };
             options.custom_flags(lock | nix::libc::O_NONBLOCK);
         }
@@ -105,8 +107,9 @@ pub fn place_file(path: impl AsRef<Path>, ancestor: [u8; 16], name: &str) -> io:
     released
 }
 
-/// Reads a snapshot excluding writers, as commits exclude everyone (macOS shares it with
-/// other readers). Native writers can expose incomplete graphs to unlocked filesystem reads.
+/// Reads a snapshot, excluding writers as their commits exclude it, except on an SMB mount,
+/// where it takes no lock, as OneNote's readers take none (macOS shares it with other readers).
+/// A read that meets a commit in progress is read again, then refused as `WouldBlock`.
 #[cfg(any(unix, windows))]
 pub fn read_file(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     read_file_limited(path, usize::MAX)
@@ -116,19 +119,54 @@ pub fn read_file(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
 /// A size failure returns `FileTooLarge` without a partial snapshot.
 #[cfg(any(unix, windows))]
 pub fn read_file_limited(path: impl AsRef<Path>, limit: usize) -> io::Result<Vec<u8>> {
-    let count = u64::try_from(limit)
-        .map_err(|_| ErrorKind::InvalidInput)?
-        .saturating_add(1);
     let mut io = FileIo::open(path, false)?;
-    let mut bytes = Vec::new();
-    let result = (&mut io.file).take(count).read_to_end(&mut bytes);
+    let result = stable(|offset, output| io.read_at(offset, output), limit);
     let released = io.release();
-    result?;
+    let bytes = result?;
     released?;
-    if bytes.len() > limit {
-        return Err(ErrorKind::FileTooLarge.into());
-    }
     Ok(bytes)
+}
+
+/// How many times a read that meets a commit in progress is made before it is refused.
+#[cfg(any(unix, windows))]
+const TRIES: usize = 3;
+
+/// The file through `read`, read again where a commit tore it: its header changed while it was
+/// read, as commits write the header last, or it ends short of the header's length.
+#[cfg(any(unix, windows))]
+fn stable(
+    mut read: impl FnMut(u64, &mut [u8]) -> io::Result<usize>,
+    limit: usize,
+) -> io::Result<Vec<u8>> {
+    let mut block = vec![0; 1 << 16];
+    for _ in 0..TRIES {
+        let mut bytes = Vec::new();
+        loop {
+            let size = (limit.saturating_add(1) - bytes.len()).min(block.len());
+            match read(bytes.len() as u64, &mut block[..size]) {
+                Ok(0) => break,
+                Ok(count) if count <= size => bytes.extend_from_slice(&block[..count]),
+                Ok(_) => return Err(ErrorKind::InvalidData.into()),
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(error) => return Err(error),
+            }
+            if bytes.len() > limit {
+                return Err(ErrorKind::FileTooLarge.into());
+            }
+        }
+        let mut header = vec![0; bytes.len().min(1024)];
+        match crate::snapshot::read_exact(&mut read, 0, &mut header) {
+            Ok(()) => {}
+            Err(error) if error.kind() == ErrorKind::UnexpectedEof => continue,
+            Err(error) => return Err(error),
+        }
+        let whole = crate::Header::parse(&bytes)
+            .map_or(true, |parsed| parsed.expected_length <= bytes.len() as u64);
+        if header == bytes[..header.len()] && whole {
+            return Ok(bytes);
+        }
+    }
+    Err(ErrorKind::WouldBlock.into())
 }
 
 #[cfg(any(unix, windows))]
@@ -432,5 +470,62 @@ impl Transaction {
         })?;
         let result = self.commit(&mut io);
         io.finish(result)
+    }
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod tests {
+    use super::*;
+
+    /// Reads `bytes`, changing a header byte on each of the first `changes` rereads of it.
+    fn reader(bytes: &[u8], mut changes: usize) -> impl FnMut(u64, &mut [u8]) -> io::Result<usize> {
+        let mut bytes = bytes.to_vec();
+        let mut reads = 0;
+        move |offset, output| {
+            if offset == 0 {
+                reads += 1;
+                // Each pass reads the header twice: with the body, then to check it.
+                if reads % 2 == 0 && changes > 0 {
+                    changes -= 1;
+                    bytes[1000] ^= 1;
+                }
+            }
+            let rest = bytes.get(offset as usize..).unwrap_or_default();
+            let count = rest.len().min(output.len());
+            output[..count].copy_from_slice(&rest[..count]);
+            Ok(count)
+        }
+    }
+
+    #[test]
+    fn a_read_torn_by_a_commit_is_read_again_then_refused() {
+        let section = crate::create_section("Torn.one", "Text", "Fixture").unwrap();
+        assert_eq!(stable(reader(&section, 0), section.len()).unwrap(), section);
+        let mut changed = section.clone();
+        changed[1000] ^= 1;
+        assert_eq!(stable(reader(&section, 1), section.len()).unwrap(), changed);
+        assert_eq!(
+            stable(reader(&section, TRIES), section.len())
+                .unwrap_err()
+                .kind(),
+            ErrorKind::WouldBlock
+        );
+        // Storage shortened ahead of the header that publishes its new length.
+        let short = &section[..section.len() - 1];
+        assert_eq!(
+            stable(reader(short, 0), section.len()).unwrap_err().kind(),
+            ErrorKind::WouldBlock
+        );
+        assert_eq!(
+            stable(reader(&section, 0), section.len() - 1)
+                .unwrap_err()
+                .kind(),
+            ErrorKind::FileTooLarge
+        );
+        // Files that are not revision stores read as they are.
+        assert_eq!(
+            stable(reader(b"unfinished", 0), 100).unwrap(),
+            b"unfinished"
+        );
     }
 }

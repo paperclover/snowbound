@@ -28,6 +28,13 @@ struct Pen {
     let width: Float
     let highlighter: Bool
 
+    /// OneNote 2010's "Use pen pressure sensitivity": the Pencil's strokes follow its pressure
+    /// unless turned off, when they keep their pen's width.
+    static var pressure: Bool {
+        get { !UserDefaults.standard.bool(forKey: "ignorePenPressure") }
+        set { UserDefaults.standard.set(!newValue, forKey: "ignorePenPressure") }
+    }
+
     /// The pens under a section of tab colour `section`, a COLORREF: its accent, then
     /// OneNote 2010's favourites, as the desktop's gallery.
     static func gallery(_ section: UInt32) -> [Pen] {
@@ -56,7 +63,7 @@ final class InkGesture: UIGestureRecognizer {
     private var tracked: UITouch?
 
     private func sample(_ touch: UITouch) -> InkSample {
-        let pressure = touch.type == .pencil ? Float(touch.force / touch.maximumPossibleForce) : -1
+        let pressure = touch.type == .pencil && Pen.pressure ? Float(touch.force / touch.maximumPossibleForce) : -1
         return (touch.preciseLocation(in: view), pressure)
     }
 
@@ -275,7 +282,14 @@ final class InkPicker: UIView {
             action.state = other == width ? .on : .off
             return action
         }
-        return [UIMenu(options: .displayInline, children: swatches), UIMenu(options: .displayInline, children: weights)]
+        let pressure = UIAction(title: "Use pen pressure sensitivity", image: UIImage(systemName: "hand.draw")) { _ in
+            Pen.pressure.toggle()
+        }
+        pressure.state = Pen.pressure ? .on : .off
+        return [
+            UIMenu(options: .displayInline, children: swatches), UIMenu(options: .displayInline, children: weights),
+            UIMenu(options: .displayInline, children: [pressure]),
+        ]
     }
 
     private static func name(_ color: UIColor?) -> String { color?.accessibilityName.capitalized ?? "Black" }

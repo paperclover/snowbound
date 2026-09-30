@@ -7,8 +7,14 @@ for %%D in (D E F G H I J K L M N O P Q R S T U V W X Y Z) do if exist "%%D:\one
 )
 if not defined ONEVM_HOSTNAME goto agent
 if /i "%COMPUTERNAME%"=="%ONEVM_HOSTNAME%" goto agent
+rem Windows 11 ships without wmic; Windows 7 PowerShell lacks Rename-Computer.
+where wmic >nul 2>&1 || goto rename_powershell
 wmic computersystem where name="%COMPUTERNAME%" call rename name="%ONEVM_HOSTNAME%" >"%~dp0bootstrap.log" 2>&1
 find "ReturnValue = 0;" "%~dp0bootstrap.log" >nul || exit /b 1
+goto restart
+:rename_powershell
+powershell -NoProfile -Command "Rename-Computer -NewName '%ONEVM_HOSTNAME%' -Force -ErrorAction Stop" >"%~dp0bootstrap.log" 2>&1 || exit /b 1
+:restart
 shutdown /r /t 0
 exit /b
 

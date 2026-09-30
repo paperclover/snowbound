@@ -23,13 +23,15 @@ enum Page {
     General,
     Display,
     SaveBackup,
+    Advanced,
 }
 
 impl Page {
-    const ALL: [(Page, &str); 3] = [
+    const ALL: [(Page, &str); 4] = [
         (Page::General, "General"),
         (Page::Display, "Display"),
         (Page::SaveBackup, "Save & Backup"),
+        (Page::Advanced, "Advanced"),
     ];
 }
 
@@ -40,6 +42,7 @@ pub struct Options {
     color_scheme: ColorScheme,
     light_pages: bool,
     automatic_updates: bool,
+    pen_pressure: bool,
 }
 
 fn id() -> Id {
@@ -62,6 +65,7 @@ impl State {
             color_scheme: self.color_scheme,
             light_pages: self.light_pages,
             automatic_updates: self.updates.automatic(),
+            pen_pressure: self.pen_pressure,
         });
         self.ui.open_popup(id());
         self.ui.set_focus(Some(user_name()));
@@ -252,6 +256,19 @@ impl State {
                     options.light_pages = dark;
                 }
             }
+            Page::Advanced => {
+                heading(ui, &theme, "Pen");
+                if ui::check_box(
+                    ui,
+                    "pen-pressure",
+                    "Use pen pressure sensitivity",
+                    options.pen_pressure,
+                )
+                .clicked
+                {
+                    options.pen_pressure = !options.pen_pressure;
+                }
+            }
             Page::SaveBackup => {
                 heading(ui, &theme, "Cache file location");
                 let cache = &self.cache;
@@ -304,6 +321,7 @@ impl State {
             self.author = name.to_owned();
             self.color_scheme = options.color_scheme;
             self.light_pages = options.light_pages;
+            self.pen_pressure = options.pen_pressure;
             self.updates.set_automatic(options.automatic_updates);
             self.follow_color_scheme();
             self.save_settings();

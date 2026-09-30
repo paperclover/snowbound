@@ -157,8 +157,17 @@ impl Mount {
         }
     }
 
-    /// Where the embedded client dials: the server, on SMB's port unless it names another.
+    /// Where the embedded client dials: the server, on SMB's port unless it names another;
+    /// for a Bonjour service, where it answers now.
     pub fn endpoint(&self) -> String {
+        if let Some(instance) = bonjour_instance(&self.server) {
+            #[cfg(target_os = "macos")]
+            if let Some(endpoint) = crate::platform::bonjour_endpoint(&instance) {
+                return endpoint;
+            }
+            // Samba and macOS name their service after the host, which mDNS answers for.
+            return format!("{instance}.local:445");
+        }
         if self.host() == self.server {
             format!("{}:445", self.server)
         } else {
@@ -174,6 +183,14 @@ impl Mount {
             .unwrap_or(&self.share)
             .to_owned()
     }
+}
+
+/// The Bonjour SMB service `server` names, as the Finder mounts a server it browsed to.
+fn bonjour_instance(server: &str) -> Option<String> {
+    let instance = server
+        .trim_end_matches('.')
+        .strip_suffix("._smb._tcp.local")?;
+    (!instance.is_empty()).then(|| decode(instance))
 }
 
 /// `text` with `%XX` escapes decoded.
@@ -1048,6 +1065,22 @@ mod tests {
         let guest = Mount::parse("//GUEST:@nas/public", "", "").unwrap();
         assert_eq!((guest.user, guest.root), (None, String::new()));
         assert_eq!(Mount::parse("/dev/disk1", "", ""), None);
+    }
+
+    /// The Finder's mount keeps the Bonjour name its keychain entry is under; only dialing
+    /// resolves it.
+    #[test]
+    fn bonjour_mounts_keep_their_service_name() {
+        let mount = Mount::parse("//clo@My%20NAS._smb._tcp.local/agent", "", "").unwrap();
+        assert_eq!(mount.host(), "My%20NAS._smb._tcp.local");
+        assert_eq!(bonjour_instance(&mount.server).as_deref(), Some("My NAS"));
+        assert_eq!(
+            bonjour_instance("zenith._smb._tcp.local.").as_deref(),
+            Some("zenith")
+        );
+        for server in ["zenith.local", "_smb._tcp.local", "10.0.0.1:445"] {
+            assert_eq!(bonjour_instance(server), None, "{server}");
+        }
     }
 
     #[test]
