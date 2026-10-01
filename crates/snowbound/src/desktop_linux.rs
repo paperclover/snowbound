@@ -412,6 +412,12 @@ pub fn uninstall() {
     }
     let mut failed = None;
     let icons = SIZES.map(|side| theme_icon(&data, side));
+    if let Some(staged) = crate::update::staging(&binary)
+        && let Err(error) = fs::remove_dir_all(staged)
+        && error.kind() != io::ErrorKind::NotFound
+    {
+        failed.get_or_insert(error);
+    }
     for path in [entry(&data), mime_types(&data), binary]
         .iter()
         .chain(&icons)

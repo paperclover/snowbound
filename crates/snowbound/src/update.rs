@@ -294,7 +294,7 @@ fn install() -> Option<PathBuf> {
 }
 
 /// The folder an update to `install` unpacks into, beside it so the swap is a rename.
-fn staging(install: &Path) -> Option<PathBuf> {
+pub fn staging(install: &Path) -> Option<PathBuf> {
     let name = install.file_name()?.to_string_lossy();
     Some(install.with_file_name(format!(".{name}.update")))
 }
