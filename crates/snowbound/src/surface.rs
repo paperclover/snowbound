@@ -36,9 +36,21 @@ impl Surface {
         window: Arc<Window>,
         backdrop: bool,
     ) -> Result<(Self, Renderer), Box<dyn Error>> {
-        #[cfg_attr(not(windows), expect(unused_mut))]
+        #[cfg_attr(not(any(windows, target_os = "linux")), expect(unused_mut))]
         let mut descriptor =
             wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone()));
+        // wgpu's OpenGL panics drawing to a Wayland window without libwayland-egl.
+        #[cfg(target_os = "linux")]
+        {
+            use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+            if matches!(
+                window.window_handle()?.as_raw(),
+                RawWindowHandle::Wayland(_)
+            ) && !crate::loader::loads(c"libwayland-egl.so.1")
+            {
+                descriptor.backends.remove(wgpu::Backends::GL);
+            }
+        }
         // Direct3D 12, which Windows 10 and 11 always have, and through DirectComposition
         // where the backdrop shows through; elsewhere `surface_windows` draws with OpenGL.
         #[cfg(windows)]
