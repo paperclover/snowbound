@@ -10,7 +10,7 @@ mkdir -p "$target/dist"
 [ $# -gt 0 ] || set -- x86_64 aarch64
 for arch do
     triple=$arch-unknown-linux-gnu
-    CARGO_PROFILE_RELEASE_STRIP=symbols sh "$root/platform/linux/cargo.sh" "$arch" build \
+    sh "$root/platform/linux/cargo.sh" "$arch" build \
         --manifest-path "$root/Cargo.toml" --release -p snowbound
     # PT_INTERP becomes PT_NULL, so the kernel starts the executable at `loader`'s entry, which
     # finds the system's dynamic loader, NixOS's too. zig rejects --no-dynamic-linker.

@@ -146,6 +146,22 @@ version above 2.17. The Linux executable links only libc, libm, libpthread and
 libdl; Wayland, X11, xkbcommon, EGL, Vulkan, fontconfig, GStreamer and Enchant
 are loaded at run time.
 
+## Symbols and frame pointers
+
+Every executable keeps its symbol table, so backtraces, crash logs, `perf`, gdb
+and Instruments name functions; Cargo's release profile strips only debug info
+(`platform/linux/cc.sh` does that itself, as zig's linker would strip both).
+`.cargo/config.toml` builds every target with frame pointers, and Rust's
+standard library ships with them. The symbols cost about a fifth: Linux x86_64
+grows from 53 to 62 MB, Windows x86_64 from 55 to 72 MB, and the macOS app
+already carried them. Line tables would take an executable to some 250 MB, and
+a dSYM adds 34 MB zipped per Mac architecture, so neither ships; build with
+`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` for files and lines. Windows
+tools that read only PDBs see no names: the Rust targets here emit DWARF, from
+which lld's PDB keeps only global symbols. Linux's crash log gives a signal's
+frames as `snowbound(+0x1a2b3c)`, since glibc's `backtrace_symbols_fd` reads only
+dynamic symbols; `addr2line -f -e snowbound 0x1a2b3c` names them.
+
 ## In the app
 
 `update.rs` runs one thread. With automatic checks on (Options, General) and a

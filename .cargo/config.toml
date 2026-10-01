@@ -1,0 +1,4 @@
+# Frame pointers let perf, Instruments and other sampling profilers walk the stack.
+# A cfg table, unlike build.rustflags, joins the flags the platform scripts give each target.
+[target.'cfg(all())']
+rustflags = ["-C", "force-frame-pointers=yes"]

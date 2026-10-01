@@ -188,8 +188,7 @@ def build_windows(architectures):
     Windows it supports."""
     built = {}
     for arch in architectures:
-        run(['sh', ROOT / 'platform/windows/cargo.sh', arch, 'build', '--release', '-p', 'snowbound'],
-            env={**os.environ, 'CARGO_PROFILE_RELEASE_STRIP': 'symbols'})
+        run(['sh', ROOT / 'platform/windows/cargo.sh', arch, 'build', '--release', '-p', 'snowbound'])
         built[f'windows-{arch}'] = ROOT / f'target/windows/{WINDOWS[arch]}/release/snowbound.exe'
     return built
 
