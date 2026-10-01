@@ -7,9 +7,10 @@ use crate::{
     active::{ActivePage, Changes, Files},
     document::Revision,
     page::Page,
+    protected::{Key, Opened},
     store::StoreState,
     write::{
-        Appending, Commit, LiveRevision, PropertyObject, Sealing, Written, chain_depth,
+        Appending, Commit, LiveRevision, PropertyObject, Protection, Sealing, Written, chain_depth,
         check_transaction, declared, label_payload, node, replacement, unchanged,
     },
 };
@@ -34,8 +35,8 @@ pub struct Section<'a> {
     /// The in-place writes of the sealed transactions, in order.
     patches: Vec<(u64, Vec<u8>)>,
     state: StoreState,
-    /// Payloads the opened images embed, by identity, with the image holding each.
-    files: &'a [([u8; 16], Chunk, &'a [u8])],
+    /// Payloads the opened images embed, by identity, as they read.
+    files: &'a [([u8; 16], Result<&'a [u8]>)],
     /// Payload identities the file-data store declares.
     declared: BTreeSet<[u8; 16]>,
     spaces: BTreeMap<ExGuid, Space<'a>>,
@@ -48,6 +49,8 @@ pub struct Section<'a> {
     root: ExGuid,
     /// While an edit applies, the spaces it changed as they were before it.
     undo: Option<Undo<'a>>,
+    /// A password-protected section's key and what it decoded.
+    unlocked: Option<Opened<'a>>,
 }
 
 #[derive(Default)]
@@ -139,9 +142,17 @@ struct Open<'a> {
 impl<'a> Section<'a> {
     /// Parses and fully validates a section image.
     pub fn open(arena: &'a Arena, image: Vec<u8>) -> Result<Self> {
-        Self::open_with(arena, vec![image], |_, space| {
-            space.labels.get(&(ExGuid::default(), 1)).copied()
-        })
+        Ok(Self::open_with(arena, vec![image], None, current)?)
+    }
+
+    /// `open` for a password-protected section, decoding it under `key`, which edits are
+    /// sealed under too. Decoded bytes live in `arena` until it drops.
+    pub fn unlock(
+        arena: &'a Arena,
+        image: Vec<u8>,
+        key: &Key,
+    ) -> std::result::Result<Self, crate::protected::Error> {
+        Self::open_with(arena, vec![image], Some(key), current)
     }
 
     /// Opens an earlier state of a section: each object space in `revisions` at the revision
@@ -153,7 +164,7 @@ impl<'a> Section<'a> {
         images: Vec<Vec<u8>>,
         revisions: &BTreeMap<ExGuid, ExGuid>,
     ) -> Result<Self> {
-        let section = Self::open_with(arena, images, |id, space| {
+        let section = Self::open_with(arena, images, None, |id, space| {
             revisions
                 .get(id)
                 .copied()
@@ -170,15 +181,17 @@ impl<'a> Section<'a> {
 
     /// `open`, each object space at the revision `revision` chooses in the first image where it
     /// chooses one; a space it chooses none for is left out. Payloads are read from the image
-    /// that first declares them.
+    /// that first declares them. A protected section opens under `key`.
     fn open_with(
         arena: &'a Arena,
         images: Vec<Vec<u8>>,
+        key: Option<&Key>,
         revision: impl Fn(&ExGuid, &crate::ObjectSpace<'_>) -> Option<ExGuid>,
-    ) -> Result<Self> {
+    ) -> std::result::Result<Self, crate::protected::Error> {
         let mut opened = None;
+        let mut unlocked = None;
         let mut spaces = BTreeMap::new();
-        let mut files: Vec<([u8; 16], Chunk, &'a [u8])> = Vec::new();
+        let mut files: Vec<([u8; 16], Result<&'a [u8]>)> = Vec::new();
         for image in images {
             let bytes: &'a [u8] = arena.0.alloc_slice_copy(&image);
             drop(image);
@@ -187,28 +200,40 @@ impl<'a> Section<'a> {
                 return Err(Error {
                     offset: *offset,
                     message: "Cannot write a file with transaction checksum damage",
-                });
+                }
+                .into());
             }
             if store.header.file_type != FileType::Section {
                 return Err(Error {
                     offset: 0,
                     message: "Choose a section file",
-                });
+                }
+                .into());
             }
             let index = RevisionIndex::parse(&store)?;
-            index.validate_current()?;
+            if let (Some(key), None) = (key, &unlocked) {
+                unlocked = Some(Opened::new(&store, key)?);
+            }
+            // The parse borrows `bytes` only as long as its store; its slices lie in `bytes`,
+            // which the arena keeps.
+            let bound = |resolved| {
+                bind(arena, unlocked.as_ref(), resolved, |part| {
+                    Ok(within(bytes, part))
+                })
+            };
+            index.validate_with(|space, rid| bound(index.resolve(space, rid)?))?;
             for (id, space) in &index.spaces {
                 let Some(rid) = revision(id, space).filter(|_| !spaces.contains_key(id)) else {
                     continue;
                 };
-                let revision = bound(bytes, index.resolve(*id, rid)?);
+                let revision = bound(index.resolve(*id, rid)?)?;
                 let history = space
                     .labels
                     .get(&(versions::HISTORY, 1))
                     .map(|history| -> Result<History<'a>> {
                         Ok(History {
                             rid: *history,
-                            revision: bound(bytes, index.resolve(*id, *history)?),
+                            revision: bound(index.resolve(*id, *history)?)?,
                             depth: chain_depth(&index, *id, *history),
                             pending: BTreeMap::new(),
                         })
@@ -231,11 +256,24 @@ impl<'a> Section<'a> {
                     return Err(Error {
                         offset: node.offset,
                         message: "File-data object lacks a data reference",
-                    });
+                    }
+                    .into());
                 };
                 // A payload an earlier image declares is the same bytes: it names them.
                 if !files[..known].iter().any(|(declared, ..)| declared == guid) {
-                    files.push((*guid, chunk, bytes));
+                    let (offset, length) = (chunk.offset as usize, chunk.length as usize);
+                    let payload = bytes
+                        .get(offset..offset + length)
+                        .ok_or(Error {
+                            offset,
+                            message: "Chunk extends outside the data area",
+                        })
+                        .and_then(|blob| crate::files::payload(blob, offset))
+                        .and_then(|payload| match &unlocked {
+                            Some(unlocked) => unlocked.file(&arena.0, payload),
+                            None => Ok(payload),
+                        });
+                    files.push((*guid, payload));
                 }
             }
             if opened.is_none() {
@@ -259,6 +297,7 @@ impl<'a> Section<'a> {
             broken: false,
             root,
             undo: None,
+            unlocked,
         })
     }
 
@@ -479,25 +518,14 @@ impl<'a> Section<'a> {
     fn files(&self) -> Files<'a> {
         let files = self.files;
         std::rc::Rc::new(move |guid| {
-            let start = files.partition_point(|(id, ..)| *id < guid);
-            match files[start..]
-                .iter()
-                .take_while(|(id, ..)| *id == guid)
-                .count()
-            {
-                0 => Err(Error {
+            let start = files.partition_point(|(id, _)| *id < guid);
+            let mut declared = files[start..].iter().take_while(|(id, _)| *id == guid);
+            match (declared.next(), declared.next()) {
+                (None, _) => Err(Error {
                     offset: 0,
                     message: "File-data object is not declared",
                 }),
-                1 => {
-                    let (_, chunk, bytes) = files[start];
-                    let (offset, length) = (chunk.offset as usize, chunk.length as usize);
-                    let blob = bytes.get(offset..offset + length).ok_or(Error {
-                        offset,
-                        message: "Chunk extends outside the data area",
-                    })?;
-                    crate::files::payload(blob, offset)
-                }
+                (Some((_, payload)), None) => *payload,
                 _ => Err(Error {
                     offset: 0,
                     message: "Duplicate file-data identity",
@@ -706,6 +734,10 @@ impl<'a> Section<'a> {
         }
         self.broken = true;
         let arena = &self.arena.0;
+        let protection = self
+            .unlocked
+            .as_ref()
+            .map(|unlocked| unlocked as &dyn Protection);
         let mut appending = Appending::new(self.state.clone());
         let mut sealed = Vec::new();
         for (id, space) in &mut self.spaces {
@@ -726,8 +758,7 @@ impl<'a> Section<'a> {
                         created: &frozen.revised.created,
                     },
                     &self.segments,
-                    None,
-                    None,
+                    protection,
                     &mut manifest,
                 )?;
             }
@@ -757,8 +788,7 @@ impl<'a> Section<'a> {
                                 created: &created,
                             },
                             &self.segments,
-                            None,
-                            None,
+                            protection,
                             &mut manifest,
                         )?;
                         if commit.checkpoint {
@@ -805,8 +835,7 @@ impl<'a> Section<'a> {
                             created: &created,
                         },
                         &self.segments,
-                        None,
-                        None,
+                        protection,
                         &mut manifest,
                     )?;
                     if commit.checkpoint {
@@ -834,7 +863,7 @@ impl<'a> Section<'a> {
             .filter(|(guid, _)| !self.declared.contains(guid))
             .copied()
             .collect();
-        appending.payloads(&payloads, None)?;
+        appending.payloads(&payloads, protection)?;
         #[cfg_attr(not(test), expect(unused_mut))]
         let mut transaction = appending.finish()?;
         #[cfg(test)]
@@ -892,6 +921,7 @@ impl<'a> Section<'a> {
                 &written,
                 &labels,
                 &payloads,
+                protection,
             )?;
             let base = transaction.base.length;
             let segment: &'a [u8] = arena.alloc_slice_copy(&transaction.append);
@@ -899,11 +929,20 @@ impl<'a> Section<'a> {
             self.patches.extend(transaction.patches.iter().cloned());
             self.state = state.clone();
             self.declared.extend(payloads.iter().map(|(guid, _)| *guid));
-            let bind = |revision: &mut ResolvedRevision<'a>, stored: &[(ExGuid, crate::Chunk)]| {
+            // An object now reads from where it is stored, or a protected one's clear bytes
+            // from where they are.
+            let unlocked = &self.unlocked;
+            let rebind = |revision: &mut ResolvedRevision<'a>, stored: &[(ExGuid, Chunk)]| {
                 for (object_id, chunk) in stored {
                     let start = (chunk.offset - base) as usize;
-                    revision.objects.get_mut(object_id).unwrap().data =
-                        ObjectData::Properties(&segment[start..start + chunk.length as usize]);
+                    let bytes = &segment[start..start + chunk.length as usize];
+                    let data = &mut revision.objects.get_mut(object_id).unwrap().data;
+                    match (unlocked, *data) {
+                        (Some(unlocked), ObjectData::Properties(clear)) => {
+                            unlocked.sealed(clear, bytes)
+                        }
+                        _ => *data = ObjectData::Properties(bytes),
+                    }
                 }
             };
             for (id, page, history) in &mut sealed {
@@ -916,11 +955,11 @@ impl<'a> Section<'a> {
                     space.rid = Some(*rid);
                     space.restored = None;
                     space.newest = Some(*rid);
-                    bind(&mut open.file.revision, stored);
+                    rebind(&mut open.file.revision, stored);
                 }
                 if let Some((rid, stored, live, _)) = history.take() {
                     let mut revision = live.revision;
-                    bind(&mut revision, &stored);
+                    rebind(&mut revision, &stored);
                     space.history = Some(History {
                         rid,
                         revision,
@@ -969,7 +1008,11 @@ impl<'a> Section<'a> {
         }
         let mut image = self.image();
         transaction.apply(&mut image)?;
-        *self = Self::open(self.arena, image)?;
+        let key = self
+            .unlocked
+            .as_ref()
+            .map(|unlocked| unlocked.key().clone());
+        *self = Self::open_with(self.arena, vec![image], key.as_ref(), current)?;
         Ok(())
     }
 }
@@ -1022,37 +1065,50 @@ fn changed<'a>(
     }))
 }
 
-/// `resolved`, parsed from `bytes`, borrowing them for their lifetime.
-fn bound<'a>(bytes: &'a [u8], resolved: ResolvedRevision<'_>) -> ResolvedRevision<'a> {
-    ResolvedRevision {
-        roots: resolved.roots,
-        objects: resolved
-            .objects
-            .into_iter()
-            .map(|(id, object)| {
-                // The parse borrows `bytes` only as long as its store; its slices lie in
-                // `bytes`, which the arena keeps.
-                let data = match object.data {
-                    ObjectData::Properties(data) => ObjectData::Properties(within(bytes, data)),
-                    ObjectData::Encrypted(data) => ObjectData::Encrypted(within(bytes, data)),
-                    ObjectData::File {
-                        reference,
-                        extension,
-                    } => ObjectData::File {
-                        reference: within(bytes, reference),
-                        extension: within(bytes, extension),
-                    },
-                };
-                let object = crate::Object {
-                    jcid: object.jcid,
-                    reference_count: object.reference_count,
-                    data,
-                    global_ids: object.global_ids,
-                };
-                (id, object)
-            })
-            .collect(),
+/// `resolved` with every slice moved into bytes that live as long as the section by `bytes`,
+/// a protected section's objects decoded under `unlocked`.
+fn bind<'a>(
+    arena: &'a Arena,
+    unlocked: Option<&Opened<'a>>,
+    resolved: ResolvedRevision<'_>,
+    bytes: impl Fn(&[u8]) -> Result<&'a [u8]>,
+) -> Result<ResolvedRevision<'a>> {
+    let mut objects = BTreeMap::new();
+    for (id, object) in resolved.objects {
+        let data = match (object.data, unlocked) {
+            (ObjectData::Properties(data), _) => ObjectData::Properties(bytes(data)?),
+            (ObjectData::Encrypted(data), Some(unlocked)) => {
+                ObjectData::Properties(unlocked.property(&arena.0, bytes(data)?)?)
+            }
+            (ObjectData::Encrypted(data), None) => ObjectData::Encrypted(bytes(data)?),
+            (
+                ObjectData::File {
+                    reference,
+                    extension,
+                },
+                _,
+            ) => ObjectData::File {
+                reference: bytes(reference)?,
+                extension: bytes(extension)?,
+            },
+        };
+        let object = crate::Object {
+            jcid: object.jcid,
+            reference_count: object.reference_count,
+            data,
+            global_ids: object.global_ids,
+        };
+        objects.insert(id, object);
     }
+    Ok(ResolvedRevision {
+        roots: resolved.roots,
+        objects,
+    })
+}
+
+/// The revision a space is current under.
+fn current(_: &ExGuid, space: &crate::ObjectSpace<'_>) -> Option<ExGuid> {
+    space.labels.get(&(ExGuid::default(), 1)).copied()
 }
 
 /// `part`, a slice of `image`, with the image's lifetime.
@@ -1097,7 +1153,7 @@ mod tests {
         edited: &[(ExGuid, &ResolvedRevision<'_>)],
         payloads: &[([u8; 16], &[u8])],
     ) -> Vec<u8> {
-        let transaction = crate::write::squash(index, edited, payloads, None).unwrap();
+        let transaction = crate::write::squash(index, edited, payloads).unwrap();
         crate::write::applied(index.store.data, transaction.as_ref()).unwrap()
     }
 

@@ -28,6 +28,20 @@ fn damaged() -> crate::Error {
     io::Error::new(io::ErrorKind::InvalidData, "Damaged cached image").into()
 }
 
+/// The base image, which every cache holds.
+pub(crate) fn base(connection: &Connection) -> Result<Vec<u8>> {
+    read(connection, Image::Base)?.ok_or_else(missing)
+}
+
+/// The base image's stamp.
+pub(crate) fn base_stamp(connection: &Connection) -> Result<Stamp> {
+    stamp(connection, Image::Base)?.ok_or_else(missing)
+}
+
+fn missing() -> crate::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "The cache has no base image").into()
+}
+
 /// The whole image, or `None` when none is stored.
 pub(crate) fn read(connection: &Connection, image: Image) -> Result<Option<Vec<u8>>> {
     let mut query = connection.prepare_cached(&format!(

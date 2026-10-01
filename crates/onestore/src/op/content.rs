@@ -16,7 +16,7 @@ fn invalid(message: &'static str) -> Error {
 }
 
 /// The `<ifndf>{GUID}` form a file-data declaration uses to name a payload in the file-data store.
-fn payload_reference(guid: [u8; 16]) -> String {
+pub(crate) fn payload_reference(guid: [u8; 16]) -> String {
     let id = ExGuid { guid, n: 0 }.to_string();
     format!("<ifndf>{}", id.split(',').next().unwrap())
 }

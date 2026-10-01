@@ -35,7 +35,7 @@ impl Pen {
         }
     }
 
-    pub const fn highlighter(color: u32) -> Self {
+    pub(crate) const fn highlighter(color: u32) -> Self {
         Self {
             width: 70.0,
             color: Some(color),
@@ -130,25 +130,8 @@ impl CanvasEditor {
             let page::Content::Ink(ink) = &self.objects[index] else {
                 continue;
             };
-            let offset = page::ink_offset(ink);
-            let touched = |stroke: &InkStroke| {
-                let reach = reach + stroke.width.max(stroke.height) / 2.0;
-                let mut points = stroke
-                    .points
-                    .iter()
-                    .map(|p| [p[0] + offset[0], p[1] + offset[1]]);
-                let Some(mut previous) = points.next() else {
-                    return false;
-                };
-                if segments_distance([previous, previous], [from, to]) <= reach {
-                    return true;
-                }
-                points.any(|point| {
-                    let near = segments_distance([previous, point], [from, to]) <= reach;
-                    previous = point;
-                    near
-                })
-            };
+            let offset = crate::origin(&ink.layout);
+            let touched = |stroke: &InkStroke| stroke_near(stroke, offset, [from, to], reach);
             let (kept, erased): (Vec<InkStroke>, Vec<InkStroke>) = ink
                 .strokes
                 .iter()
@@ -216,13 +199,13 @@ impl CanvasEditor {
 
     /// The page's drawings, on top first, with most of their points inside `lasso`, a
     /// closed path in page points.
-    pub fn ink_within(&self, lasso: &[[f32; 2]]) -> Vec<ExGuid> {
+    pub(crate) fn ink_within(&self, lasso: &[[f32; 2]]) -> Vec<ExGuid> {
         self.objects
             .iter()
             .rev()
             .filter_map(|object| match object {
                 page::Content::Ink(ink) => {
-                    let offset = page::ink_offset(ink);
+                    let offset = crate::origin(&ink.layout);
                     let points = points(ink);
                     let inside = points
                         .iter()
@@ -236,28 +219,11 @@ impl CanvasEditor {
     }
 
     /// The drawing on top whose strokes pass within `reach` of `point`.
-    pub fn ink_at(&self, point: [f32; 2], reach: f32) -> Option<ExGuid> {
+    pub(crate) fn ink_at(&self, point: [f32; 2], reach: f32) -> Option<ExGuid> {
         self.objects.iter().rev().find_map(|object| match object {
             page::Content::Ink(ink) => {
-                let offset = page::ink_offset(ink);
-                let near = |stroke: &InkStroke| {
-                    let reach = reach + stroke.width.max(stroke.height) / 2.0;
-                    let mut points = stroke
-                        .points
-                        .iter()
-                        .map(|p| [p[0] + offset[0], p[1] + offset[1]]);
-                    let first = points.next();
-                    first.is_some_and(|first| {
-                        let mut previous = first;
-                        segments_distance([first, first], [point, point]) <= reach
-                            || points.any(|p| {
-                                let near =
-                                    segments_distance([previous, p], [point, point]) <= reach;
-                                previous = p;
-                                near
-                            })
-                    })
-                };
+                let offset = crate::origin(&ink.layout);
+                let near = |stroke: &InkStroke| stroke_near(stroke, offset, [point, point], reach);
                 (ink.strokes.iter().any(near) || ink.groups.iter().any(|g| group_touched(g, &near)))
                     .then_some(ink.id)
             }
@@ -271,11 +237,8 @@ impl CanvasEditor {
         self.objects
             .iter()
             .filter_map(|object| match object {
-                page::Content::Ink(ink) if ids.contains(&ink.id) => {
-                    let [dx, dy] = self.ink_drag_offset(ink.id);
-                    page::ink_bounds(ink)
-                        .map(|[x0, y0, x1, y1]| [x0 + dx, y0 + dy, x1 + dx, y1 + dy])
-                }
+                page::Content::Ink(ink) if ids.contains(&ink.id) => page::ink_bounds(ink)
+                    .map(|bounds| crate::translated(bounds, self.ink_drag_offset(ink.id))),
                 _ => None,
             })
             .reduce(|a, b| {
@@ -290,7 +253,7 @@ impl CanvasEditor {
 
     /// Shows drawings dragged `delta` from where they lie, without storing it, until the
     /// drag ends with `move_ink` or `None`.
-    pub fn drag_ink(&mut self, drag: Option<(Vec<ExGuid>, [f32; 2])>) {
+    pub(crate) fn drag_ink(&mut self, drag: Option<(Vec<ExGuid>, [f32; 2])>) {
         self.ink_drag = drag;
     }
 
@@ -425,6 +388,25 @@ impl CanvasEditor {
             .iter()
             .any(|object| matches!(object, page::Content::Ink(ink) if ink.id == id))
     }
+}
+
+/// Whether `stroke`, of a drawing at `offset`, passes within `reach` of segment `path`, its pen's
+/// width included.
+fn stroke_near(stroke: &InkStroke, offset: [f32; 2], path: [[f32; 2]; 2], reach: f32) -> bool {
+    let reach = reach + stroke.width.max(stroke.height) / 2.0;
+    let mut points = stroke
+        .points
+        .iter()
+        .map(|p| [p[0] + offset[0], p[1] + offset[1]]);
+    let Some(mut previous) = points.next() else {
+        return false;
+    };
+    segments_distance([previous, previous], path) <= reach
+        || points.any(|point| {
+            let near = segments_distance([previous, point], path) <= reach;
+            previous = point;
+            near
+        })
 }
 
 fn group_touched(ink: &Ink, touched: &impl Fn(&InkStroke) -> bool) -> bool {

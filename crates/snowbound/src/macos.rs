@@ -37,7 +37,7 @@ pub fn with_pool<R>(run: impl FnOnce() -> R) -> R {
 
 pub use crate::aqua::{cover_border_line, move_cursor, resize_grip, system_interface};
 
-static QUIT: OnceLock<EventLoopProxy<crate::UserEvent>> = OnceLock::new();
+static PROXY: OnceLock<EventLoopProxy<crate::UserEvent>> = OnceLock::new();
 static INPUT_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 static BACKDROP_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
 static DELEGATE_CLASS: OnceLock<&'static AnyClass> = OnceLock::new();
@@ -71,23 +71,25 @@ unsafe extern "C" fn insert_text(view: &AnyObject, _: Sel, text: &AnyObject, ran
             } else {
                 msg_send_id![text, copy]
             };
-            if let Some(proxy) = QUIT.get() {
+            if let Some(proxy) = PROXY.get() {
                 let _ = proxy.send_event(crate::UserEvent::InsertText(string.to_string()));
             }
         }
     }
 }
 
-fn ns_window(window: &Window) -> Retained<AnyObject> {
+/// The view winit draws the window's content in.
+fn ns_view(window: &Window) -> Retained<AnyObject> {
     let RawWindowHandle::AppKit(handle) =
         window.window_handle().expect("Live AppKit window").as_raw()
     else {
         unreachable!()
     };
-    unsafe {
-        let view = &*handle.ns_view.as_ptr().cast::<AnyObject>();
-        msg_send_id![view, window]
-    }
+    unsafe { Retained::retain(handle.ns_view.as_ptr().cast()) }.expect("A live window has a view")
+}
+
+pub(crate) fn ns_window(window: &Window) -> Retained<AnyObject> {
+    unsafe { msg_send_id![&ns_view(window), window] }
 }
 
 /// Room the traffic lights take at the title bar's leading edge.
@@ -107,11 +109,11 @@ pub fn corner_radius(_: &Window) -> f32 {
     }
 }
 
-/// AppKit clips the window's corners itself, except where the OpenGL surface covers
-/// 10.6's textured window, whose rounded bottom corners the app leaves transparent.
 /// Winit's theme already holds the window to the app's appearance.
 pub fn follow_appearance(_: &Window, _: winit::window::Theme) {}
 
+/// AppKit clips the window's corners itself, except where the OpenGL surface covers
+/// 10.6's textured window, whose rounded bottom corners the app leaves transparent.
 pub fn cuts_corners() -> bool {
     crate::aqua::before_lion()
 }
@@ -332,13 +334,8 @@ pub fn install_backdrop(window: &Window) -> bool {
     let Some(effect) = AnyClass::get("NSVisualEffectView") else {
         return crate::aqua::textured(window, crate::TITLE + crate::TAB_ROW);
     };
-    let RawWindowHandle::AppKit(handle) =
-        window.window_handle().expect("Live AppKit window").as_raw()
-    else {
-        unreachable!()
-    };
+    let view = &*ns_view(window);
     unsafe {
-        let view = &*handle.ns_view.as_ptr().cast::<AnyObject>();
         let class = BACKDROP_CLASS.get_or_init(|| {
             let mut class =
                 ClassBuilder::new("SnowboundBackdrop", effect).expect("Unique backdrop class");
@@ -881,6 +878,11 @@ pub fn appearance(window: &Window) -> winit::window::Theme {
     window.theme().unwrap_or(winit::window::Theme::Dark)
 }
 
+/// Keeps the window's client area at least `size` points.
+pub fn set_min_size(window: &Window, size: [f32; 2]) {
+    window.set_min_inner_size(Some(winit::dpi::LogicalSize::new(size[0], size[1])));
+}
+
 /// Zooms the window once the current event is handled: AppKit's zoom animation runs its
 /// own loop, and started from inside winit's handler it would hold every resize until the
 /// end, stretching the last frame instead of drawing each step.
@@ -899,13 +901,8 @@ pub fn zoom(window: &Window) {
 /// Install before AccessKit subclasses the same view, preserving its restoration chain.
 pub fn install_text_input(window: &Window) {
     MainThreadMarker::new().expect("Text input belongs to the main thread");
-    let RawWindowHandle::AppKit(handle) =
-        window.window_handle().expect("Live AppKit window").as_raw()
-    else {
-        unreachable!()
-    };
+    let view = &*ns_view(window);
     unsafe {
-        let view = &*handle.ns_view.as_ptr().cast::<AnyObject>();
         let class = INPUT_CLASS.get_or_init(|| {
             let mut class = ClassBuilder::new("SnowboundTextInputView", view.class())
                 .expect("Unique text input class");
@@ -965,9 +962,7 @@ pub fn edit_date(
         }
         picker.setCalendar(Some(&calendar));
         picker.setTimeZone(Some(&calendar.timeZone()));
-        picker.setDateValue(&NSDate::dateWithTimeIntervalSince1970(
-            (timestamp / 10_000_000) as f64 - 11_644_473_600.0,
-        ));
+        picker.setDateValue(&ns_date(timestamp));
         picker.setMinDate(Some(&NSDate::dateWithTimeIntervalSince1970(
             -11_644_473_600.0,
         )));
@@ -996,9 +991,7 @@ fn merge_date(
     calendar: &NSCalendar,
 ) -> Result<(u64, [String; 2]), &'static str> {
     unsafe {
-        let original = NSDate::dateWithTimeIntervalSince1970(
-            (timestamp / 10_000_000) as f64 - 11_644_473_600.0,
-        );
+        let original = ns_date(timestamp);
         let units = NSCalendarUnit::Era
             | NSCalendarUnit::Year
             | NSCalendarUnit::Month
@@ -1053,11 +1046,14 @@ fn labels(date: &NSDate, calendar: &NSCalendar) -> [String; 2] {
 
 /// FILETIME as a new page's title shows it: the long date and the short time.
 pub fn date_text(filetime: u64) -> [String; 2] {
+    let calendar = unsafe { NSCalendar::currentCalendar() };
+    labels(&ns_date(filetime), &calendar)
+}
+
+/// FILETIME as an `NSDate`, to the second.
+fn ns_date(filetime: u64) -> Retained<NSDate> {
     unsafe {
-        let date = NSDate::dateWithTimeIntervalSince1970(
-            (filetime / 10_000_000) as f64 - 11_644_473_600.0,
-        );
-        labels(&date, &NSCalendar::currentCalendar())
+        NSDate::dateWithTimeIntervalSince1970((filetime / 10_000_000) as f64 - 11_644_473_600.0)
     }
 }
 
@@ -1069,9 +1065,7 @@ pub fn user_name() -> String {
 /// FILETIME as the system's short date, as OneNote labels a conflict page.
 pub fn short_date(filetime: u64) -> String {
     unsafe {
-        let date = NSDate::dateWithTimeIntervalSince1970(
-            (filetime / 10_000_000) as f64 - 11_644_473_600.0,
-        );
+        let date = ns_date(filetime);
         let formatter = NSDateFormatter::new();
         formatter.setDateStyle(NSDateFormatterStyle::NSDateFormatterShortStyle);
         formatter.setTimeStyle(NSDateFormatterStyle::NSDateFormatterNoStyle);
@@ -1231,13 +1225,13 @@ declare_class!(
 
         #[method(terminate:)]
         fn terminate(&self, _sender: Option<&AnyObject>) {
-            if let Some(proxy) = QUIT.get() { let _ = proxy.send_event(crate::UserEvent::Quit); }
+            if let Some(proxy) = PROXY.get() { let _ = proxy.send_event(crate::UserEvent::Quit); }
         }
 
         #[method(choose:)]
         fn choose(&self, sender: &NSMenuItem) {
             let tag = usize::try_from(unsafe { sender.tag() }).ok();
-            if let (Some(proxy), Some(choice)) = (QUIT.get(), tag.and_then(|tag| commands::choices().nth(tag))) {
+            if let (Some(proxy), Some(choice)) = (PROXY.get(), tag.and_then(|tag| commands::choices().nth(tag))) {
                 let _ = proxy.send_event(crate::UserEvent::Choose(choice));
             }
         }
@@ -1302,7 +1296,8 @@ pub fn event_loop(headless: bool) -> Result<EventLoop<crate::UserEvent>, EventLo
             .with_activate_ignoring_other_apps(false);
     }
     let event_loop = builder.build()?;
-    QUIT.set(event_loop.create_proxy())
+    PROXY
+        .set(event_loop.create_proxy())
         .expect("Only one application event loop is created");
     // Winit's delegate gains -application:openFiles:, which every macOS from 10.6 sends for
     // the Finder's and `open`'s documents, before the launch finishes on a cold launch.
@@ -1328,7 +1323,7 @@ unsafe extern "C" fn open_files(
     app: &NSApplication,
     files: &objc2_foundation::NSArray<NSString>,
 ) {
-    if let Some(proxy) = QUIT.get() {
+    if let Some(proxy) = PROXY.get() {
         let paths = files.iter().map(|file| file.to_string().into()).collect();
         let _ = proxy.send_event(crate::UserEvent::Open(paths));
     }
@@ -1392,14 +1387,9 @@ pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str) -> bool 
 /// End AppKit preedit after a canvas action commits or cancels the composition.
 pub fn clear_marked_text(window: &Window) {
     MainThreadMarker::new().expect("Text input belongs to the main thread");
-    let RawWindowHandle::AppKit(handle) =
-        window.window_handle().expect("Live AppKit window").as_raw()
-    else {
-        unreachable!()
-    };
     // Winit owns this view and implements the NSTextInputClient selectors.
+    let view = &*ns_view(window);
     unsafe {
-        let view = &*handle.ns_view.as_ptr().cast::<AnyObject>();
         let marked: bool = msg_send![view, hasMarkedText];
         if marked {
             let _: () = msg_send![view, unmarkText];

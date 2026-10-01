@@ -89,6 +89,48 @@ fn encrypt(key: &[u8; 16], iv: &[u8; 16], bytes: &mut [u8]) {
         .expect("block aligned");
 }
 
+/// Password-hash rounds OneNote 2010 writes.
+const SPINS: u32 = 100_000;
+/// MS-OFFCRYPTO's block keys for the verifier input, its hash and the wrapped key.
+const VERIFIER_INPUT: [u8; 8] = [0xfe, 0xa7, 0xd2, 0x76, 0x3b, 0x4b, 0x9e, 0x79];
+const VERIFIER_VALUE: [u8; 8] = [0xd7, 0xaa, 0x0f, 0x6d, 0x30, 0x61, 0x34, 0x4e];
+const KEY_VALUE: [u8; 8] = [0x14, 0x6e, 0x0b, 0xe7, 0xab, 0xac, 0xd0, 0xd6];
+
+/// The iterated password hash: SHA-1 of salt and UTF-16LE password, then `count` rounds of
+/// SHA-1 over the round number and the previous hash.
+fn seed(salt: &[u8; 16], password: &str, count: u32) -> Zeroizing<[u8; 20]> {
+    let mut hash = Sha1::new();
+    hash.update(salt);
+    for word in password.encode_utf16() {
+        hash.update(word.to_le_bytes());
+    }
+    let mut seed = Zeroizing::new(<[u8; 20]>::from(hash.finalize()));
+    for index in 0..count {
+        let mut hash = Sha1::new();
+        hash.update(index.to_le_bytes());
+        hash.update(seed.as_ref());
+        *seed = hash.finalize().into();
+    }
+    seed
+}
+
+/// The AES key a block key derives from the password hash.
+fn block(seed: &[u8; 20], label: [u8; 8]) -> Zeroizing<[u8; 16]> {
+    let mut hash = Sha1::new();
+    hash.update(seed);
+    hash.update(label);
+    let derived = Zeroizing::new(<[u8; 20]>::from(hash.finalize()));
+    Zeroizing::new(derived[..16].try_into().unwrap())
+}
+
+/// The IV of payloads: SHA-1 of the key data's salt and block 0.
+fn file_iv(salt: &[u8; 16]) -> [u8; 16] {
+    let mut hash = Sha1::new();
+    hash.update(salt);
+    hash.update(0_u32.to_le_bytes());
+    hash.finalize()[..16].try_into().unwrap()
+}
+
 impl Key {
     pub(super) fn open(data: &[u8], password: &str, rounds: &mut u64) -> Result<Self> {
         if data.len() > 65536 || password.len() > 65536 {
@@ -146,47 +188,83 @@ impl Key {
         let mut verifier = Zeroizing::new(decoded::<16>(wrapped, "encryptedVerifierHashInput")?);
         let mut expected = Zeroizing::new(decoded::<32>(wrapped, "encryptedVerifierHashValue")?);
         let mut value = Zeroizing::new(decoded::<16>(wrapped, "encryptedKeyValue")?);
-        let mut hash = Sha1::new();
-        hash.update(salt);
-        for word in password.encode_utf16() {
-            hash.update(word.to_le_bytes());
-        }
-        let mut seed = Zeroizing::new(<[u8; 20]>::from(hash.finalize()));
-        for index in 0..count {
-            let mut hash = Sha1::new();
-            hash.update(index.to_le_bytes());
-            hash.update(seed.as_ref());
-            *seed = hash.finalize().into();
-        }
+        let seed = seed(&salt, password, count);
         for (label, bytes) in [
-            (
-                [0xfe, 0xa7, 0xd2, 0x76, 0x3b, 0x4b, 0x9e, 0x79],
-                verifier.as_mut_slice(),
-            ),
-            (
-                [0xd7, 0xaa, 0x0f, 0x6d, 0x30, 0x61, 0x34, 0x4e],
-                expected.as_mut_slice(),
-            ),
-            (
-                [0x14, 0x6e, 0x0b, 0xe7, 0xab, 0xac, 0xd0, 0xd6],
-                value.as_mut_slice(),
-            ),
+            (VERIFIER_INPUT, verifier.as_mut_slice()),
+            (VERIFIER_VALUE, expected.as_mut_slice()),
+            (KEY_VALUE, value.as_mut_slice()),
         ] {
-            let mut hash = Sha1::new();
-            hash.update(seed.as_ref());
-            hash.update(label);
-            let derived = Zeroizing::new(<[u8; 20]>::from(hash.finalize()));
-            decrypt(derived[..16].try_into().unwrap(), &salt, bytes)?;
+            decrypt(&block(&seed, label), &salt, bytes)?;
         }
         let actual = Zeroizing::new(<[u8; 20]>::from(Sha1::digest(verifier.as_slice())));
         if !bool::from(actual.as_slice().ct_eq(&expected[..20])) {
             return Err(Error::PasswordMismatch);
         }
-        let mut hash = Sha1::new();
-        hash.update(decoded::<16>(data_key, "saltValue")?);
-        hash.update(0_u32.to_le_bytes());
-        let file_iv = hash.finalize()[..16].try_into().unwrap();
-        Ok(Self { value, file_iv })
+        Ok(Self {
+            value,
+            file_iv: file_iv(&decoded::<16>(data_key, "saltValue")?),
+        })
+    }
+
+    /// A fresh key for `password` and the encryption data that opens it, as OneNote 2010
+    /// writes them: random salts, key and verifier, 100,000 SHA-1 rounds, no integrity block.
+    pub(super) fn create(password: &str) -> Result<(Self, Vec<u8>)> {
+        if password.len() > 65536 {
+            return Err(Error::Limit);
+        }
+        let random = |bytes: &mut [u8]| {
+            getrandom::fill(bytes).map_err(|_| invalid("System random source failed"))
+        };
+        let (mut data_salt, mut salt) = ([0; 16], [0; 16]);
+        let mut value = Zeroizing::new([0; 16]);
+        let mut verifier = Zeroizing::new([0; 16]);
+        random(&mut data_salt)?;
+        random(&mut salt)?;
+        random(value.as_mut_slice())?;
+        random(verifier.as_mut_slice())?;
+        let seed = seed(&salt, password, SPINS);
+        let mut hash = Zeroizing::new([0; 32]);
+        hash[..20].copy_from_slice(&Sha1::digest(verifier.as_slice()));
+        let mut wrapped_value = *value;
+        let mut wrapped_verifier = *verifier;
+        let mut wrapped_hash = *hash;
+        encrypt(&block(&seed, VERIFIER_INPUT), &salt, &mut wrapped_verifier);
+        encrypt(&block(&seed, VERIFIER_VALUE), &salt, &mut wrapped_hash);
+        encrypt(&block(&seed, KEY_VALUE), &salt, &mut wrapped_value);
+        let profile = r#"saltSize="16" blockSize="16" keyBits="128" hashSize="20" cipherAlgorithm="AES" cipherChaining="ChainingModeCBC" hashAlgorithm="SHA1""#;
+        let xml = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n\
+             <encryption xmlns=\"{NS}\" xmlns:p=\"{PASSWORD_NS}\">\
+             <keyData {profile} saltValue=\"{}\"/>\
+             <keyEncryptors><keyEncryptor uri=\"{PASSWORD_NS}\">\
+             <p:encryptedKey spinCount=\"{SPINS}\" {profile} saltValue=\"{}\" \
+             encryptedVerifierHashInput=\"{}\" encryptedVerifierHashValue=\"{}\" \
+             encryptedKeyValue=\"{}\"/></keyEncryptor></keyEncryptors></encryption>",
+            STANDARD.encode(data_salt),
+            STANDARD.encode(salt),
+            STANDARD.encode(wrapped_verifier),
+            STANDARD.encode(wrapped_hash),
+            STANDARD.encode(wrapped_value),
+        );
+        let length = u32::try_from(24 + xml.len()).map_err(|_| Error::Limit)?;
+        let mut data = Vec::with_capacity(length as usize);
+        for word in [3, length, 16, length - 16] {
+            data.extend_from_slice(&word.to_le_bytes());
+        }
+        data.extend_from_slice(&[4, 0, 4, 0, 64, 0, 0, 0]);
+        data.extend_from_slice(xml.as_bytes());
+        Ok((
+            Self {
+                value,
+                file_iv: file_iv(&data_salt),
+            },
+            data,
+        ))
+    }
+
+    /// The AES key the section's objects and payloads are encrypted under.
+    pub(super) fn value(&self) -> &[u8; 16] {
+        &self.value
     }
 
     pub(super) fn property(&self, input: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
@@ -246,17 +324,21 @@ impl Key {
         Ok(output)
     }
 
-    /// The stored form of a file payload, the inverse of `file`.
-    pub(super) fn seal_file(&self, clear: &[u8]) -> Vec<u8> {
+    /// The stored form of a file payload, the inverse of `file`: its length, the bytes and
+    /// random padding to the block, as OneNote pads.
+    pub(super) fn seal_file(&self, clear: &[u8]) -> Result<Vec<u8>> {
         if clear.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
-        let mut output = Vec::with_capacity((8 + clear.len()).next_multiple_of(16));
+        let length = (8 + clear.len()).next_multiple_of(16);
+        let mut output = Vec::with_capacity(length);
         output.extend_from_slice(&(clear.len() as u64).to_le_bytes());
         output.extend_from_slice(clear);
-        output.resize(output.len().next_multiple_of(16), 0);
+        let end = output.len();
+        output.resize(length, 0);
+        getrandom::fill(&mut output[end..]).map_err(|_| invalid("System random source failed"))?;
         encrypt(&self.value, &self.file_iv, &mut output);
-        output
+        Ok(output)
     }
 
     pub(super) fn file(&self, input: &[u8]) -> Result<Zeroizing<Vec<u8>>> {

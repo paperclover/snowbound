@@ -7,10 +7,10 @@ publish = false
 [features]
 default = ["wgpu"]
 # The renderer; `edit` needs only parley. It submits through wgpu, or without it through
-# OpenGL 2.1, for Mac OS X 10.6. On Windows it has both, and its maker picks one, as
-# Windows 7 has no Direct3D 12.
+# OpenGL 2.1, for Mac OS X 10.6. On Windows it has Direct3D 11 and OpenGL besides, and its
+# maker picks one, as Windows 7 has no Direct3D 12.
 render = ["dep:base64", "dep:bytemuck", "dep:image", "dep:linebender_resource_handle", "dep:roxmltree", "dep:swash"]
-wgpu = ["render", "dep:wgpu"]
+wgpu = ["render", "dep:wgpu", "dep:windows"]
 # Writes layers as PDF pages, text as real text in subset fonts.
 pdf = ["render", "dep:miniz_oxide", "dep:pdf-writer", "dep:subsetter"]
 
@@ -27,6 +27,16 @@ roxmltree = { version = "0.21", optional = true }
 subsetter = { version = "0.2.6", default-features = false, optional = true }
 swash = { version = "0.2.10", optional = true }
 wgpu = { workspace = true, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", default-features = false, optional = true, features = [
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 pollster = "0.4"

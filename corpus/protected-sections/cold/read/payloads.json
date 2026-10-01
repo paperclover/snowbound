@@ -1,0 +1,42 @@
+﻿[
+    {
+        "sha256":  "af1af4b8987109ce1e335e538910fb3860b7c57eb3b6110a06aa2114e06d69a7",
+        "name":  "fictitious-attachment.txt",
+        "object":  "{494711AC-8C21-0B35-201D-C281CCD3535F}{52}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{09B82703-E16E-0E2C-0350-7B8F0E453BD8}{1}{B0}",
+        "bytes":  43
+    },
+    {
+        "sha256":  "af1af4b8987109ce1e335e538910fb3860b7c57eb3b6110a06aa2114e06d69a7",
+        "name":  "fictitious-attachment.txt",
+        "object":  "{9295EB43-6BB7-01D8-3BCB-B972DFF40F79}{169}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{0A6963A0-3B14-022B-3322-0716C2D41936}{1}{B0}",
+        "bytes":  43
+    },
+    {
+        "sha256":  "af1af4b8987109ce1e335e538910fb3860b7c57eb3b6110a06aa2114e06d69a7",
+        "name":  "fictitious-attachment.txt",
+        "object":  "{5E6C34E5-427A-0A35-01B4-729CAEED1AE3}{130}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{49198084-72D5-0478-36CF-554C2E384795}{1}{B0}",
+        "bytes":  43
+    },
+    {
+        "sha256":  "af1af4b8987109ce1e335e538910fb3860b7c57eb3b6110a06aa2114e06d69a7",
+        "name":  "fictitious-attachment.txt",
+        "object":  "{2258725C-FAAF-0704-1006-EE69B8759811}{13}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{866584A2-177A-0F98-3D57-EE8DE1960AF4}{1}{B0}",
+        "bytes":  43
+    },
+    {
+        "sha256":  "af1af4b8987109ce1e335e538910fb3860b7c57eb3b6110a06aa2114e06d69a7",
+        "name":  "fictitious-attachment.txt",
+        "object":  "{9E1DBD46-BE03-07FB-16F8-D5BB1289206E}{91}{B0}",
+        "kind":  "InsertedFile",
+        "page":  "{FD77E918-CDA0-0CA5-1038-F63ED915C073}{1}{B0}",
+        "bytes":  43
+    }
+]

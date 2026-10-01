@@ -33,6 +33,8 @@ char *sb_library_new_section(const Library *library, const char *folder, const c
                              const char *date, const char *time);
 char *sb_library_search(const Library *library, const Section *open, const char *path, const char *query);
 char *sb_library_tagged(const Library *library, const Section *open, const char *path);
+bool sb_library_unlock(const Library *library, const char *path, const char *password);
+void sb_library_lock_all(const Library *library);
 char *sb_library_sync_status(const Library *library);
 void sb_library_set_offline(const Library *library, bool offline);
 void sb_library_touched(const Library *library, const char *path);
@@ -56,6 +58,7 @@ char *sb_section_themes(const Section *section, const char *id);
 bool sb_section_set_theme(const Section *section, const char *id, uint8_t scope, const char *theme);
 bool sb_section_flush(const Section *section, double seconds);
 void sb_section_wake(const Section *section);
+void sb_section_set_author(const Section *section, const char *author);
 void sb_section_free(Section *section);
 
 View *sb_view_new(void *layer, const Section *section, const char *id, float width, float height, float scale);
@@ -65,6 +68,8 @@ bool sb_view_render(View *view);
 bool sb_view_frame_pending(const View *view);
 void sb_view_set_dark(View *view, bool dark);
 bool sb_view_read_only(const View *view);
+char *sb_view_reading(const View *view, float width);
+bool sb_view_set_reading(View *view, float width);
 bool sb_view_reload(View *view, bool discard);
 void sb_view_focus(View *view, bool focused);
 void sb_view_content(View *view, float bounds[4]);

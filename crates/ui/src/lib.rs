@@ -324,6 +324,15 @@ struct Motion {
     opacity: f32,
 }
 
+impl Motion {
+    const NONE: Motion = Motion {
+        zoom: 1.0,
+        pivot: [0.0; 2],
+        tilt: 0.0,
+        opacity: 1.0,
+    };
+}
+
 /// What a box is this frame. Colours are linear RGBA.
 #[derive(Clone, Default)]
 pub struct Spec<'a> {
@@ -332,13 +341,13 @@ pub struct Spec<'a> {
     /// The axis its children flow along.
     pub axis: Axis,
     pub text: Option<&'a str>,
-    /// The family the label is shaped in, where it has the glyphs; the interface's otherwise.
     /// The label's size in logical pixels; the theme's otherwise.
     pub font_size: Option<f32>,
     /// Shapes the label semibold.
     pub bold: bool,
     /// Shapes the label italic.
     pub italic: bool,
+    /// The family the label is shaped in, where it has the glyphs; the interface's otherwise.
     pub font: Option<&'a str>,
     pub overflow: Overflow,
     /// The label's colour; the theme's text colour otherwise.
@@ -463,12 +472,7 @@ impl Primitives<'_> {
             pivot,
             tilt,
             opacity,
-        } = self.motion.unwrap_or(Motion {
-            zoom: 1.0,
-            pivot: [0.0; 2],
-            tilt: 0.0,
-            opacity: 1.0,
-        });
+        } = self.motion.unwrap_or(Motion::NONE);
         let device = |point: [f32; 2]| point.map(|value| value * scale);
         let moved = |point: [f32; 2]| {
             device(std::array::from_fn(|axis| {
@@ -797,8 +801,11 @@ impl Ui {
     }
 
     /// Asks for a frame `after` this one, as a running clock does.
-    pub fn wake_after(&mut self, after: std::time::Duration) {
-        let due = self.now + after;
+    pub fn wake_after(&mut self, after: Duration) {
+        self.wake_by(self.now + after);
+    }
+
+    fn wake_by(&mut self, due: Instant) {
         self.wake = Some(self.wake.map_or(due, |wake| wake.min(due)));
     }
 
@@ -1196,7 +1203,7 @@ impl Ui {
 
     /// The id a box built next under the current parent would take.
     pub fn id(&self, part: impl Hash) -> Id {
-        self.nodes[*self.stack.last().unwrap()].id.child(part)
+        self.current().child(part)
     }
 
     /// Adds a box and makes it the parent of the boxes built until `close`.
@@ -1247,7 +1254,6 @@ impl Ui {
         self.signal(id)
     }
 
-    /// Eases towards `target` over the next frames, starting there the first time `id` asks.
     /// Holds animated value `id` at `value` without easing, as a dragged box follows the
     /// pointer; it eases from there once animated again.
     pub fn hold(&mut self, id: Id, value: f32) -> f32 {
@@ -1257,6 +1263,7 @@ impl Ui {
         value
     }
 
+    /// Eases towards `target` over the next frames, starting there the first time `id` asks.
     pub fn animate(&mut self, id: Id, target: f32) -> f32 {
         let state = self.states.entry(id).or_default();
         state.touched = self.frame;
@@ -1293,7 +1300,7 @@ impl Ui {
     /// The size of `text` as a label, in logical pixels.
     pub fn measure(&mut self, text: &str) -> [f32; 2] {
         self.texts
-            .label(text, self.theme.font_size, false, None, self.frame)
+            .label(text, self.theme.font_size, self.frame)
             .size
     }
 
@@ -1316,8 +1323,7 @@ impl Ui {
         self.caret = Some((id, start, self.frame));
         let (opacity, hold) = draw::edit::caret_blink(self.now.saturating_duration_since(start));
         if let Some(hold) = hold {
-            let due = self.now + hold;
-            self.wake = Some(self.wake.map_or(due, |wake| wake.min(due)));
+            self.wake_after(hold);
         }
         opacity
     }
@@ -1468,10 +1474,8 @@ impl Ui {
         {
             let opacity = self.progress(due, TIP_FADE);
             self.nodes[index].motion = Some(Motion {
-                zoom: 1.0,
-                pivot: [0.0; 2],
-                tilt: 0.0,
                 opacity,
+                ..Motion::NONE
             });
             self.paint(index, None, None);
         }
@@ -1961,28 +1965,8 @@ impl Ui {
         layers
     }
 
-    pub(crate) fn texts(&mut self) -> (&mut Texts, u64) {
-        (&mut self.texts, self.frame)
-    }
-
-    pub(crate) fn field(
-        &mut self,
-        id: Id,
-    ) -> (
-        &mut Selection,
-        &mut (Selection, SelectionUnit),
-        &mut Option<[usize; 2]>,
-    ) {
-        let state = self.states.entry(id).or_default();
-        (&mut state.selection, &mut state.press, &mut state.select)
-    }
-
-    pub(crate) fn grab(&mut self, id: Id) -> &mut f32 {
-        &mut self.states.entry(id).or_default().grab
-    }
-
-    pub(crate) fn held(&mut self, id: Id) -> &mut Option<(ScrollerPart, Instant)> {
-        &mut self.states.entry(id).or_default().held
+    pub(crate) fn state(&mut self, id: Id) -> &mut State {
+        self.states.entry(id).or_default()
     }
 }
 

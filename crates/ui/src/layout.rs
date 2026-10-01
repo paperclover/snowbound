@@ -316,9 +316,14 @@ fn in_flow(nodes: &[Built], index: usize) -> impl Iterator<Item = usize> + '_ {
 /// The children's extent on `axis`: summed with gaps along the flow, otherwise the largest.
 fn flow(nodes: &[Built], index: usize, axis: usize) -> f32 {
     let sizes = in_flow(nodes, index).map(|child| nodes[child].computed[axis]);
-    if along(&nodes[index], axis) {
+    span(&nodes[index], axis, sizes)
+}
+
+/// The extent of children `sizes` long on `axis` of `node`, as `flow` measures it.
+fn span(node: &Built, axis: usize, sizes: impl Iterator<Item = f32>) -> f32 {
+    if along(node, axis) {
         let (sum, count) = sizes.fold((0.0, 0), |(sum, count), size| (sum + size, count + 1));
-        sum + nodes[index].gap * (count.max(1) - 1) as f32
+        sum + node.gap * (count.max(1) - 1) as f32
     } else {
         sizes.fold(0.0, f32::max)
     }
@@ -335,13 +340,7 @@ pub(crate) fn narrowest(nodes: &[Built], index: usize) -> f32 {
             !nodes[**child].flags.contains(Flags::FLOAT) && nodes[**child].anchor.is_none()
         })
         .map(|child| least(nodes, *child));
-    let content = if along(node, 0) {
-        let (sum, count) = sizes.fold((0.0, 0), |(sum, count), size| (sum + size, count + 1));
-        sum + node.gap * (count.max(1) - 1) as f32
-    } else {
-        sizes.fold(0.0, f32::max)
-    };
-    content + 2.0 * node.pad[0]
+    span(node, 0, sizes) + 2.0 * node.pad[0]
 }
 
 /// The least width `index` takes without clipping its children.

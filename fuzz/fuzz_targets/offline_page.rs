@@ -1,6 +1,9 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 
+#[path = "../../crates/onestore/tests/support/ops.rs"]
+mod ops;
+
 #[path = "../../crates/onestore/tests/support/disk.rs"]
 mod disk;
 #[path = "../../crates/notebook/tests/support/model_ops.rs"]

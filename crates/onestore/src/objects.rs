@@ -190,11 +190,20 @@ impl<'a> Cursor<'a> {
 
 impl<'a> RevisionIndex<'a> {
     pub fn validate_current(&self) -> Result<()> {
+        self.validate_with(|space, rid| self.resolve(space, rid))
+    }
+
+    /// `validate_current`, each revision read through `resolve`, as a protected section's
+    /// decoded.
+    pub(crate) fn validate_with<'r>(
+        &self,
+        resolve: impl Fn(ExGuid, ExGuid) -> Result<ResolvedRevision<'r>>,
+    ) -> Result<()> {
         let mut edges = BTreeMap::new();
         let mut incoming = BTreeMap::<_, usize>::new();
         for (osid, space) in &self.spaces {
             for rid in space.labels.values().copied().collect::<BTreeSet<_>>() {
-                let revision = self.resolve(*osid, rid)?;
+                let revision = resolve(*osid, rid)?;
                 let mut targets = BTreeSet::new();
                 for oid in revision.reachable()? {
                     let references = revision.objects[&oid].references()?;

@@ -13,8 +13,12 @@ pub struct Theme {
     pub strip: [f32; 4],
     /// The notebook sidebar: the strip's colour, unless kept opaque over a backdrop.
     pub sidebar: [f32; 4],
-    /// Toolbar buttons at rest: clear, or a face where the backdrop would hide their icons.
+    /// Toolbar buttons and their groups at rest: clear, or a face where the backdrop would
+    /// hide their icons.
     pub tool: [f32; 4],
+    /// Gathers the toolbar's groups on one `tool` face the length of the row, ruled between
+    /// groups, rather than a face per group.
+    pub tool_panel: bool,
     pub accent: [f32; 4],
     /// The text caret, and selected text's fill with and without keyboard focus; the
     /// platform's own where it has them.
@@ -145,6 +149,7 @@ impl Theme {
             strip: srgb(0x27, 0x2a, 0x2b),
             sidebar: srgb(0x27, 0x2a, 0x2b),
             tool: [0.0; 4],
+            tool_panel: false,
             accent: srgb(0x00, 0x79, 0xa6),
             caret,
             selection,
@@ -176,6 +181,7 @@ impl Theme {
             strip: srgb(0xeb, 0xed, 0xf0),
             sidebar: srgb(0xeb, 0xed, 0xf0),
             tool: [0.0; 4],
+            tool_panel: false,
             accent: srgb(0x00, 0x79, 0xa6),
             caret,
             selection,

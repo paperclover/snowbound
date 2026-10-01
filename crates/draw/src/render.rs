@@ -1,4 +1,6 @@
 #[cfg(all(feature = "wgpu", windows))]
+mod d3d11;
+#[cfg(all(feature = "wgpu", windows))]
 mod dual;
 #[cfg(any(windows, not(feature = "wgpu")))]
 mod gl;
@@ -19,8 +21,6 @@ use gl as backend;
 use webgpu as backend;
 
 pub use backend::Target;
-#[cfg(all(feature = "wgpu", windows))]
-pub use gl::Target as GlTarget;
 pub use icon::{Palette, picture_icon};
 #[cfg(feature = "pdf")]
 pub use pdf::{Sheet, pdf};
@@ -34,6 +34,8 @@ use linebender_resource_handle::WeakBlob;
 use parley::fontique::Blob;
 use std::{
     collections::{HashMap, HashSet},
+    ffi::CStr,
+    mem::offset_of,
     ops::Range,
 };
 use swash::{
@@ -171,12 +173,23 @@ impl RasterImage {
     }
 }
 
-/// What a backend submits: the prepared vertices and batches, and the images they paint.
+/// What a backend submits: each group's batches, painted into an offscreen picture of its
+/// own, then the batches painting the target, and the images they show.
 struct Frame<'a> {
     vertices: &'a [Vertex],
+    groups: &'a [Vec<Batch>],
     batches: &'a [Batch],
-    groups: &'a [Group],
     images: &'a HashMap<u64, CachedImage>,
+}
+
+impl Frame<'_> {
+    /// The texture image `id` uploaded as, as the backend drawing it holds it.
+    fn image<T>(&self, id: u64) -> &T
+    where
+        backend::Image: AsRef<T>,
+    {
+        self.images[&id].texture.as_ref()
+    }
 }
 
 struct CachedImage {
@@ -192,22 +205,56 @@ struct Batch {
     scissor: [u32; 4],
 }
 
-/// Batches that paint offscreen as one, then onto the target by `composite`'s vertices.
-struct Group {
-    batches: Range<usize>,
-    composite: Range<u32>,
-}
-
-/// How a batch meets what lies beneath it.
+/// How a batch meets what lies beneath it, and what it samples: the atlas unless it paints
+/// a picture.
 #[derive(Clone, Copy, PartialEq)]
 enum Blend {
     Over,
     /// A premultiplied picture over it.
     Image(u64),
+    /// That group's offscreen picture over it.
+    Group(usize),
     /// Clearing it by the batch's coverage.
     Erase,
     /// Multiplying it by the batch's colour where covered.
     Multiply,
+}
+
+#[derive(Clone, Copy)]
+enum Factor {
+    Zero,
+    One,
+    SourceAlpha,
+    OneMinusSourceAlpha,
+    Destination,
+}
+
+impl Blend {
+    /// Each blend state a backend makes: colour's source and destination factors, then
+    /// alpha's, every one adding.
+    const STATES: [[Factor; 4]; 4] = {
+        use Factor::*;
+        [
+            // Coverage accumulates in alpha, leaving premultiplied colour over a transparent
+            // clear.
+            [SourceAlpha, OneMinusSourceAlpha, One, OneMinusSourceAlpha],
+            [One, OneMinusSourceAlpha, One, OneMinusSourceAlpha],
+            [Zero, OneMinusSourceAlpha, Zero, OneMinusSourceAlpha],
+            // The fragment's colour is scaled by its coverage, so this leaves the target times
+            // the colour where covered and the target elsewhere; alpha stays.
+            [Destination, OneMinusSourceAlpha, Zero, One],
+        ]
+    };
+
+    /// This blend's index in `STATES`.
+    fn state(self) -> usize {
+        match self {
+            Blend::Over => 0,
+            Blend::Image(_) | Blend::Group(_) => 1,
+            Blend::Erase => 2,
+            Blend::Multiply => 3,
+        }
+    }
 }
 
 #[repr(C)]
@@ -227,6 +274,19 @@ struct Vertex {
     /// negative, `shape` is a tapered capsule's half length and end radii.
     blur: f32,
 }
+
+/// Each `Vertex` field's name in the shaders, float count and offset, in shader input order.
+const ATTRIBUTES: [(&CStr, usize, usize); 9] = [
+    (c"position", 2, offset_of!(Vertex, position)),
+    (c"uv", 2, offset_of!(Vertex, uv)),
+    (c"color", 4, offset_of!(Vertex, color)),
+    (c"local", 2, offset_of!(Vertex, local)),
+    (c"shape", 4, offset_of!(Vertex, shape)),
+    (c"stroke", 1, offset_of!(Vertex, stroke)),
+    (c"clip_local", 2, offset_of!(Vertex, clip_local)),
+    (c"clip", 3, offset_of!(Vertex, clip)),
+    (c"blur", 1, offset_of!(Vertex, blur)),
+];
 
 #[derive(Hash, PartialEq, Eq)]
 enum AtlasKey {
@@ -313,6 +373,18 @@ impl Motion {
     }
 }
 
+impl Layer<'_> {
+    fn space(&self, size: [u32; 2]) -> Space {
+        Space {
+            size,
+            scale: self.scale,
+            origin: self.origin,
+            backdrop: self.backdrop,
+            round: self.round,
+        }
+    }
+}
+
 /// A layer's transform onto the target.
 #[derive(Clone, Copy)]
 struct Space {
@@ -324,13 +396,18 @@ struct Space {
 }
 
 impl Space {
+    /// The device point at layer point `point`.
+    fn point(&self, point: [f32; 2]) -> [f32; 2] {
+        [0, 1].map(|axis| point[axis] * self.scale + self.origin[axis])
+    }
+
+    /// The device bounds of layer bounds `rect`.
+    fn rect(&self, rect: [f32; 4]) -> [f32; 4] {
+        [0, 1, 2, 3].map(|edge| rect[edge] * self.scale + self.origin[edge % 2])
+    }
+
     fn visible_rect(&self, rect: [f32; 4]) -> Result<Option<[f32; 4]>, RenderError> {
-        let rect = [
-            rect[0] * self.scale + self.origin[0],
-            rect[1] * self.scale + self.origin[1],
-            rect[2] * self.scale + self.origin[0],
-            rect[3] * self.scale + self.origin[1],
-        ];
+        let rect = self.rect(rect);
         if rect.iter().any(|v| !v.is_finite()) || rect[2] < rect[0] || rect[3] < rect[1] {
             return Err(RenderError::InvalidPrimitive);
         }
@@ -508,7 +585,7 @@ pub struct Renderer {
     glyphs: HashMap<AtlasKey, Option<AtlasGlyph>>,
     images: HashMap<u64, CachedImage>,
     batches: Vec<Batch>,
-    groups: Vec<Group>,
+    groups: Vec<Vec<Batch>>,
     /// Batches before this one take no more primitives.
     barrier: usize,
     scaler: ScaleContext,
@@ -516,10 +593,36 @@ pub struct Renderer {
     row_height: u32,
 }
 
+#[cfg(any(windows, not(feature = "wgpu")))]
 impl Renderer {
-    fn with_gpu(gpu: backend::Gpu) -> Self {
-        let renderer = Self {
-            gpu,
+    /// Draws with the OpenGL context current on this thread, which must stay current
+    /// whenever the renderer or a `Target` is used.
+    pub fn opengl() -> Result<Self, String> {
+        gl::Gpu::new().map(Self::with_gpu)
+    }
+
+    /// An offscreen frame `size` pixels large, for Direct3D 11 or OpenGL.
+    pub fn target(&self, size: [u32; 2]) -> Result<Target, String> {
+        self.gpu.target(size)
+    }
+
+    /// Shows `target` in the window, premultiplying each pixel again in sRGB if
+    /// `translucent`, as the desktop compositing the window over its backdrop needs.
+    /// OpenGL's frame waits for its context's buffers to swap.
+    pub fn present(&self, target: &Target, translucent: bool) {
+        self.gpu.present(target, translucent);
+    }
+
+    /// The sRGB RGBA rows of `target`, from `Renderer::target`, top first.
+    pub fn read_pixels(&self, target: &Target) -> Result<Vec<u8>, String> {
+        self.gpu.read_pixels(target)
+    }
+}
+
+impl Renderer {
+    fn with_gpu(gpu: impl Into<backend::Gpu>) -> Self {
+        let mut renderer = Self {
+            gpu: gpu.into(),
             vertices: Vec::new(),
             glyphs: HashMap::new(),
             images: HashMap::new(),
@@ -527,10 +630,10 @@ impl Renderer {
             groups: Vec::new(),
             barrier: 0,
             scaler: ScaleContext::with_max_entries(32),
-            pen: [1, 0],
-            row_height: 1,
+            pen: [0; 2],
+            row_height: 0,
         };
-        renderer.gpu.write_atlas([0, 0], [1, 1], &[255; 4]);
+        renderer.clear_glyph_cache();
         renderer
     }
 
@@ -539,23 +642,12 @@ impl Renderer {
         self.gpu.max_texture_dimension()
     }
 
-    fn atlas_side(&self) -> u32 {
-        self.gpu.atlas_side()
-    }
-
-    /// Replaces the atlas with an empty one twice as wide and tall.
-    fn grow_atlas(&mut self) {
-        self.gpu.new_atlas(self.atlas_side() * 2);
-        self.clear_glyph_cache();
-        self.gpu.write_atlas([0, 0], [1, 1], &[255; 4]);
-    }
-
     fn glyph_limit(&self) -> usize {
-        MAX_GLYPHS * (self.atlas_side() / ATLAS_SIZE).pow(2) as usize
+        MAX_GLYPHS * (self.gpu.atlas_side() / ATLAS_SIZE).pow(2) as usize
     }
 
     fn uv(&self, glyph: AtlasGlyph) -> [f32; 4] {
-        let side = self.atlas_side() as f32;
+        let side = self.gpu.atlas_side() as f32;
         [
             glyph.x as f32 / side,
             glyph.y as f32 / side,
@@ -564,13 +656,15 @@ impl Renderer {
         ]
     }
 
-    /// The atlas's first texel, the white that solid fills sample.
+    /// The atlas's white texel.
     fn white(&self) -> [f32; 4] {
-        [0.5 / self.atlas_side() as f32; 4]
+        [0.5 / self.gpu.atlas_side() as f32; 4]
     }
 
+    /// Empties the atlas but for its first texel, the white that solid fills sample.
     pub fn clear_glyph_cache(&mut self) {
         self.glyphs.clear();
+        self.gpu.write_atlas([0, 0], [1, 1], &[255; 4]);
         self.pen = [1, 0];
         self.row_height = 1;
     }
@@ -593,12 +687,12 @@ impl Renderer {
             images: self.images.len(),
             image_bytes,
             vertices: self.vertices.len(),
-            batches: self.batches.len(),
+            batches: self.batches.len() + self.groups.iter().map(Vec::len).sum::<usize>(),
             vertex_capacity_bytes: self.vertices.capacity() * size_of::<Vertex>(),
             batch_capacity_bytes: self.batches.capacity() * size_of::<Batch>(),
             glyph_capacity: self.glyphs.capacity(),
             image_capacity: self.images.capacity(),
-            atlas_bytes: u64::from(self.atlas_side()).pow(2) * 4,
+            atlas_bytes: u64::from(self.gpu.atlas_side()).pow(2) * 4,
             vertex_buffer_bytes: VERTEX_BUFFER_BYTES,
             within_budget: self.glyphs.len() <= self.glyph_limit()
                 && self.images.len() <= MAX_IMAGES
@@ -633,16 +727,9 @@ impl Renderer {
         let mut active_images = HashSet::new();
         let mut image_bytes = 0;
         for layer in layers {
-            let space = Space {
-                size,
-                scale: layer.scale,
-                origin: layer.origin,
-                backdrop: layer.backdrop,
-                round: layer.round,
-            };
             for primitive in layer.primitives {
                 if let Primitive::Image { image, rect } = primitive
-                    && space.visible_rect(*rect)?.is_some()
+                    && layer.space(size).visible_rect(*rect)?.is_some()
                     && active_images.insert(image.id())
                 {
                     image_bytes += image.pixels().len() as u64;
@@ -668,15 +755,16 @@ impl Renderer {
             };
             // Once cleared, the atlas holds only this frame's entries; past half full, the
             // next frames would clear it again and again.
-            let crowded = full || (cleared && 2 * self.pen[1] > self.atlas_side());
+            let crowded = full || (cleared && 2 * self.pen[1] > self.gpu.atlas_side());
             if !crowded {
                 break;
             }
             if !cleared {
                 self.clear_glyph_cache();
                 cleared = true;
-            } else if self.atlas_side() * 2 <= limit {
-                self.grow_atlas();
+            } else if self.gpu.atlas_side() * 2 <= limit {
+                self.gpu.new_atlas(self.gpu.atlas_side() * 2);
+                self.clear_glyph_cache();
             } else if full {
                 return Err(RenderError::AtlasFull);
             } else {
@@ -685,8 +773,8 @@ impl Renderer {
         }
         let frame = Frame {
             vertices: &self.vertices,
-            batches: &self.batches,
             groups: &self.groups,
+            batches: &self.batches,
             images: &self.images,
         };
         self.gpu.submit(&frame, target, size, clear);
@@ -713,13 +801,7 @@ impl Renderer {
                 self.barrier = self.batches.len();
                 group = motion.map(|motion| (motion, self.batches.len()));
             }
-            let space = Space {
-                size,
-                scale: layer.scale,
-                origin: layer.origin,
-                backdrop: layer.backdrop,
-                round: layer.round,
-            };
+            let space = layer.space(size);
             let bounds = match layer.clip {
                 Some(clip) => space.scissor(clip),
                 None => [0, 0, size[0], size[1]],
@@ -737,12 +819,11 @@ impl Renderer {
         Ok(())
     }
 
-    /// Makes the batches from `start` a group appearing by `motion`: the vertices that
-    /// paint its offscreen picture over the target, in strips so the turn stays in
-    /// perspective across the picture.
+    /// Makes the batches from `start` a group appearing by `motion`, leaving in their place
+    /// the batch that paints its offscreen picture over the target, in strips so the turn
+    /// stays in perspective across the picture.
     fn group(&mut self, motion: Motion, start: usize, size: [u32; 2]) -> Result<(), RenderError> {
-        let batches = start..self.batches.len();
-        if batches.is_empty() {
+        if start == self.batches.len() {
             return Ok(());
         }
         let [width, height] = size.map(|side| side as f32);
@@ -771,12 +852,7 @@ impl Renderer {
                 position: [shown_x * 2.0 / width - 1.0, 1.0 - shown_y * 2.0 / height],
                 uv: [x / width, if flipped { 1.0 - v } else { v }],
                 color: [motion.opacity; 4],
-                local: [0.0; 2],
-                shape: [0.0; 4],
-                stroke: 0.0,
-                clip_local: [0.0; 2],
-                clip: [0.0; 3],
-                blur: 0.0,
+                ..Vertex::zeroed()
             }
         };
         for strip in 0..strips {
@@ -790,10 +866,13 @@ impl Renderer {
             ];
             self.vertices.extend([a, b, c, a, c, d]);
         }
-        self.groups.push(Group {
-            batches,
-            composite: from..self.vertices.len() as u32,
+        let batches = self.batches.split_off(start);
+        self.batches.push(Batch {
+            vertices: from..self.vertices.len() as u32,
+            blend: Blend::Group(self.groups.len()),
+            scissor: [0, 0, size[0], size[1]],
         });
+        self.groups.push(batches);
         Ok(())
     }
 
@@ -815,10 +894,7 @@ impl Renderer {
                 tint,
                 palette,
             } => {
-                let origin = [
-                    space.origin[0] + origin[0] * space.scale,
-                    space.origin[1] + origin[1] * space.scale,
-                ];
+                let origin = space.point(*origin);
                 self.icon(Space { origin, ..space }, sources, *size, *tint, palette)?;
             }
             Primitive::Path {
@@ -838,10 +914,7 @@ impl Renderer {
                 clip,
                 ink,
             } => {
-                let origin = [
-                    space.origin[0] + origin[0] * space.scale,
-                    space.origin[1] + origin[1] * space.scale,
-                ];
+                let origin = space.point(*origin);
                 if origin.iter().any(|v| !v.is_finite()) {
                     return Err(RenderError::InvalidPrimitive);
                 }
@@ -858,17 +931,7 @@ impl Renderer {
                 text.runs(&mut |run| self.glyph_run(space, run, *ink))?;
             }
             Primitive::Rect { rect, color } => {
-                self.quad(
-                    space,
-                    [
-                        rect[0] * space.scale + space.origin[0],
-                        rect[1] * space.scale + space.origin[1],
-                        rect[2] * space.scale + space.origin[0],
-                        rect[3] * space.scale + space.origin[1],
-                    ],
-                    self.white(),
-                    *color,
-                )?;
+                self.quad(space, space.rect(*rect), self.white(), *color)?;
             }
             Primitive::RoundedRect {
                 rect,
@@ -993,7 +1056,7 @@ impl Renderer {
             return Ok(());
         }
         let size = run.size * scale;
-        if !size.is_finite() || size > self.atlas_side() as f32 {
+        if !size.is_finite() || size > self.gpu.atlas_side() as f32 {
             return Err(RenderError::AtlasFull);
         }
         let color = run
@@ -1119,7 +1182,7 @@ impl Renderer {
 
     fn upload(&mut self, image: swash::scale::image::Image) -> Result<AtlasGlyph, RenderError> {
         let p = image.placement;
-        let side = self.atlas_side();
+        let side = self.gpu.atlas_side();
         if p.width + 2 > side || p.height + 2 > side {
             return Err(RenderError::AtlasFull);
         }
@@ -1173,7 +1236,7 @@ impl Renderer {
         {
             return Ok(());
         }
-        if size + 2.0 > self.atlas_side() as f32 {
+        if size + 2.0 > self.gpu.atlas_side() as f32 {
             return Err(RenderError::AtlasFull);
         }
         let size = size as u32;
@@ -1226,12 +1289,7 @@ impl Renderer {
                 width
             }
         };
-        let rect = [
-            rect[0] * space.scale + space.origin[0],
-            rect[1] * space.scale + space.origin[1],
-            rect[2] * space.scale + space.origin[0],
-            rect[3] * space.scale + space.origin[1],
-        ];
+        let rect = space.rect(rect);
         let start = self.vertices.len();
         // A pixel of margin holds the antialiased fringe outside the edge.
         let fringe = [rect[0] - 1.0, rect[1] - 1.0, rect[2] + 1.0, rect[3] + 1.0];
@@ -1273,7 +1331,7 @@ impl Renderer {
         if !radius.is_finite() || radius < 0.0 || !blur.is_finite() || blur <= 0.0 {
             return Err(RenderError::InvalidPrimitive);
         }
-        let rect = [0, 1, 2, 3].map(|i| rect[i] * space.scale + space.origin[i % 2]);
+        let rect = space.rect(rect);
         let sigma = blur * space.scale / 2.0;
         let reach = 3.0 * sigma;
         let start = self.vertices.len();
@@ -1305,8 +1363,9 @@ impl Renderer {
         style: PathStyle,
         colors: [[f32; 4]; 2],
     ) -> Result<(), RenderError> {
-        let [x, y] = [0, 1]
-            .map(|axis| ((space.origin[axis] + origin[axis] * space.scale) * 4.0).round() * 0.25);
+        let [x, y] = space
+            .point(origin)
+            .map(|value| (value * 4.0).round() * 0.25);
         let (kind, width) = match style {
             PathStyle::Fill | PathStyle::Erase => (0, 0.0),
             PathStyle::Stroke(width) => (1, width),
@@ -1400,13 +1459,7 @@ impl Renderer {
         round: bool,
         color: [f32; 4],
     ) -> Result<(), RenderError> {
-        let pixel = |p: [f32; 2]| {
-            [
-                p[0] * space.scale + space.origin[0],
-                p[1] * space.scale + space.origin[1],
-            ]
-        };
-        let [from, to] = [pixel(from), pixel(to)];
+        let [from, to] = [space.point(from), space.point(to)];
         // Hairlines stay one device pixel wide.
         let radii = widths.map(|width| (width * space.scale).max(1.0) * 0.5);
         let radius = radii[0].max(radii[1]);
@@ -1463,14 +1516,12 @@ impl Renderer {
                     x * 2.0 / space.size[0] as f32 - 1.0,
                     1.0 - y * 2.0 / space.size[1] as f32,
                 ],
-                uv: [0.5 / self.atlas_side() as f32; 2],
+                uv: [self.white()[0]; 2],
                 color,
                 local,
                 shape,
-                stroke: 0.0,
-                clip_local: [0.0; 2],
-                clip: [0.0; 3],
                 blur,
+                ..Vertex::zeroed()
             });
         }
         Ok(())
@@ -1520,11 +1571,7 @@ impl Renderer {
                 uv,
                 color,
                 local,
-                shape: [0.0; 4],
-                stroke: 0.0,
-                clip_local: [0.0; 2],
-                clip: [0.0; 3],
-                blur: 0.0,
+                ..Vertex::zeroed()
             });
         }
         Ok(())
@@ -1585,12 +1632,7 @@ fn soften(
 }
 
 fn srgb_byte(value: f32) -> u8 {
-    let srgb = if value <= 0.0031308 {
-        value * 12.92
-    } else {
-        1.055 * value.powf(1.0 / 2.4) - 0.055
-    };
-    (srgb * 255.0).round() as u8
+    (crate::encode(value) * 255.0).round() as u8
 }
 
 /// Coverage for text of sRGB luminance `tone` sixteenths that, blended in linear light,
@@ -1599,24 +1641,16 @@ fn srgb_byte(value: f32) -> u8 {
 /// nearly untouched.
 fn text_coverage(tone: u8) -> [u8; 256] {
     let encoded = f32::from(tone) / 16.0;
-    let ink = linear(encoded);
+    let ink = crate::linear(encoded);
     std::array::from_fn(|coverage| {
         let coverage = coverage as f32 / 255.0;
         let weighted = if ink < 0.999 {
-            (1.0 - linear(1.0 - coverage * (1.0 - encoded))) / (1.0 - ink)
+            (1.0 - crate::linear(1.0 - coverage * (1.0 - encoded))) / (1.0 - ink)
         } else {
             coverage
         };
         (weighted * 255.0).round() as u8
     })
-}
-
-fn linear(value: f32) -> f32 {
-    if value <= 0.04045 {
-        value / 12.92
-    } else {
-        ((value + 0.055) / 1.055).powf(2.4)
-    }
 }
 
 /// Least OKLab lightness difference between text and the backdrop it stays legible on.
@@ -1670,7 +1704,7 @@ pub fn from_oklab([lightness, a, b]: [f32; 3]) -> [f32; 3] {
 
 /// Linear RGBA of an opaque sRGB colour.
 pub fn srgb(red: u8, green: u8, blue: u8) -> [f32; 4] {
-    let [red, green, blue] = [red, green, blue].map(|byte| linear(f32::from(byte) / 255.0));
+    let [red, green, blue] = [red, green, blue].map(|byte| crate::linear(f32::from(byte) / 255.0));
     [red, green, blue, 1.0]
 }
 
@@ -1681,18 +1715,18 @@ pub fn srgb_bytes([red, green, blue, _]: [f32; 4]) -> [u8; 3] {
 
 /// The hue in degrees of a linear colour, as it looks in sRGB.
 pub fn hue(color: [f32; 4]) -> f32 {
-    let [r, g, b] = [color[0], color[1], color[2]].map(|value| {
-        if value <= 0.003_130_8 {
-            value * 12.92
-        } else {
-            1.055 * value.powf(1.0 / 2.4) - 0.055
-        }
-    });
-    let max = r.max(g).max(b);
-    let range = max - r.min(g).min(b);
+    to_hsl([color[0], color[1], color[2]].map(crate::encode))[0]
+}
+
+/// Hue in degrees, saturation and lightness of an encoded sRGB colour.
+fn to_hsl([r, g, b]: [f32; 3]) -> [f32; 3] {
+    let [max, min] = [r.max(g).max(b), r.min(g).min(b)];
+    let lightness = (max + min) / 2.0;
+    let range = max - min;
     if range == 0.0 {
-        return 0.0;
+        return [0.0, 0.0, lightness];
     }
+    let saturation = range / (1.0 - (2.0 * lightness - 1.0).abs());
     let sector = if max == r {
         (g - b) / range
     } else if max == g {
@@ -1700,7 +1734,16 @@ pub fn hue(color: [f32; 4]) -> f32 {
     } else {
         (r - g) / range + 4.0
     };
-    (sector * 60.0).rem_euclid(360.0)
+    [(sector * 60.0).rem_euclid(360.0), saturation, lightness]
+}
+
+/// The encoded sRGB colour of a hue in degrees, saturation and lightness.
+fn from_hsl([hue, saturation, lightness]: [f32; 3]) -> [f32; 3] {
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    [0.0, 8.0, 4.0].map(|offset: f32| {
+        let k = (offset + hue / 30.0).rem_euclid(12.0);
+        lightness - chroma / 2.0 * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
+    })
 }
 
 /// The light theme's accent `[saturation, lightness]`, also the default ink of a section's pen.
@@ -1708,13 +1751,9 @@ pub const LIGHT_ACCENT: [f32; 2] = [0.60, 0.45];
 
 /// An sRGB hue, saturation and lightness as linear RGBA.
 pub fn hsl(hue: f32, saturation: f32, lightness: f32) -> [f32; 4] {
-    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
-    let channel = |offset: f32| {
-        let k = (offset + hue / 30.0).rem_euclid(12.0);
-        let value = lightness - chroma / 2.0 * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0);
-        (value * 255.0).round().clamp(0.0, 255.0) as u8
-    };
-    srgb(channel(0.0), channel(8.0), channel(4.0))
+    let [red, green, blue] = from_hsl([hue, saturation, lightness])
+        .map(|value| (value * 255.0).round().clamp(0.0, 255.0) as u8);
+    srgb(red, green, blue)
 }
 
 #[cfg(all(test, feature = "wgpu"))]
@@ -2547,13 +2586,13 @@ mod tests {
             target.draw(&mut renderer, &page(&primitives)).unwrap();
         }
         assert_eq!(
-            renderer.atlas_side(),
+            renderer.gpu.atlas_side(),
             ATLAS_SIZE,
             "frames each needing a third of the atlas evict, never grow it"
         );
         let primitives = icons(0..3 * one_atlas);
         target.draw(&mut renderer, &page(&primitives)).unwrap();
-        assert!(renderer.atlas_side() > ATLAS_SIZE);
+        assert!(renderer.gpu.atlas_side() > ATLAS_SIZE);
         assert!(renderer.glyphs.len() >= 3 * one_atlas);
         let capture = target.capture(&renderer);
         let pixel = |x: usize, y: usize| &capture[(y * 512 + x) * 4..(y * 512 + x) * 4 + 4];

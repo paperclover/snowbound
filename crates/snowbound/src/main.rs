@@ -40,13 +40,16 @@ mod paste;
 mod platform;
 mod prefetch;
 mod print;
-mod properties;
 #[cfg_attr(target_os = "linux", path = "print_linux.rs")]
 #[cfg_attr(target_os = "macos", path = "print_macos.rs")]
 #[cfg_attr(windows, path = "print_windows.rs")]
 mod printer;
+mod properties;
+mod protection;
 mod recording;
+mod recycle;
 mod rename;
+mod save_as;
 mod screenshot;
 mod search;
 mod server;
@@ -64,6 +67,8 @@ mod tags;
 mod templates;
 mod themes;
 mod undo;
+mod unpack;
+mod unread;
 mod update;
 mod video;
 mod watch;
@@ -106,6 +111,12 @@ use winit::{
 const TITLE: f32 = 38.0;
 /// Space between toolbar groups.
 const GAP: f32 = 6.0;
+/// A tool face's room beside its buttons.
+const FACE_PAD: f32 = 5.0;
+/// How far a tool face stands above and below its buttons.
+const FACE_RISE: f32 = 3.0;
+/// Space between groups on faces of their own.
+const FACE_GAP: f32 = 2.0;
 const TAB_ROW: f32 = 28.0;
 /// Width of the section colour around the page, and the rows' margin at the window's sides.
 const FRAME: f32 = 6.0;
@@ -115,7 +126,6 @@ const PAGE_LIST: f32 = 240.0;
 const MIN_SIZE: [f32; 2] = [600.0, 400.0];
 /// Extensions of the pictures Insert, Picture offers: those the page both stores and draws.
 const PICTURE_TYPES: [&str; 4] = ["png", "jpg", "jpeg", "gif"];
-/// Font sizes the size box offers, OneNote's list in points.
 /// Fonts the font box offers first, OneNote's default leading.
 const FONTS: [&str; 4] = ["Calibri", "Arial", "Times New Roman", "Courier New"];
 /// Picks the font box and the list galleries offer as recent, at most, as OneNote's
@@ -579,6 +589,8 @@ enum Command {
     },
     /// Deletes pages of the open section to the notebook's recycle bin.
     DeletePages(Vec<ExGuid>),
+    /// Restores or deletes for good pages of the recycle bin's open section.
+    Recycle(recycle::Request),
     /// Moves or indents pages of the open section.
     Pages(Vec<onestore::PageEdit>),
     /// Moves a page of the open section to the end of another section of its folder.
@@ -672,7 +684,7 @@ struct State {
     cache: PathBuf,
     /// Whether the notebook sidebar is expanded.
     sidebar: bool,
-    /// Notebooks and section groups whose rows the sidebar folds, by `sidebar::fold_key`.
+    /// Notebooks and section groups whose rows the sidebar folds, by `Library::key`.
     folded: HashSet<String>,
     /// The open context menu: what it was opened on, and where.
     menu: Option<(menus::Target, [f32; 2])>,
@@ -693,6 +705,12 @@ struct State {
     /// The Link dialog's fields while it is open.
     link: Option<link::LinkDialog>,
     properties: Option<properties::Properties>,
+    /// Save As while it is open.
+    save_as: Option<save_as::Dialog>,
+    /// Unpack Notebook while it is open.
+    unpacking: Option<unpack::Dialog>,
+    /// What has been read in each notebook, on this computer.
+    reads: unread::Reads,
     /// Open Notebook from Server while it is open.
     server: Option<server::Connect>,
     /// New iCloud Notebook while it is open.
@@ -728,6 +746,12 @@ struct State {
     /// The notebook shown while it has no section open, as one whose last section was
     /// deleted.
     sectionless: Option<Arc<Library>>,
+    /// A password-protected section shown locked, in place of an open one.
+    locked: Option<protection::Locked>,
+    /// The password dialog while it is open.
+    password: Option<protection::Asking>,
+    /// Options' Passwords.
+    passwords: settings::Passwords,
     /// What the pointer is dragging: a page's tab, a section tab or a sidebar row.
     drag: Option<menus::Drag>,
     /// Pages whose template strip was dismissed this run.
@@ -879,6 +903,7 @@ impl State {
         let mut notebooks = Vec::new();
         let mut session = None;
         let mut sectionless = None;
+        let mut locked = None;
         let (editor, scene) = match input {
             Input::Notes {
                 document,
@@ -933,7 +958,7 @@ impl State {
                     .chain(&notebooks)
                     .find_map(|library| Some((library, library.first_section()?)));
                 match shown {
-                    Some((library, path)) => {
+                    Some((library, path)) if !library.locked(&path) => {
                         let section = library.open(&path, notify(proxy.clone()))?;
                         let (opened, page) =
                             read_session(section, Arc::clone(library), path, None)?;
@@ -941,11 +966,17 @@ impl State {
                         session = Some(opened);
                         (editor, Some((scene, [0.0; 2])))
                     }
-                    None => {
+                    shown => {
+                        // A first section still locked shows its locked page.
+                        locked = shown.map(|(library, path)| protection::Locked {
+                            library: Arc::clone(library),
+                            path,
+                        });
                         sectionless = notebooks
                             .iter()
                             .find(|library| Some(&library.location) == current.as_ref())
                             .or(notebooks.first())
+                            .filter(|_| locked.is_none())
                             .cloned();
                         let blank = TextDocument::new(vec![Paragraph::new(
                             String::new(),
@@ -1014,6 +1045,7 @@ impl State {
             .map(|dictionary| canvas::spelling::Spelling::new(dictionary, redraw.clone()));
         let updates = update::Updates::start(visible && !stored.manual_updates, proxy.clone());
         let prefetch = prefetch::Prefetch::new(Arc::clone(&layouts), redraw.clone());
+        let reads = unread::Reads::load(&cache);
         let mut state = Self {
             author: stored.user_name.unwrap_or_else(platform::user_name),
             window,
@@ -1045,6 +1077,9 @@ impl State {
             after_open: None,
             link: None,
             properties: None,
+            save_as: None,
+            unpacking: None,
+            reads,
             server: None,
             new_icloud: None,
             icloud_reading: HashSet::new(),
@@ -1062,6 +1097,9 @@ impl State {
             titlebar,
             renaming: None,
             sectionless,
+            locked,
+            password: None,
+            passwords: stored.passwords,
             drag: None,
             templates: templates::View::Strip,
             media: Default::default(),
@@ -1142,6 +1180,7 @@ impl State {
             eprintln!("{error}");
         }
         lap("open", start);
+        self.follow_reading();
         let size = self.window.inner_size();
         let scale = self.scale();
         if scale != self.ui.scale() {
@@ -1170,6 +1209,7 @@ impl State {
             self.ime_allowed = ime;
             self.window.set_ime_allowed(ime);
         }
+        self.lock_idle()?;
         self.draw()?;
         lap("drawn", start);
         self.sync_index(false, Vec::new());
@@ -1211,6 +1251,9 @@ impl State {
         self.new_icloud_dialog();
         self.link_dialog()?;
         self.properties_dialog();
+        self.save_as_dialog();
+        self.unpack_dialog();
+        self.password_dialog()?;
         self.customize_tags();
         self.palette();
         self.sync_popup()?;
@@ -1314,7 +1357,10 @@ impl State {
         let mut theme = self.ui.theme.clone();
         theme.paper = self.paper().color;
         platform::update_menu(|| self.statuses());
-        let welcome = self.session.is_none() && !self.temporary && self.sectionless.is_none();
+        let welcome = self.session.is_none()
+            && !self.temporary
+            && self.sectionless.is_none()
+            && self.locked.is_none();
         self.toolbar(&theme, !welcome)?;
         if welcome {
             self.welcome(&theme);
@@ -1380,7 +1426,9 @@ impl State {
                 ..Spec::default()
             },
         );
+        self.recycle_heading(&theme);
         let row = sections();
+        let unread = self.unread_keys();
         let (clicked, open_tab) = match &self.session {
             Some(session) => {
                 // A tab being renamed takes the name typed, which its field covers.
@@ -1394,7 +1442,8 @@ impl State {
                             }
                             _ => tab.name.as_str(),
                         };
-                        (name, section_color(tab.color))
+                        let unread = unread.contains(&session.library.key(&tab.path));
+                        (name, section_color(tab.color), unread)
                     })
                     .collect();
                 let lit = self.page_drop(row);
@@ -1453,8 +1502,9 @@ impl State {
                 self.tab_rename_field(&theme, row, tab_row);
                 (clicked, open_tab)
             }
+            None if self.locked.is_some() => self.locked_tabs(row, &section, theme.strip),
             None => {
-                let tabs = [("Temporary page", section_color(None))];
+                let tabs = [("Temporary page", section_color(None), false)];
                 let shown = if self.temporary { &tabs[..] } else { &[] };
                 let open_tab = ui::shell::section_tabs(
                     &mut self.ui,
@@ -1536,6 +1586,22 @@ impl State {
             ];
             self.commands
                 .extend(conflict_bar(&mut self.ui, bar, &sections, steps));
+        }
+        if self.in_recycle_bin() {
+            recycle::bar(&mut self.ui);
+        }
+        if self.session.is_none() && self.locked.is_some() {
+            self.locked_page(&theme);
+            self.ui.close();
+            self.ui.close();
+            self.ui.close();
+            if self.navigation_bar_right {
+                self.sidebar(&theme, sidebar);
+            }
+            self.sidebar_button(&theme, height);
+            self.ui.close();
+            self.context_menu();
+            return Ok((section, open_tab, None));
         }
         if let Some(library) = self.sectionless.clone().filter(|_| self.session.is_none()) {
             self.no_sections(&theme, library);
@@ -1816,7 +1882,6 @@ impl State {
                 Flags::default()
             },
             size: [fill(), px(TITLE)],
-            fill: Some(theme.strip),
             pad: [0.0, (TITLE - ui::shell::TOOL) / 2.0],
             gap: GAP,
             role: Some(accesskit::Role::Toolbar),
@@ -1827,6 +1892,20 @@ impl State {
         } else {
             self.ui.open("toolbar", spec)
         };
+        // The strip stops short of the window's controls, where Windows 7 draws its caption
+        // buttons beneath the window's pixels.
+        let edge = (TITLE - ui::shell::TOOL) / 2.0;
+        self.ui.open(
+            "bar",
+            Spec {
+                size: [fill(), px(TITLE)],
+                fill: Some(theme.strip),
+                pad: [0.0, edge],
+                offset: [0.0, -edge],
+                gap: GAP,
+                ..Spec::default()
+            },
+        );
         let lead = if title { platform::LEADING } else { FRAME };
         self.ui.leaf(
             "lead",
@@ -1838,16 +1917,21 @@ impl State {
         if tools {
             // The groups fold in the room the window's controls leave, and whatever still
             // overflows is cut there, so the controls always show.
-            let edge = (TITLE - ui::shell::TOOL) / 2.0;
+            let panel = theme.tool[3] > 0.0 && theme.tool_panel;
+            let face = tool_face(theme, panel, FACE_RISE - edge);
             self.ui.open(
                 "tools",
                 Spec {
                     flags: Flags::CLIP,
                     size: [fill(), px(TITLE)],
-                    pad: [0.0, edge],
+                    pad: [face.pad[0], edge],
                     offset: [0.0, -edge],
-                    gap: GAP,
-                    ..Spec::default()
+                    gap: if theme.tool[3] > 0.0 && !panel {
+                        FACE_GAP
+                    } else {
+                        GAP
+                    },
+                    ..face
                 },
             );
             self.tools(theme);
@@ -1861,6 +1945,7 @@ impl State {
                 },
             );
         }
+        self.ui.close();
         if title {
             platform::window_controls(&mut self.ui, &self.window);
         }
@@ -1878,8 +1963,7 @@ impl State {
             .map_or(MIN_SIZE[0], |row| row.ceil().max(MIN_SIZE[0]));
         if narrowest != self.min_width {
             self.min_width = narrowest;
-            self.window
-                .set_min_inner_size(Some(LogicalSize::new(narrowest, MIN_SIZE[1])));
+            platform::set_min_size(&self.window, [narrowest, MIN_SIZE[1]]);
         }
         Ok(())
     }
@@ -2006,7 +2090,7 @@ impl State {
             "font",
             Spec {
                 gap: 1.0,
-                ..Spec::default()
+                ..tool_face(theme, grouped(theme), FACE_RISE)
             },
         );
         divider(ui, theme);
@@ -2705,7 +2789,7 @@ impl State {
                 eprintln!("{error}");
             }
             if ui::shell::tool_button(&mut self.ui, "new", art::PLUS, theme.text, None).clicked {
-                self.commands.push(Command::NewPage { under: None });
+                self.choose(commands::Choice::Command(commands::Id::NewPage));
             }
             tip(&mut self.ui, commands::Id::NewPage);
             let toggle = if self.pages_open {
@@ -2749,9 +2833,8 @@ impl State {
             self.ui.close();
             return None;
         }
-        let found = self
-            .search
-            .found_in(&session.library.key(&session.tabs[session.tab].path));
+        let found = self.search.found_in(&session.key());
+        let unread = self.unread_pages();
         let rounding = self.rounding();
         let dragged = self.dragged_page();
         let rows = page_rows(
@@ -2759,7 +2842,7 @@ impl State {
             theme,
             section,
             session,
-            &found,
+            [&found, &unread],
             (rounding, self.page_tabs_left),
             self.renaming.as_mut(),
             dragged,
@@ -2813,7 +2896,8 @@ impl State {
             let response = match event {
                 ui::Event::PointerMoved(point) => self.view.pointer_moved(device(point))?,
                 ui::Event::Pressure(pressure) => {
-                    self.view.set_pressure(pressure.filter(|_| self.pen_pressure));
+                    self.view
+                        .set_pressure(pressure.filter(|_| self.pen_pressure));
                     continue;
                 }
                 ui::Event::PointerLeft => self.view.pointer_left(),
@@ -2900,6 +2984,9 @@ impl State {
     fn apply(&mut self, command: Command) -> Result<(), Box<dyn Error>> {
         match command {
             Command::OpenSection(library, path) => {
+                if library.locked(&path) {
+                    return self.show_locked(library, path);
+                }
                 let tab = match &self.session {
                     // Back to the open section before another one opened.
                     Some(session)
@@ -2953,7 +3040,7 @@ impl State {
                 self.commands.push(Command::OpenPage(page));
             }
             Command::CopyVersion { version, tab } => {
-                let session = self.session.as_ref().ok_or("No section is open")?;
+                let session = self.session.as_mut().ok_or("No section is open")?;
                 let page = match session.version {
                     Some(open) if open == version => {
                         session.section.version(session.space, open)?
@@ -2962,6 +3049,8 @@ impl State {
                 };
                 if tab == session.tab {
                     session.section.import_page(&page, &self.author)?;
+                    session.pages = session.section.pages()?;
+                    self.edited(Vec::new());
                 } else {
                     let library = Arc::clone(&session.library);
                     let path = session.tabs[tab].path.clone();
@@ -3010,6 +3099,7 @@ impl State {
                 self.delete_pages(pages)?;
                 self.edited(Vec::new());
             }
+            Command::Recycle(request) => self.recycle(request)?,
             Command::Pages(edits) => self.edit_pages(edits)?,
             Command::MovePage { space, path } => {
                 self.move_page(space, path)?;
@@ -3108,11 +3198,7 @@ impl State {
         let Some(mut opening) = self.opening.take() else {
             return Ok(());
         };
-        let paper = canvas::gpu::Paper {
-            color: self.ui.theme.paper,
-            ink: self.ui.theme.paper_ink,
-        }
-        .colored(opening.editor.page_color());
+        let paper = paper.colored(opening.editor.page_color());
         if !self
             .view
             .prepare(&mut opening.scene, &opening.editor, paper, &self.redraw)
@@ -3151,23 +3237,15 @@ impl State {
                     .session
                     .as_ref()
                     .is_none_or(|open| open.library.location != session.library.location);
-                // A notebook read again after a change replaces the one it was.
-                match self
-                    .notebooks
-                    .iter_mut()
-                    .find(|library| library.location == session.library.location)
-                {
-                    Some(library) => *library = Arc::clone(&session.library),
-                    None => self.notebooks.push(Arc::clone(&session.library)),
-                }
-                if session.library.in_icloud() && session.library.downloading() {
-                    self.fetch(Arc::clone(&session.library), None);
-                }
+                self.list(&session.library);
                 // The section left stays open a while for coming back to; the notebook's
                 // background sync takes it over once it is closed.
+                self.locked = None;
                 if let Some(previous) = self.session.replace(*session) {
+                    let path = &previous.tabs[previous.tab].path;
+                    let locked = self.leave(&previous.library, path);
                     let library = &previous.library;
-                    if self.notebooks.iter().any(|open| Arc::ptr_eq(open, library)) {
+                    if !locked && self.notebooks.iter().any(|open| Arc::ptr_eq(open, library)) {
                         library.keep(&previous.tabs[previous.tab].path, previous.section);
                     } else {
                         let section = previous.section;
@@ -3197,7 +3275,7 @@ impl State {
             }
         }
         let place = self.session.as_ref().and_then(|session| {
-            let key = session.library.key(&session.tabs[session.tab].path);
+            let key = session.key();
             self.places.get(&(key, session.space)).copied()
         });
         let left = self.view.open(opening.editor, Some(opening.scene), place);
@@ -3217,7 +3295,10 @@ impl State {
         self.switching = None;
         self.visited();
         if let Some((space, action)) = self.after_open.take()
-            && let Some(session) = self.session.as_ref().filter(|session| session.space == space)
+            && let Some(session) = self
+                .session
+                .as_ref()
+                .filter(|session| session.space == space)
         {
             let target = menus::Target::Page {
                 library: Arc::clone(&session.library),
@@ -3259,17 +3340,7 @@ impl State {
     /// the open section, now at catalog `path` in it, stays open, reopened where it moved.
     /// Without `path` the notebook has no sections left, and one of its shows none.
     fn adopt(&mut self, library: Arc<Library>, path: Option<&str>) -> Result<(), Box<dyn Error>> {
-        if library.in_icloud() && library.downloading() {
-            self.fetch(Arc::clone(&library), None);
-        }
-        match self
-            .notebooks
-            .iter_mut()
-            .find(|open| open.location == library.location)
-        {
-            Some(open) => *open = Arc::clone(&library),
-            None => self.notebooks.push(Arc::clone(&library)),
-        }
+        self.list(&library);
         let shown = |shown: &Library| shown.location == library.location;
         let Some(path) = path else {
             if self.sectionless.as_deref().is_some_and(shown)
@@ -3315,6 +3386,18 @@ impl State {
         }
         self.save_settings();
         Ok(())
+    }
+
+    /// Lists `library` in place of the notebook read before at its location, or last, and
+    /// brings down what iCloud Drive keeps elsewhere of it.
+    fn list(&mut self, library: &Arc<Library>) {
+        match (self.notebooks.iter_mut()).find(|open| open.location == library.location) {
+            Some(open) => *open = Arc::clone(library),
+            None => self.notebooks.push(Arc::clone(library)),
+        }
+        if library.in_icloud() && library.downloading() {
+            self.fetch(Arc::clone(library), None);
+        }
     }
 
     /// Follows a page shown in place of another.
@@ -3369,7 +3452,14 @@ impl State {
                     .file_name()
                     .map(|name| name.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                format!("{} · {file}", session.title())
+                // OneNote titles a page of the recycle bin so.
+                let binned = recycle::binned(&session.tabs[session.tab].path);
+                let bin = if binned {
+                    " (Read-Only - Recycle Bin)"
+                } else {
+                    ""
+                };
+                format!("{}{bin} · {file}", session.title())
             }
             None if !self.temporary => "Snowbound".to_owned(),
             None => {
@@ -3486,7 +3576,10 @@ impl State {
         loop {
             session.section.wake();
             if Instant::now() >= deadline
-                || session.section.pending().is_ok_and(|pending| pending.is_empty())
+                || session
+                    .section
+                    .pending()
+                    .is_ok_and(|pending| pending.is_empty())
             {
                 return;
             }
@@ -3575,16 +3668,17 @@ impl State {
     /// last poll.
     fn synced(&mut self) -> Result<(), Box<dyn Error>> {
         // Every notebook's changes are taken, so none is reported again.
-        let changed: Vec<String> = self
-            .notebooks
-            .iter()
-            .filter_map(|library| Some((library, library.background.as_ref()?)))
-            .flat_map(|(library, background)| {
-                background
-                    .changed()
-                    .into_iter()
-                    .map(|path| library.key(&path))
+        let reported: Vec<(Arc<Library>, Vec<String>)> = (self.notebooks.iter())
+            .filter_map(|library| {
+                Some((Arc::clone(library), library.background.as_ref()?.changed()))
             })
+            .filter(|(_, paths)| !paths.is_empty())
+            .collect();
+        for (library, paths) in &reported {
+            self.sections_changed(library, paths.clone());
+        }
+        let changed: Vec<String> = (reported.iter())
+            .flat_map(|(library, paths)| paths.iter().map(|path| library.key(path)))
             .collect();
         if !changed.is_empty() {
             self.sync_index(false, changed);
@@ -3597,17 +3691,16 @@ impl State {
         let mut listed = false;
         let mut changed = false;
         let mut rejected = None;
+        let mut elsewhere = Vec::new();
         for event in session.section.events() {
             use notebook::session::Event;
             match event {
                 Event::Changed(spaces) => {
                     listed = true;
                     changed |= spaces.contains(&session.space);
-                    self.search.changed(
-                        session.library.key(&session.tabs[session.tab].path),
-                        session.section.replica(),
-                        spaces,
-                    );
+                    elsewhere.extend_from_slice(&spaces);
+                    self.search
+                        .changed(session.key(), session.section.replica(), spaces);
                 }
                 Event::Rejected { spaces, error } => {
                     if spaces.contains(&session.space) {
@@ -3621,6 +3714,12 @@ impl State {
             }
         }
         session.sync = session.section.sync_status()?;
+        if !elsewhere.is_empty() {
+            self.changed_elsewhere(&elsewhere);
+        }
+        let Some(session) = &mut self.session else {
+            return Ok(());
+        };
         if listed {
             let back = session.shown;
             session.pages = session.section.pages()?;
@@ -3967,9 +4066,15 @@ impl State {
             })
             .collect();
         trace_input(&("Draw", viewport.origin, viewport.scale));
+        // Where the system's material shows through, only what the chrome fills covers it.
+        let clear = if self.surface.translucent() {
+            [0.0; 4]
+        } else {
+            self.ui.theme.strip
+        };
         let start = Instant::now();
         self.renderer
-            .draw(target, self.surface.size, self.ui.theme.strip, &layers)
+            .draw(target, self.surface.size, clear, &layers)
             .map_err(|error| format!("Canvas drawing failed: {error:?}"))?;
         lap("render", start);
         Ok(())
@@ -3988,9 +4093,6 @@ impl State {
         self.surface.read(&self.renderer, offscreen)
     }
 
-    /// Queues input for the next frame. A press on the strip moves the window: at once on
-    /// macOS, while AppKit still holds the press, and elsewhere once the pointer moves, as
-    /// the window manager's move would swallow a second click; a double press zooms it.
     fn over_page(&self) -> bool {
         let [x0, y0, x1, y1] = self.ui.rect(page()).unwrap_or_default();
         let [x, y] = self.pointer;
@@ -4023,6 +4125,9 @@ impl State {
         }
     }
 
+    /// Queues input for the next frame. A press on the strip moves the window: at once on
+    /// macOS, while AppKit still holds the press, and elsewhere once the pointer moves, as
+    /// the window manager's move would swallow a second click; a double press zooms it.
     fn input(&mut self, event: ui::Event) {
         if let ui::Event::PointerMoved(point) = event {
             self.pointer = point;
@@ -4335,8 +4440,8 @@ fn page_list_top() -> &'static str {
     "top"
 }
 
-/// The page list's rows, a page's conflict pages beneath it while shown and the pages a
-/// search `found` marked. A `dragged` page's tab follows the pointer over the others, which
+/// The page list's rows, a page's conflict pages beneath it while shown, and `marked` the
+/// pages a search found and those unread. A `dragged` page's tab follows the pointer over the others, which
 /// slide aside to open the gap it would land in; once let go it eases into its place.
 #[allow(clippy::too_many_arguments)]
 fn page_rows(
@@ -4344,7 +4449,7 @@ fn page_rows(
     theme: &Theme,
     section: &ui::Section,
     session: &Session,
-    found: &HashSet<ExGuid>,
+    marked: [&HashSet<ExGuid>; 2],
     shape: (f32, bool),
     mut renaming: Option<&mut rename::Renaming>,
     dragged: Option<PageDrag>,
@@ -4389,7 +4494,7 @@ fn page_rows(
             theme,
             section,
             session,
-            found,
+            marked,
             shape,
             renaming.as_deref_mut(),
             (space, title, *level),
@@ -4416,7 +4521,7 @@ fn page_rows(
             theme,
             section,
             session,
-            found,
+            marked,
             shape,
             renaming,
             (space, title, *level),
@@ -4437,7 +4542,7 @@ fn page_row(
     theme: &Theme,
     section: &ui::Section,
     session: &Session,
-    found: &HashSet<ExGuid>,
+    [found, unread]: [&HashSet<ExGuid>; 2],
     shape: (f32, bool),
     renaming: Option<&mut rename::Renaming>,
     (space, title, level): (&ExGuid, &String, u32),
@@ -4457,6 +4562,7 @@ fn page_row(
         indent: level.saturating_sub(1),
         conflicted: !versions.is_empty(),
         found: found.contains(space),
+        unread: unread.contains(space),
         renaming: renaming
             .filter(|renaming| renaming.page(*space))
             .map(|renaming| &mut renaming.name),
@@ -4493,62 +4599,45 @@ fn page_row(
         tab: ui::mix(section.tab, theme.chip, 0.6),
         ..*section
     };
-    if session.shown_history == Some(*space) {
-        for version in session.page_versions(*space) {
-            let label = history::label(version);
-            let tab = PageTab {
-                label: &label,
-                dim: false,
-                indent: level.saturating_sub(1),
-                conflicted: false,
-                found: false,
-                renaming: None,
-                shift,
-                lifted: false,
+    // Each row: its id, its label, whether it is open, and whether it is a page version.
+    let history = (session.page_versions(*space).iter())
+        .filter(|_| session.shown_history == Some(*space))
+        .map(|version| {
+            let open = session.version == Some(version.context);
+            (version.context, history::label(version), open, true)
+        });
+    let conflicts = (versions.iter())
+        .filter(|_| session.shown == Some(*space))
+        .map(|version| {
+            let label = match version.created {
+                Some(created) => format!("{} {}", platform::short_date(created), version.user),
+                None => version.user.clone(),
             };
-            let selected = session.version == Some(version.context);
-            if selected {
-                rows.open = Some(ui.id(version.context));
-            }
-            height += ROW;
-            if page_tab(ui, theme, &muted, &version.context, tab, selected, shape)
-                .0
-                .clicked
-                && !selected
-            {
-                rows.version = Some((*space, version.context));
-            }
-        }
-    }
-    if session.shown != Some(*space) {
-        return height;
-    }
-    for version in versions {
-        let label = match version.created {
-            Some(created) => format!("{} {}", platform::short_date(created), version.user),
-            None => version.user.clone(),
-        };
+            (version.space, label, version.space == session.space, false)
+        });
+    for (id, label, selected, version) in history.chain(conflicts) {
         let tab = PageTab {
             label: &label,
             dim: false,
             indent: level.saturating_sub(1),
             conflicted: false,
             found: false,
+            unread: false,
             renaming: None,
             shift,
             lifted: false,
         };
-        let selected = version.space == session.space;
         if selected {
-            rows.open = Some(ui.id(version.space));
+            rows.open = Some(ui.id(id));
         }
         height += ROW;
-        if page_tab(ui, theme, &muted, &version.space, tab, selected, shape)
+        let clicked = page_tab(ui, theme, &muted, &id, tab, selected, shape)
             .0
-            .clicked
-            && !selected
-        {
-            rows.clicked = Some(version.space);
+            .clicked;
+        if clicked && !selected && version {
+            rows.version = Some((*space, id));
+        } else if clicked && !selected {
+            rows.clicked = Some(id);
         }
     }
     height
@@ -4564,6 +4653,8 @@ struct PageTab<'a> {
     conflicted: bool,
     /// A search found the page, which OneNote marks yellow.
     found: bool,
+    /// Another author changed it since it was last viewed, which OneNote sets bold.
+    unread: bool,
     /// The name typed in the tab's rename field, while it shows one.
     renaming: Option<&'a mut String>,
     /// How far down from its place in the list it is drawn.
@@ -4652,6 +4743,7 @@ fn page_tab(
                 Spec {
                     size: [fill(), px(ROW - ROW_GAP)],
                     text: Some(tab.label),
+                    bold: tab.unread,
                     overflow: ui::Overflow::Ellipsis,
                     color: Some(color),
                     ..Spec::default()
@@ -4793,11 +4885,12 @@ fn group(
     full: impl FnOnce(&mut Ui) -> Option<commands::Choice>,
     folded: impl FnOnce(&mut Ui) -> Option<commands::Choice>,
 ) -> Option<commands::Choice> {
+    let face = tool_face(&ui.theme, grouped(&ui.theme), FACE_RISE);
     ui.open(
         part,
         Spec {
             fold: Some(priority),
-            ..Spec::default()
+            ..face
         },
     );
     ui.open(
@@ -5010,6 +5103,26 @@ fn dropdown(
     }
 }
 
+/// Opens the trailing row of a dialog, whose buttons then stand at its right.
+fn buttons(ui: &mut Ui) {
+    ui.open(
+        "buttons",
+        Spec {
+            size: [fill(), children()],
+            pad: [0.0, 8.0],
+            gap: 8.0,
+            ..Spec::default()
+        },
+    );
+    ui.leaf(
+        "space",
+        Spec {
+            size: [fill(), px(1.0)],
+            ..Spec::default()
+        },
+    );
+}
+
 /// Names box `id` to assistive technology, where no tooltip does.
 fn name(ui: &mut Ui, id: Id, label: &str) {
     if let Some(node) = ui.access(id) {
@@ -5179,8 +5292,33 @@ fn title(id: commands::Id) -> &'static str {
     commands::command(id).title.trim_end_matches('…')
 }
 
-/// The line leading a toolbar group, as far from its buttons as the groups are apart.
+/// Whether each toolbar group stands on a face of its own.
+fn grouped(theme: &Theme) -> bool {
+    theme.tool[3] > 0.0 && !theme.tool_panel
+}
+
+/// The theme's face for tools where `shown`, padded beside its buttons and standing `rise`
+/// past the box's top and bottom.
+fn tool_face(theme: &Theme, shown: bool, rise: f32) -> Spec<'static> {
+    if !shown {
+        return Spec::default();
+    }
+    Spec {
+        fill: Some(theme.tool),
+        border: Some(theme.chip),
+        radius: 4.0,
+        inset: [0.0, -rise, 0.0, -rise],
+        pad: [FACE_PAD, 0.0],
+        ..Spec::default()
+    }
+}
+
+/// The line leading a toolbar group, as far from its buttons as the groups are apart; groups
+/// on faces of their own stand apart without one.
 fn divider(ui: &mut Ui, theme: &Theme) {
+    if grouped(theme) {
+        return;
+    }
     ui.leaf(
         "divider",
         Spec {
@@ -5312,146 +5450,102 @@ const QUIT_PUBLISH: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
+        let Some(state) = &mut self.state else {
+            match event {
+                UserEvent::Quit => self.close(event_loop),
+                // A cold launch's documents arrive before the window opens.
+                UserEvent::Open(paths) => self.opening.extend(paths),
+                _ => {}
+            }
+            return;
+        };
         let event = match event {
+            UserEvent::Quit | UserEvent::Replay(Replay::Quit) => return self.close(event_loop),
             UserEvent::Picture(bytes) => {
-                if let Some(state) = &mut self.state {
-                    if let Err(error) = state.insert_picture(bytes, None) {
-                        eprintln!("{error}");
-                    }
-                    state.window.request_redraw();
+                if let Err(error) = state.insert_picture(bytes, None) {
+                    eprintln!("{error}");
                 }
-                return;
+                return state.window.request_redraw();
             }
             UserEvent::InsertText(text) => {
-                if let Some(state) = &mut self.state {
-                    if state.ui.focused() == Some(page()) {
-                        match state.view.insert_text(text) {
-                            Ok(response) => state.respond(response),
-                            Err(error) => eprintln!("{error}"),
-                        }
-                        state.window.request_redraw();
-                    } else {
-                        state.input(ui::Event::Ime(Ime::Commit(text)));
+                if state.ui.focused() == Some(page()) {
+                    match state.view.insert_text(text) {
+                        Ok(response) => state.respond(response),
+                        Err(error) => eprintln!("{error}"),
                     }
+                    state.window.request_redraw();
+                } else {
+                    state.input(ui::Event::Ime(Ime::Commit(text)));
                 }
-                return;
-            }
-            UserEvent::Quit => {
-                self.close(event_loop);
                 return;
             }
             UserEvent::Then(then) => {
-                if let Some(state) = &mut self.state {
-                    if let Err(error) = then(state) {
-                        eprintln!("{error}");
-                    }
-                    state.window.request_redraw();
+                if let Err(error) = then(state) {
+                    eprintln!("{error}");
                 }
-                return;
+                return state.window.request_redraw();
             }
-            UserEvent::ICloudFolder => {
-                if let Some(state) = &mut self.state {
-                    state.list_icloud();
-                }
-                return;
-            }
+            UserEvent::ICloudFolder => return state.list_icloud(),
             UserEvent::ICloudAccount => {
-                if let Some(state) = &mut self.state {
-                    state.icloud_account_changed();
-                    state.window.request_redraw();
-                }
-                return;
+                state.icloud_account_changed();
+                return state.window.request_redraw();
             }
             UserEvent::Open(paths) => {
-                match &mut self.state {
-                    Some(state) => {
-                        for path in paths {
-                            state.open_path(&path);
-                        }
-                        state.window.set_minimized(false);
-                        state.window.focus_window();
-                        state.window.request_redraw();
-                    }
-                    // A cold launch's documents arrive before the window opens.
-                    None => self.opening.extend(paths),
+                for path in paths {
+                    state.open_path(&path);
                 }
-                return;
+                state.window.set_minimized(false);
+                state.window.focus_window();
+                return state.window.request_redraw();
             }
             UserEvent::Update => {
-                if let Some(state) = &mut self.state {
-                    state.updated();
-                    state.window.request_redraw();
-                }
-                return;
+                state.updated();
+                return state.window.request_redraw();
             }
             UserEvent::Sync => {
-                if let Some(state) = &mut self.state
-                    && let Err(error) = state.synced()
-                {
+                if let Err(error) = state.synced() {
                     eprintln!("{error}");
                 }
                 return;
             }
-            UserEvent::Choose(choice) => {
-                if let Some(state) = &mut self.state {
-                    state.choose(choice);
-                }
-                return;
-            }
+            UserEvent::Choose(choice) => return state.choose(choice),
             UserEvent::Appearance => {
-                if let Some(state) = &mut self.state {
-                    state.follow_color_scheme();
-                    state.window.request_redraw();
-                }
-                return;
+                state.follow_color_scheme();
+                return state.window.request_redraw();
             }
-            UserEvent::Redraw => {
-                if let Some(state) = &self.state {
-                    state.window.request_redraw();
-                }
-                return;
-            }
+            UserEvent::Redraw => return state.window.request_redraw(),
             UserEvent::Replay(replay) => {
-                if let Some(state) = &mut self.state {
-                    match replay {
-                        Replay::Input(event) => state.input(event),
-                        Replay::Pinch(factor) => {
-                            if let Err(error) = state.pinch(factor) {
-                                eprintln!("{error}");
-                            }
-                        }
-                        Replay::Snapshot(path) => state.snapshot = Some(path),
-                        Replay::Accessibility(path) => {
-                            if let Err(error) = state.write_accessibility(&path) {
-                                eprintln!("{error}");
-                            }
-                        }
-                        Replay::Tick => {}
-                        Replay::Appearance(appearance) => {
-                            state.window.set_theme(Some(appearance));
-                            state.set_appearance(appearance);
-                        }
-                        Replay::Resize([width, height]) => {
-                            let _ = state
-                                .window
-                                .request_inner_size(LogicalSize::new(width, height));
-                        }
-                        Replay::Quit => {
-                            self.close(event_loop);
-                            return;
+                match replay {
+                    Replay::Input(event) => state.input(event),
+                    Replay::Pinch(factor) => {
+                        if let Err(error) = state.pinch(factor) {
+                            eprintln!("{error}");
                         }
                     }
-                    // A covered window gets no redraws, so each step draws its own frame.
-                    if let Err(error) = state.frame() {
-                        eprintln!("{error}");
+                    Replay::Snapshot(path) => state.snapshot = Some(path),
+                    Replay::Accessibility(path) => {
+                        if let Err(error) = state.write_accessibility(&path) {
+                            eprintln!("{error}");
+                        }
                     }
+                    Replay::Tick | Replay::Quit => {}
+                    Replay::Appearance(appearance) => {
+                        state.window.set_theme(Some(appearance));
+                        state.set_appearance(appearance);
+                    }
+                    Replay::Resize([width, height]) => {
+                        let _ = state
+                            .window
+                            .request_inner_size(LogicalSize::new(width, height));
+                    }
+                }
+                // A covered window gets no redraws, so each step draws its own frame.
+                if let Err(error) = state.frame() {
+                    eprintln!("{error}");
                 }
                 return;
             }
             UserEvent::Accessibility(event) => event,
-        };
-        let Some(state) = &mut self.state else {
-            return;
         };
         if event.window_id != state.window.id() {
             return;
@@ -5679,9 +5773,10 @@ fn write_png(path: &Path, size: [u32; 2], pixels: &[u8]) -> Result<(), Box<dyn E
 }
 
 /// Feeds a development script to the window from another thread, one command per line
-/// in logical pixels: `move X Y`, `press [right]`, `release [right]`, `wheel DX DY`, `pinch FACTOR`, `key NAME`, `type
-/// TEXT`, `modifiers [shift] [command]`, `wait MILLISECONDS`, `snapshot PNG_PATH`,
-/// `accessibility TEXT_PATH`, `appearance light|dark`, `resize WIDTH HEIGHT` and `quit`.
+/// in logical pixels: `move X Y`, `press [right]`, `release [right]`, `wheel DX DY`,
+/// `pressure LEVEL|none`, `pinch FACTOR`, `key NAME`, `type TEXT`, `modifiers [shift]
+/// [control] [command]`, `wait MILLISECONDS`, `snapshot PNG_PATH`, `accessibility TEXT_PATH`,
+/// `appearance light|dark`, `resize WIDTH HEIGHT` and `quit`.
 fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dyn Error>> {
     let mut steps = Vec::new();
     for line in script.lines().filter(|line| !line.trim().is_empty()) {

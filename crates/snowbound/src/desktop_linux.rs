@@ -36,7 +36,7 @@ use winit::{
 /// Wayland's app ID and X11's WM_CLASS, which name the desktop entry and the icon.
 pub const APP_ID: &str = "net.paperclover.snowbound";
 const TEMPLATE: &str = include_str!("../linux/snowbound.desktop");
-/// The type of `.one` and `.onetoc2` files, which no shared-mime-info release names.
+/// The type of `.one`, `.onetoc2` and `.onepkg` files, which no shared-mime-info release names.
 const MIME_TYPES: &str = include_str!("../linux/onenote.xml");
 /// 512 pixels square; the smaller sizes are scaled from it.
 const ICON: &[u8] = include_bytes!("../linux/snowbound.png");

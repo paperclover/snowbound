@@ -20,7 +20,7 @@ development builds, which never update themselves.
 ```text
 latest.json                    {"macos-aarch64": "2026-09-29-r10", "macos-x86_64": ..., "macos-10.6": ..., "linux-x86_64": ..., ...}
 2026-09-29.r10/
-  build.json                   version, commit, and per platform: file, size, sha256, signature
+  build.json                   version, commit, changes, and per platform: file, size, sha256, signature
   build.json.sig               ed25519 signature of build.json, hex
   Snowbound-2026-09-29-r10-macos-aarch64.zip
   Snowbound-2026-09-29-r10-macos-x86_64.zip
@@ -37,6 +37,27 @@ rename, and only moves a platform forward. It carries no signature: the trust is
 in the immutable `build.json`, whose version the app checks against the one it
 was pointed to, and a forged pointer can only name another signed build, which
 the app ignores unless it is newer than itself.
+
+## What a build changes
+
+`build.json`'s `changes` lists, oldest first, every change the commits on
+`main` after the first published build (`FIRST` in `release.py`) up to this one
+bring: `{"version": "2026-09-30-r12", "kind": "feature", "title": "Pinch zoom"}`,
+where `version` is the version of the commit that made it. An updating app sums
+the entries newer than itself, so releases it skipped count too, and says "3
+features, 5 bug fixes, and 2 other changes" with the titles beneath. The list
+is in `build.json` because that is signed; `latest.json` stays a bare pointer.
+
+A commit counts by its conventional prefix: `feat` is a feature, `fix` a bug
+fix, anything else (`docs`, `chore`, no prefix) another change. It counts once,
+titled by its subject without the prefix, unless its body has a top-level
+bulleted list (`- ` or `* ` at the start of a line, wrapped lines indented),
+which counts each item instead, all of the prefix's kind. So a fix is best its
+own small `fix:` commit, and a batch commit should bullet what it brings.
+
+Entries run about 190 bytes, so `build.json` stays under the 1 MiB that apps,
+old ones included, read it within until some 5,000 entries; apps ignore fields
+they don't know, and builds without `changes` read as listing none.
 
 ## Signing
 
@@ -90,8 +111,8 @@ python3 tools/release.py --platforms macos-aarch64 linux-x86_64
 ```
 
 The script refuses to run unless the working copy matches `main` (a dry run
-only warns), runs Clippy (workspace, and `snowbound` without default features)
-and the workspace tests, builds each platform with
+only warns), gates the commit with `tools/ci.py` (see `tools/TESTING.md`),
+builds each platform with
 `tools/canvas/build_macos.py` (`--snow-leopard` for 10.6),
 `crates/snowbound/linux/package.sh` (taking only its executables) and
 `platform/windows/cargo.sh`, then checks
@@ -137,8 +158,9 @@ signature. An Intel build that Rosetta runs takes `macos-aarch64`'s, even at
 its own version. It stages the update beside the install, so the swap is a rename:
 the app unpacked into `.Snowbound.app.update` next to the bundle on macOS, the
 executable into `.snowbound.update` next to it on Linux (`.snowbound.exe.update` on
-Windows). The sync status icon gets a dot, and its popup offers
-Build Folder and Restart to Update.
+Windows). The sync status icon gets a dot, and its popup says what the update
+changes, unfolding to the titles, and offers Build Folder and Restart to
+Update; Check for Updates… lists them in its dialog.
 
 Restart to Update quits the app and starts the old executable with
 `--finish-update`, which waits for the app to exit, renames the old bundle (or

@@ -252,3 +252,101 @@ fn undo_walks_back_through_new_pages_and_their_titles() {
         assert_eq!(tabs, expected, "{tree}");
     }
 }
+
+/// The search box's results in `tree`, one a line.
+fn search_results(tree: &str) -> Vec<&str> {
+    tree.lines()
+        .skip_while(|line| line.trim() != r#"Dialog "Search""#)
+        .filter(|line| line.trim_start().starts_with("ListBoxOption"))
+        .collect()
+}
+
+/// Steps typing `query` into the search box, then writing the tree as `name`.
+fn search(query: &str, name: &str) -> Vec<String> {
+    ["modifiers command", "key e", "modifiers"]
+        .into_iter()
+        .map(String::from)
+        .chain([
+            format!("type {query}"),
+            "wait 2500".into(),
+            format!("accessibility {name}"),
+        ])
+        .collect()
+}
+
+/// Steps opening the page versions notebook's first version and its bar's menu.
+fn version_menu() -> Vec<String> {
+    let mut steps: Vec<String> = ["modifiers command shift", "key p", "modifiers"]
+        .into_iter()
+        .chain(["type Page Versions", "wait 300", "key Enter", "wait 1000"])
+        .map(String::from)
+        .collect();
+    // The version row under the page, then the yellow bar above the version.
+    for point in ["1003 114", "177 94"] {
+        steps.extend([format!("move {point}"), "press".into(), "release".into()]);
+        steps.push("wait 1200".into());
+    }
+    steps
+}
+
+fn run(scratch: &Scratch, notebook: &Path, steps: &[String]) -> Vec<String> {
+    let steps: Vec<&str> = steps.iter().map(String::as_str).collect();
+    replay(scratch, Some(notebook), &steps)
+}
+
+/// A template's content is found by search once it is on the page.
+#[test]
+fn search_finds_what_a_template_put_on_the_page() {
+    let scratch = Scratch::new("template-search");
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
+    let mut steps: Vec<String> = ["modifiers command", "key n", "modifiers", "wait 1200"]
+        .into_iter()
+        // The Meeting tile of the template strip over the new page.
+        .chain(["move 615 287", "press", "release", "wait 3000"])
+        .map(String::from)
+        .collect();
+    steps.extend(search("Attendees", "found"));
+    let [found] = run(&scratch, &notebook, &steps).try_into().unwrap();
+    assert!(
+        search_results(&found)
+            .iter()
+            .any(|line| line.contains("Attendees")),
+        "{found}"
+    );
+}
+
+/// A version restored is found by search.
+#[test]
+fn search_finds_a_restored_version() {
+    let scratch = Scratch::new("restore-search");
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/page-versions/candidate-restore");
+    let mut steps = version_menu();
+    // Restore Version.
+    steps.extend(["key Down", "key Enter", "wait 2000"].map(String::from));
+    steps.extend(search("Second author", "found"));
+    let [found] = run(&scratch, &notebook, &steps).try_into().unwrap();
+    assert!(!search_results(&found).is_empty(), "{found}");
+}
+
+/// A version copied into its own section is listed there at once, and found by search.
+#[test]
+fn a_version_copied_into_its_section_is_listed_and_found() {
+    let scratch = Scratch::new("copy-version");
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/page-versions/candidate-restore");
+    let mut steps = version_menu();
+    // Copy Page To…, then the section itself.
+    steps.extend(["key Down", "key Down", "key Down", "key Enter", "wait 600"].map(String::from));
+    steps.extend(["key Down", "key Enter", "wait 2000", "accessibility copied"].map(String::from));
+    steps.extend(search("Second author", "found"));
+    let [copied, found] = run(&scratch, &notebook, &steps).try_into().unwrap();
+    let pages = page_tabs(&copied);
+    let versioned = pages
+        .iter()
+        .filter(|tab| tab.ends_with("Versioned"))
+        .count();
+    assert_eq!(versioned, 3, "{pages:?}");
+    assert!(!search_results(&found).is_empty(), "{found}");
+}

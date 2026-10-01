@@ -110,12 +110,6 @@ final class ServerViewController: UITableViewController, UITextFieldDelegate {
         }
     }
 
-    private func alert(_ title: String, _ message: String) {
-        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .default))
-        present(alert, animated: true)
-    }
-
     override func numberOfSections(in tableView: UITableView) -> Int { registered ? 2 : 1 }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { 2 }

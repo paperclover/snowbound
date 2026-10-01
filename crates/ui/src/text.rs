@@ -24,19 +24,12 @@ pub(crate) struct Texts {
 }
 
 impl Texts {
-    /// `size` is in logical pixels; `font` names a family to prefer over the interface's.
-    pub fn label(
-        &mut self,
-        text: &str,
-        size: f32,
-        bold: bool,
-        font: Option<&str>,
-        frame: u64,
-    ) -> Rc<Label> {
-        self.styled(text, size, bold, false, font, frame)
+    /// `text` in the interface's regular face, `size` logical pixels.
+    pub fn label(&mut self, text: &str, size: f32, frame: u64) -> Rc<Label> {
+        self.styled(text, size, false, false, None, frame)
     }
 
-    /// `label`, slanted where `italic`.
+    /// `font` names a family to prefer over the interface's.
     pub fn styled(
         &mut self,
         text: &str,

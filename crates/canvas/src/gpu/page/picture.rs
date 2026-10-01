@@ -30,12 +30,12 @@ pub(super) struct Picture {
 }
 
 impl Picture {
-    /// Reads the size from the picture's header; None when the renderer cannot decode it.
     /// Whether both show the same stored bytes.
-    pub fn same(&self, other: &Self) -> bool {
+    pub(crate) fn same(&self, other: &Self) -> bool {
         self.bytes == other.bytes
     }
 
+    /// Reads the size from the picture's header; None when the renderer cannot decode it.
     pub fn new(bytes: &Arc<[u8]>) -> Option<Self> {
         Some(Self {
             native: RasterImage::measure(bytes).ok()?,
@@ -48,11 +48,11 @@ impl Picture {
     }
 
     /// The latest raster, once one has landed.
-    pub fn image(&self) -> Option<&RasterImage> {
+    pub(crate) fn image(&self) -> Option<&RasterImage> {
         self.shown.as_ref()
     }
 
-    pub fn failed(&self) -> bool {
+    pub(crate) fn failed(&self) -> bool {
         self.failed
     }
 }

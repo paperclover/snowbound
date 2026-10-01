@@ -47,7 +47,9 @@ harness also accepts `--client-profile release`.
 | `page::link::internal_link`, `page::link::parse_internal_link` | Build and read the `onenote:#…` URLs OneNote stores for links to sections, pages and paragraphs, by identity |
 | `page::Recording`, `page::MediaIndex`, `PageOp::Media` | An audio or video file's recording identity, kind and length, and a paragraph's link to a moment in recordings, as OneNote stores them; the page lists its recordings as they come and go |
 | `page::Page`, `page::Paragraph`, `page::Ink`, `page::Math` | Build an editable page model (title, outlines, paragraphs with coalesced text spans, tables, images, attachments in paragraphs or on the page, ink drawings and handwriting decoded to stroke polylines in page points with each point's pen pressure, a moved drawing offset by its position, a highlighter's raster operation, a drawn shape's kind and anchors) with stored identities; equations parse from their linear text and run data into a tree that renders the MathML OneNote exports; content outside the model is retained as `Unsupported` |
-| `protected::UnlockedSection` (optional feature) | Own decoded buffers for explicit known-password inspection; clear those buffers on drop; derived document strings/exports remain caller-owned |
+| `protected::Key`, `Section::unlock` | Open a password-protected section's key with its password (`Key::open`), or make one for a new password with OneNote 2010's encryption data (`Key::new`); keep the section open under it, decoding every object and payload, and seal edits under it as OneNote does (a fresh IV per object) |
+| `protected::rekey` | Set, change or remove a section's password as OneNote 2010 does: the section written anew under fresh file, space and payload identities, each space keeping its labelled revisions as checkpoints |
+| `protected::UnlockedSection` | A protected section's labelled revisions decoded into a `Document` for inspection and export, by password or `Key`; cleared on drop, while strings and exports made from it are the caller's |
 | `create_section` | Create one page containing one plain-text paragraph and an author, including Unicode |
 | `PageCreation`, `SectionOp::Create` | Add an empty top-level page and its section entry atomically, under identities the intent retains across retries |
 | `PageEdit`, `SectionOp::Pages` | Publish explicitly selected page moves and indentation changes together, preserving page content and historical revisions |
@@ -55,6 +57,7 @@ harness also accepts `--client-profile release`.
 | `create_table_of_contents` | Create ordered section entries from filenames and file identities |
 | `TocEdit`, `edit_table_of_contents` | Add, rename, order and remove a table of contents' section and group entries, and colour the notebook, as one revision's `Transaction`; a section's colour is `SectionOp::Color` in its own metadata |
 | `place`, `place_file` | Name a file for its notebook as OneNote does on adoption (parent TOC identity and name CRC in the header), so OneNote keeps its identity, on any `CommitIo` or under the filesystem adapter |
+| `place_image`, `reidentify` | The same on an image held whole, or outside any notebook; and a new file identity and version, as OneNote's Save As copies and Unpack Notebook give (`corpus/notebook-package`) |
 | `TextAttribute`, `PageOp::Format` | Change character formatting over a UTF-16 range while sharing immutable styles; preserve unselected runs |
 | `PageOp::Style`, `PageOp::Restyle`, `op::restyle` | Give a paragraph a paragraph style (with its NextStyle, as OneNote 2010 writes its headings), or move every paragraph of a style to a new style object of the same name; style objects are read-only, and run or paragraph values equal to what the old style gave are cleared so they follow the new one. `op::restyle(page, sheet)` brings a page's named styles to a sheet of definitions, joining styles that share a name |
 | `OutlineEdit`, `PageOp::Outline` | Change ordinary outline position/width, the position of a file or ink drawing on the page, or a paragraph's saved expansion default, preserving identities and content |
@@ -68,7 +71,8 @@ harness also accepts `--client-profile release`.
 | `op::predict` | The page an op leaves, as the section stores it and reading it back shows it |
 | `read_file` | Read a snapshot under whole-file exclusion |
 | `read_snapshot` | Read a validated snapshot through fresh positioned I/O while the caller excludes maintenance |
-| `CommitIo`, `confirm`, `confirm_file` | Supply another storage backend with equivalent exclusion and ordered durability; check that a stamp still holds |
+| `CommitIo`, `confirm`, `confirm_file`, `Stamp::check` | Supply another storage backend with equivalent exclusion and ordered durability; check that a stamp still holds |
+| `supersede_file` | Put a file written anew (`protected::rekey`) in place of a section under the exclusion `commit_file` takes, while its stamp holds; on Windows the old file goes aside first, as OneNote's maintenance does |
 
 Edits enter a kept-open `Section` as ops and leave as one appended revision per
 changed space; only section and page creation, imports and opening files handle
@@ -78,14 +82,12 @@ navigation titles update in the same transaction; unsupported fields,
 protected objects and split surrogate pairs are
 rejected before writing. Appended snapshots cap revision dependency depth at 512
 while retaining historical revisions. TOC snapshots can remap encoded CompactIDs
-without changing their resolved references. Password-protected
-sections retain their encrypted structure and payloads. With the optional
-`protected` feature, `protected::UnlockedSection` opens native OneNote 2010
-AES-128/CBC, SHA-1 password wrappers into a borrowed document view. Incorrect
-passwords, unsupported protection profiles and work-limit failures remain distinct.
-The source stays encrypted. `UnlockedSection::apply` applies page ops and seals them
-under the section's key (fresh IV per object, payloads under the file IV); `Section`
-rejects protected sections.
+without changing their resolved references. A password-protected section opens with
+`Section::unlock` under the `Key` its password opens, and every revision it seals names
+the key (MS-ONESTORE 2.5.19 asks that of each revision; OneNote names it only in those
+without a dependency, and reads both). `Section::open` refuses one. Incorrect
+passwords, unsupported protection profiles and work-limit failures remain distinct
+(`protected::Error`).
 `PageCreation::new` appends, or inserts before the first page space of an existing
 series. `Some("")` creates an empty title field; `None` omits the title node.
 `dated(date, time)` gives the title OneNote 2010's date and time fields showing that
@@ -331,34 +333,44 @@ a dedicated loopback test session; its control JSON selects the successful respo
 and occurrence to withhold. The captured trace and result files are the regression
 oracle; replaying the native experiments requires the supplied Windows/share setup.
 
-## Protected inspection
+## Password-protected sections
+
+OneNote 2010 wraps an AES-128 key in Office's Agile password encryption (MS-OFFCRYPTO:
+SHA-1 of a 16-byte salt and the UTF-16LE password, then 100,000 rounds of SHA-1 over the
+round number and the hash; three block keys decrypt, with the salt as IV, the verifier
+input, its SHA-1 zero-padded to 32 bytes, and the key). The XML sits after the words
+`3, length, 16, length - 16` and the version `4.4` with flags `0x40`, inside the
+encryption-data container every revision names. Each property object is stored as its
+reference streams, a length, a random IV and the CBC encryption of a padding count, the
+property bytes and random padding; read-only objects hash the clear bytes zero-padded to
+8 bytes. Payloads are their length and bytes, randomly padded, under CBC with the IV
+SHA-1(key data salt, block 0). Setting, changing or removing a password writes the section
+anew, as OneNote does, under fresh identities so that no cache confuses the old file's
+objects or payloads with the new ones (`corpus/protected-sections`).
 
 ```rust,no_run
-# #[cfg(feature = "protected")]
-# fn example() {
-use onestore::{RevisionIndex, Store, protected::{Limits, UnlockedSection}};
-# fn inspect(bytes: &[u8], password: &str) -> Result<(), Box<dyn std::error::Error>> {
-let store = Store::parse(bytes)?;
-let index = RevisionIndex::parse(&store)?;
-let unlocked = UnlockedSection::open(&index, password, Limits::default())?;
-let document = unlocked.document()?;
-assert!(!document.pages()?.is_empty());
-drop(document);
-drop(unlocked);
+use onestore::{Arena, Section, protected::{Key, rekey}};
+# fn example(image: Vec<u8>, password: &str) -> Result<(), Box<dyn std::error::Error>> {
+let key = Key::open(&image, password)?;
+let arena = Arena::default();
+let mut section = Section::unlock(&arena, image.clone(), &key)?;
+assert!(!section.pages()?.is_empty());
+let changed = rekey(&image, Some(&key), Some(&Key::new("another password")?))?;
+# drop(changed);
 # Ok(()) }
-# }
 ```
 
-This example requires `features = ["protected"]`. The owner retains no password;
-its derived key is cleared on drop. Its source-buffer views cannot outlive it; copies of parsed
-strings, serialized models and exports have their own lifetimes. These copies are
-plaintext, and dropping the unlock owner does not clear them. CBC has no general
+A `Key` holds no password; its key is cleared when its last clone drops. A `Section`
+decodes into its `Arena`, which is not cleared; drop both when the section locks.
+`UnlockedSection` owns its decoded buffers and clears them on drop; the views it lends
+cannot outlive it, while copies of parsed strings, serialized models and exports are
+plaintext with lifetimes of their own. CBC has no general
 ciphertext-authentication guarantee; native read-only hashes and model validation
 check the corresponding structure. Internal payloads are decoded; external payload
 references remain references, and their protected decoding is not implemented.
 
-For a deliberate plaintext diagnostic export, build the notebook exporter with
-`--features protected` and pass `--password-file PATH` after the source and optional
+For a deliberate plaintext diagnostic export, run the notebook exporter
+(`examples/document`) with `--password-file PATH` after the source and optional
 new output directory. The file contains exact UTF-8 password bytes; no newline is
 removed or Unicode normalization applied. The exporter creates protected exports
 under an owner-only directory on Unix and reports protected external payloads as

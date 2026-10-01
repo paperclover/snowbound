@@ -2,8 +2,8 @@
 
 `candidate/notebook` is `native-encrypted/encrypted-01` after
 a Rust edit of the unlocked page appended text to the first paragraph and added a
-paragraph, exported by `an_unlocked_page_is_saved_under_the_section_key`
-(`ONESTORE_PROTECTED_EXPORT`). `candidate/read` is OneNote 2010's COM read from a
+paragraph, exported by the protected writer that `Section::unlock` has since replaced
+(`corpus/protected-sections` gates the current one). `candidate/read` is OneNote 2010's COM read from a
 fresh clone with an empty cache after unlocking the section in its UI with the
 fixture password (`../native-encrypted/manifest.json`).
 

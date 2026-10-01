@@ -21,11 +21,22 @@ pub struct RecoverySummary {
 /// Read-only recovery evidence; it cannot publish or acknowledge an edit.
 pub struct Recovery {
     connection: Connection,
+    /// A password-protected section's key, which opens its sealed queue.
+    key: Option<Key>,
 }
 
 impl Recovery {
     /// Opens an exported archive without migration or conversion into a writable replica.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
+        Self::open_with(path.as_ref(), None)
+    }
+
+    /// `open` for an archive of a password-protected section, under its `key`.
+    pub fn open_unlocked(path: impl AsRef<Path>, key: &Key) -> Result<Self> {
+        Self::open_with(path.as_ref(), Some(key.clone()))
+    }
+
+    fn open_with(path: &Path, key: Option<Key>) -> Result<Self> {
         let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         connection.busy_timeout(Duration::ZERO)?;
         connection.execute_batch("BEGIN")?;
@@ -48,10 +59,10 @@ impl Recovery {
             )
             .into());
         }
-        let recovery = Self { connection };
+        let recovery = Self { connection, key };
         recovery.snapshot()?;
-        for edit in pending(&recovery.connection)? {
-            sync::status(&recovery.connection, edit.id)?;
+        for edit in recovery.pending()? {
+            recovery.status(edit.id)?;
         }
         receipts(&recovery.connection)?;
         Ok(recovery)
@@ -63,31 +74,23 @@ impl Recovery {
 
     /// The image the archived queue leaves, as `Replica::snapshot` gives it.
     pub fn snapshot(&self) -> Result<Vec<u8>> {
-        working::image(&self.connection)
-    }
-
-    fn base(&self) -> Result<Vec<u8>> {
-        Ok(
-            base::read(&self.connection, base::Image::Base)?.ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "The archive has no base image")
-            })?,
-        )
+        working::image(&self.connection, self.key.as_ref())
     }
 
     /// The last observed remote image.
     pub fn remote_snapshot(&self) -> Result<Vec<u8>> {
         match base::read(&self.connection, base::Image::Remote)? {
             Some(image) => Ok(image),
-            None => self.base(),
+            None => base::base(&self.connection),
         }
     }
 
     pub fn pending(&self) -> Result<Vec<PendingEdit>> {
-        pending(&self.connection)
+        pending(&self.connection, self.key.as_ref())
     }
 
     pub fn status(&self, id: u64) -> Result<Option<EditStatus>> {
-        sync::status(&self.connection, id)
+        sync::status(&self.connection, id, self.key.as_ref())
     }
 
     pub fn receipts(&self) -> Result<BTreeMap<u64, ExGuid>> {

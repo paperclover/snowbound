@@ -28,7 +28,7 @@ pub enum Action {
         notebook: usize,
         path: String,
     },
-    /// Folds or unfolds a notebook's or section group's rows, by `fold_key`.
+    /// Folds or unfolds a notebook's or section group's rows, by `Library::key`.
     Fold(String),
     NewNotebook,
     NewICloudNotebook,
@@ -43,11 +43,6 @@ pub enum Action {
     Renamed(bool),
     /// Explains why a section or group can't be opened: the alert's title and message.
     Unavailable(String, String),
-}
-
-/// Names a notebook's or group's rows for folding them.
-pub fn fold_key(library: &Library, path: &str) -> String {
-    format!("{}\n{path}", library.location)
 }
 
 /// What the tree's rows read and what they were asked.
@@ -68,6 +63,8 @@ pub struct Tree<'a> {
     ghost: Option<Ghost>,
     /// Where the gap the dragged row would land in stands.
     gap: Option<[f32; 4]>,
+    /// The notebooks, groups and sections holding unread pages, by `Library::key`.
+    unread: HashSet<String>,
 }
 
 /// Where a dragged row would land: before a row of a folder or at its end, or into a group.
@@ -85,6 +82,7 @@ struct Ghost {
     depth: u32,
     dim: bool,
     selected: Option<[f32; 4]>,
+    bold: bool,
 }
 
 impl<'a> Tree<'a> {
@@ -105,6 +103,7 @@ impl<'a> Tree<'a> {
             lifted: None,
             ghost: None,
             gap: None,
+            unread: HashSet::new(),
         }
     }
 }
@@ -137,14 +136,13 @@ pub fn header() -> Id {
     Id::ROOT.child("sidebar header")
 }
 
-/// The sidebar's header row, `header` tall and dragging the window when `drags`, then
+/// The sidebar's header row, as tall as the tab row and dragging the window when `drags`, then
 /// with `rows` the tree of `notebooks` with the open section marked. The notebook button
 /// floats over the header's end at the window's edge, the `right` one or the left.
 fn sidebar(
     ui: &mut Ui,
     tree: &mut Tree,
     notebooks: &[Arc<Library>],
-    header: f32,
     drags: bool,
     rows: bool,
     right: bool,
@@ -158,8 +156,8 @@ fn sidebar(
             } else {
                 Flags::default()
             },
-            size: [fill(), px(header)],
-            pad: [crate::FRAME, (header - ui::shell::TOOL) / 2.0 + DROP],
+            size: [fill(), px(RAIL)],
+            pad: [crate::FRAME, (RAIL - ui::shell::TOOL) / 2.0 + DROP],
             gap: 6.0,
             ..Spec::default()
         },
@@ -204,7 +202,7 @@ fn sidebar(
         },
     );
     for (index, library) in notebooks.iter().enumerate() {
-        let key = fold_key(library, "");
+        let key = library.key("");
         let unfolded = !folded.contains(&key);
         let (row, fold) = tree_row(
             ui,
@@ -222,6 +220,7 @@ fn sidebar(
                 fold: Some(unfolded),
                 selected: None,
                 renamed: false,
+                bold: tree.unread.contains(&key),
             },
         );
         let unsigned = library.notebook.is_err()
@@ -281,6 +280,7 @@ fn sidebar(
                 fold: None,
                 selected: None,
                 renamed: false,
+                bold: false,
             },
         );
         if row.clicked {
@@ -315,6 +315,12 @@ fn folder(
                 *color,
                 true,
             ),
+            // Opens on its locked page, which unlocks it.
+            SectionState::Locked => (
+                crate::library::section_name(&section.path, &None),
+                None,
+                true,
+            ),
             _ => (
                 crate::library::section_name(&section.path, &None),
                 None,
@@ -332,6 +338,7 @@ fn folder(
             fold: None,
             selected: (open == Some(section.path.as_str())).then_some(section_color(color)),
             renamed: renaming,
+            bold: tree.unread.contains(&library.key(&section.path)),
         };
         if lifts(tree, notebook, &section.path, &row) {
             continue;
@@ -357,7 +364,7 @@ fn folder(
         if crate::library::recycle_bin(&group.path) {
             continue;
         }
-        let key = fold_key(library, &group.path);
+        let key = library.key(&group.path);
         let unfolded = !tree.folded.contains(&key);
         let name = group.path.rsplit('/').next().unwrap_or_default();
         gap(ui, tree, &folder.path, Some(&group.path));
@@ -371,6 +378,7 @@ fn folder(
             fold: Some(unfolded),
             selected: None,
             renamed: renaming,
+            bold: tree.unread.contains(&key),
         };
         // A dragged group's rows fold away beneath it.
         let lifted = lifts(tree, notebook, &group.path, &row);
@@ -425,6 +433,7 @@ fn folder(
                 fold: None,
                 selected: None,
                 renamed: false,
+                bold: false,
             },
         );
         if row.clicked {
@@ -499,6 +508,7 @@ fn lifts(tree: &mut Tree, notebook: usize, path: &str, row: &Row) -> bool {
             depth: row.depth,
             dim: row.dim,
             selected: row.selected,
+            bold: row.bold,
         });
     }
     lifted
@@ -594,6 +604,8 @@ struct Row<'a> {
     selected: Option<[f32; 4]>,
     /// The row is being renamed: its label is the tree's rename field.
     renamed: bool,
+    /// It holds unread pages, which OneNote sets bold.
+    bold: bool,
 }
 
 /// One row of the tree: its signal, and whether its fold arrow was clicked.
@@ -653,6 +665,7 @@ fn tree_row(ui: &mut Ui, tree: &mut Tree, id: Id, row: Row) -> (Signal, bool) {
                 Spec {
                     size: [fill(), px(ROW)],
                     text: Some(row.label),
+                    bold: row.bold,
                     color: Some(color),
                     ..Spec::default()
                 },
@@ -729,15 +742,22 @@ impl crate::State {
             },
         );
         crate::name(&mut self.ui, rows_id, "Notebooks");
-        let open = self.session.as_ref().and_then(|session| {
+        let shown = match (&self.session, &self.locked) {
+            (Some(session), _) => Some((&session.library, session.tabs[session.tab].path.as_str())),
+            (None, Some(locked)) => Some((&locked.library, locked.path.as_str())),
+            (None, None) => None,
+        };
+        let open = shown.and_then(|(shown, path)| {
             let index = self
                 .notebooks
                 .iter()
-                .position(|library| Arc::ptr_eq(library, &session.library))?;
-            Some((index, session.tabs[session.tab].path.as_str()))
+                .position(|library| Arc::ptr_eq(library, shown))?;
+            Some((index, path))
         });
         let drags = self.chrome_drags();
+        let unread = self.unread_keys();
         let mut tree = Tree::new(theme, open, &self.folded, self.renaming.as_mut());
+        tree.unread = unread;
         tree.lifted = self
             .drag
             .as_ref()
@@ -750,7 +770,6 @@ impl crate::State {
             &mut self.ui,
             &mut tree,
             &self.notebooks,
-            crate::TAB_ROW,
             drags,
             width > 0.5,
             self.navigation_bar_right,
@@ -800,9 +819,6 @@ impl crate::State {
         }
     }
 
-    /// The sidebar's button in its square at the window's edge, and the room the section
-    /// tabs, standing `width` from that edge, leave it; the button stays put as the sidebar
-    /// eases open and shut.
     /// The notebook button, floating at the body's corner over the section tabs' row, `height`
     /// tall as it eases, or over the sidebar's header while that is open.
     pub(crate) fn sidebar_button(&mut self, theme: &Theme, height: f32) {
@@ -903,6 +919,7 @@ impl crate::State {
                 fold: None,
                 selected: ghost.selected,
                 renamed: false,
+                bold: ghost.bold,
             },
         );
         self.ui.close();
@@ -1049,9 +1066,10 @@ impl crate::State {
                 self.commands
                     .push(crate::Command::OpenSection(library, path));
             }
+            crate::library::Located::Package(package) => self.open_unpack(&package),
             crate::library::Located::Nothing => crate::platform::alert(
                 "Couldn't open",
-                "Choose a notebook folder, its Open Notebook file, or a section file.",
+                "Choose a notebook folder, its Open Notebook file, a section file or a package.",
             ),
         }
     }

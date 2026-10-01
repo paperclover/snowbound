@@ -23,9 +23,12 @@ impl Session {
             .map_or(&[], |(_, versions)| versions)
     }
 
-    /// Whether the open page takes no edits: a conflict page or a version.
+    /// Whether the open page takes no edits: a conflict page, a version, or a page of the
+    /// recycle bin.
     pub(crate) fn read_only(&self) -> bool {
-        self.version.is_some() || self.conflict(self.space).is_some()
+        self.version.is_some()
+            || self.conflict(self.space).is_some()
+            || crate::recycle::binned(&self.tabs[self.tab].path)
     }
 
     /// Version `version` of page `space` as the editor shows it: read-only, what it changed
@@ -166,6 +169,7 @@ impl State {
             .section
             .restore_version(page, version, &self.author)?;
         session.refresh_history()?;
+        self.edited(vec![page]);
         self.commands.push(Command::OpenPage(page));
         Ok(())
     }
@@ -207,19 +211,7 @@ impl State {
         ) {
             return Ok(());
         }
-        let all: Vec<(ExGuid, Vec<ExGuid>)> = session
-            .history
-            .iter()
-            .map(|(page, versions)| {
-                (
-                    *page,
-                    versions.iter().map(|version| version.context).collect(),
-                )
-            })
-            .collect();
-        if !all.is_empty() {
-            session.section.delete_versions(&all)?;
-        }
+        clear(&session.section)?;
         session.refresh_history()?;
         if session.version.is_some() {
             self.commands.push(Command::OpenPage(session.space));
@@ -242,22 +234,7 @@ impl State {
                 let cleared = library
                     .open(&path, notify(proxy.clone()))
                     .and_then(|section| {
-                        let all: Vec<(ExGuid, Vec<ExGuid>)> = section
-                            .versions()?
-                            .into_iter()
-                            .map(|(page, versions)| {
-                                (
-                                    page,
-                                    versions
-                                        .into_iter()
-                                        .map(|version| version.context)
-                                        .collect(),
-                                )
-                            })
-                            .collect();
-                        if !all.is_empty() {
-                            section.delete_versions(&all)?;
-                        }
+                        clear(&section)?;
                         Ok(section.close()?)
                     });
                 if let Err(error) = cleared {
@@ -269,31 +246,36 @@ impl State {
     }
 }
 
+/// Deletes every page version `section` holds.
+fn clear(section: &notebook::session::Section) -> Result<(), notebook::Error> {
+    let all: Vec<(ExGuid, Vec<ExGuid>)> = (section.versions()?.into_iter())
+        .map(|(page, versions)| {
+            (
+                page,
+                versions.iter().map(|version| version.context).collect(),
+            )
+        })
+        .collect();
+    if !all.is_empty() {
+        section.delete_versions(&all)?;
+    }
+    Ok(())
+}
+
 /// The readable sections at catalog path `folder` and in the groups inside it, leaving out
 /// the recycle bin.
 fn sections(library: &Library, folder: &str) -> Vec<String> {
     let Some(catalog) = library.catalog() else {
         return vec![library.location.clone()];
     };
-    let mut pending = vec![catalog];
-    let mut root = None;
-    while let Some(candidate) = pending.pop() {
-        if candidate.path == folder {
-            root = Some(candidate);
-            break;
-        }
-        pending.extend(&candidate.groups);
-    }
-    let mut pending: Vec<_> = root.into_iter().collect();
-    let mut paths = Vec::new();
-    while let Some(folder) = pending.pop() {
-        paths.extend(library.tabs(&folder.path).into_iter().map(|tab| tab.path));
-        pending.extend(
-            folder
-                .groups
-                .iter()
-                .filter(|group| !library::recycle_bin(&group.path)),
-        );
-    }
-    paths
+    let root = library::folders(catalog, |_| true)
+        .into_iter()
+        .find(|candidate| candidate.path == folder);
+    root.map_or_else(Vec::new, |root| {
+        library::folders(root, |group| !library::recycle_bin(&group.path))
+    })
+    .into_iter()
+    .flat_map(|folder| library.tabs(&folder.path))
+    .map(|tab| tab.path)
+    .collect()
 }

@@ -47,5 +47,9 @@ name = "render_page"
 required-features = ["gpu"]
 
 [[example]]
+name = "reading_inventory"
+required-features = ["gpu"]
+
+[[example]]
 name = "print_pdf"
 required-features = ["pdf"]

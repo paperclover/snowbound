@@ -165,6 +165,10 @@ impl Storage for Folder {
     fn commit(&self, _: &str, _: &Transaction) -> Result<()> {
         unimplemented!()
     }
+
+    fn supersede(&self, _: &str, _: &onestore::Stamp, _: &str) -> Result<()> {
+        unimplemented!()
+    }
 }
 
 #[test]

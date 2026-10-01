@@ -208,8 +208,8 @@ impl DefaultFont {
                 subscript: Some(false),
                 font: Some(self.face.clone()),
                 font_size: Some(self.size),
-                color: Some(self.color.unwrap_or(0xff00_0000)),
-                highlight: Some(0xff00_0000),
+                color: Some(self.color.unwrap_or(AUTOMATIC)),
+                highlight: Some(AUTOMATIC),
                 space_before: Some(0.0),
                 space_after: Some(0.0),
                 line_spacing: Some(0.0),
@@ -293,7 +293,7 @@ impl NoteTag {
     }
 
     /// The definition OneNote stores for the tag at place `action_type` in the list.
-    pub fn definition(&self, action_type: u16) -> Definition {
+    pub(crate) fn definition(&self, action_type: u16) -> Definition {
         Definition {
             kind: Kind::TagDefinition {
                 label: Some(self.label.clone()),
@@ -453,18 +453,18 @@ fn covered(
         })
 }
 
-pub(super) fn leaves_mut(nodes: &mut [PageParagraph], change: &mut impl FnMut(&mut PageParagraph)) {
+pub(super) fn leaves_mut(nodes: &mut [PageParagraph]) -> Vec<&mut PageParagraph> {
+    let mut leaves = Vec::new();
     for node in nodes {
-        match &mut node.content {
-            ParagraphContent::Text(_) => change(node),
-            ParagraphContent::Table(table) => {
-                for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
-                    leaves_mut(&mut cell.paragraphs, change);
-                }
+        if node.text().is_some() {
+            leaves.push(node);
+        } else if let ParagraphContent::Table(table) = &mut node.content {
+            for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
+                leaves.extend(leaves_mut(&mut cell.paragraphs));
             }
-            _ => {}
         }
     }
+    leaves
 }
 
 /// `text` with `change` applied to the formats of bytes `range`, or to its only format when empty.
@@ -753,6 +753,7 @@ impl CanvasEditor {
             | Formatting::Tag(..)
             | Formatting::RemoveTags
             | Formatting::Check
+            | Formatting::Style(_)
                 if title =>
             {
                 return Ok(());
@@ -763,7 +764,7 @@ impl CanvasEditor {
             }
             Formatting::Align(alignment) => {
                 let bases = bases(&replacement)?;
-                leaves_mut(&mut replacement, &mut |node| {
+                for node in leaves_mut(&mut replacement) {
                     if ranges.remove(&node.id).is_some() {
                         let value = match alignment {
                             Alignment::Left => bases[&node.id].alignment.map(|_| 0),
@@ -775,7 +776,7 @@ impl CanvasEditor {
                             format.alignment = value;
                         });
                     }
-                });
+                }
             }
             Formatting::Bullets | Formatting::Numbering | Formatting::List(_) => {
                 let style = match command {
@@ -821,7 +822,7 @@ impl CanvasEditor {
                     self.definitions.insert(id, definition);
                     lists.insert(node, id);
                 }
-                leaves_mut(&mut replacement, &mut |node| {
+                for node in leaves_mut(&mut replacement) {
                     if ranges.remove(&node.id).is_some() {
                         if remove {
                             node.lists.clear();
@@ -829,50 +830,40 @@ impl CanvasEditor {
                             node.lists = vec![*id];
                         }
                     }
-                });
+                }
             }
             Formatting::Tag(tag, action_type) => {
                 let definition = tag.definition(*action_type);
-                let existing = self
-                    .definitions
-                    .iter()
-                    .find(|(_, other)| other.kind == definition.kind);
-                let id = match existing {
-                    Some((id, _)) => *id,
-                    None => {
-                        let id = new_id()?;
-                        self.definitions.insert(id, definition.clone());
-                        id
-                    }
-                };
+                let id = self.define_tag(&definition)?;
                 let has = |node: &PageParagraph| {
                     tags(node).any(|tag| self.tag_kind(tag) == Some(&definition.kind))
                 };
                 let remove = covered(&replacement, ends).all(|(node, _)| has(node));
                 let created = time32();
-                leaves_mut(&mut replacement, &mut |node| {
+                for node in leaves_mut(&mut replacement) {
                     if ranges.remove(&node.id).is_none() || !remove && has(node) {
-                        return;
+                        continue;
                     }
                     let ParagraphContent::Text(text) = &mut node.content else {
                         unreachable!()
                     };
                     let added = (!remove).then_some((id, tag.shape, created));
                     self.retag([&mut node.tags, &mut text.tags], &definition.kind, added);
-                });
-            }
-            Formatting::RemoveTags => leaves_mut(&mut replacement, &mut |node| {
-                if ranges.remove(&node.id).is_some() {
-                    node.tags.clear();
-                    node.text_mut().unwrap().tags.clear();
                 }
-            }),
-            Formatting::Check => self.check(&mut replacement, ranges, ends),
-            Formatting::Style(_) if title => return Ok(()),
+            }
+            Formatting::RemoveTags => {
+                for node in leaves_mut(&mut replacement) {
+                    if ranges.remove(&node.id).is_some() {
+                        node.tags.clear();
+                        node.text_mut().unwrap().tags.clear();
+                    }
+                }
+            }
+            Formatting::Check => self.check(&mut replacement, &ranges),
             Formatting::Style(definition) => {
                 let olds = bases(&replacement)?;
                 let style = self.define_style(definition)?;
-                leaves_mut(&mut replacement, &mut |node| {
+                for node in leaves_mut(&mut replacement) {
                     if ranges.remove(&node.id).is_some() {
                         node.style = Some(style);
                         let old = &olds[&node.id];
@@ -899,7 +890,7 @@ impl CanvasEditor {
                             };
                         });
                     }
-                });
+                }
             }
             Formatting::Toggle(_)
             | Formatting::Font(_)
@@ -971,7 +962,7 @@ impl CanvasEditor {
                     self.pending = Some((id, caret, format));
                     return Ok(());
                 }
-                leaves_mut(&mut replacement, &mut |node| {
+                for node in leaves_mut(&mut replacement) {
                     if let Some(range) = ranges.remove(&node.id) {
                         let base = &bases[&node.id];
                         let text = &mut node.text_mut().unwrap().text;
@@ -984,7 +975,7 @@ impl CanvasEditor {
                             });
                         }
                     }
-                });
+                }
             }
         }
         if self.active_outline().document.container(container)?[range.clone()] == replacement[..] {
@@ -1010,6 +1001,20 @@ impl CanvasEditor {
             .definitions
             .iter()
             .find(|(_, kept)| *kept == definition)
+        {
+            return Ok(*id);
+        }
+        let id = new_id()?;
+        self.definitions.insert(id, definition.clone());
+        Ok(id)
+    }
+
+    /// The page's definition of the tag `definition` describes, made where it has none.
+    fn define_tag(&mut self, definition: &Definition) -> Result<ExGuid, EditError> {
+        if let Some((id, _)) = self
+            .definitions
+            .iter()
+            .find(|(_, other)| other.kind == definition.kind)
         {
             return Ok(*id);
         }
@@ -1100,7 +1105,7 @@ impl CanvasEditor {
         let ranges = covered(&replacement, ends)
             .map(|(node, range)| (node.id, range))
             .collect();
-        self.check(&mut replacement, ranges, ends);
+        self.check(&mut replacement, &ranges);
         let selection = outline.selection;
         self.commit(
             engine,
@@ -1176,19 +1181,7 @@ impl CanvasEditor {
         match command {
             Formatting::Tag(tag, action_type) => {
                 let definition = tag.definition(*action_type);
-                let existing = self
-                    .definitions
-                    .iter()
-                    .find(|(_, other)| other.kind == definition.kind)
-                    .map(|(id, _)| *id);
-                let defined = match existing {
-                    Some(id) => id,
-                    None => {
-                        let id = new_id()?;
-                        self.definitions.insert(id, definition.clone());
-                        id
-                    }
-                };
+                let defined = self.define_tag(&definition)?;
                 let has = tags
                     .iter()
                     .any(|tag| self.tag_kind(tag) == Some(&definition.kind));
@@ -1284,7 +1277,8 @@ impl CanvasEditor {
         );
     }
 
-    /// Checks the check boxes among `tags`, or clears them once all are checked.
+    /// Checks the check boxes among `tags`, or clears them once all are checked; OneNote keeps
+    /// a cleared box's completion time as zero.
     fn toggle_checks(&self, mut tags: Vec<&mut Tag>) {
         let checkable = |tag: &Tag| {
             matches!(
@@ -1307,39 +1301,19 @@ impl CanvasEditor {
     }
 
     /// Checks the check boxes of the `covered` paragraphs, or clears them once all are
-    /// checked; OneNote keeps a cleared box's completion time as zero.
-    fn check(
-        &self,
-        replacement: &mut [PageParagraph],
-        mut covered: BTreeMap<ExGuid, Range<usize>>,
-        ends: Ends,
-    ) {
-        let checkable = |tag: &Tag| {
-            matches!(
-                self.tag_kind(tag),
-                Some(Kind::TagDefinition { shape: Some(shape), .. })
-                    if crate::outline::checkable(*shape)
-            )
-        };
-        let checked = self::covered(replacement, ends)
-            .flat_map(|(node, _)| tags(node))
-            .filter(|tag| checkable(tag))
-            .all(|tag| tag.status & 1 != 0);
-        let completed = if checked { Some(0) } else { time32() };
-        leaves_mut(replacement, &mut |node| {
-            if covered.remove(&node.id).is_none() {
-                return;
-            }
-            let ParagraphContent::Text(text) = &mut node.content else {
-                unreachable!()
-            };
-            for tag in node.tags.iter_mut().chain(&mut text.tags) {
-                if checkable(tag) && (tag.status & 1 != 0) == checked {
-                    tag.status ^= 1;
-                    tag.completed = completed;
-                }
-            }
-        });
+    /// checked.
+    fn check(&self, replacement: &mut [PageParagraph], covered: &BTreeMap<ExGuid, Range<usize>>) {
+        let tags = leaves_mut(replacement)
+            .into_iter()
+            .filter(|node| covered.contains_key(&node.id))
+            .flat_map(|node| {
+                let ParagraphContent::Text(text) = &mut node.content else {
+                    unreachable!()
+                };
+                node.tags.iter_mut().chain(&mut text.tags)
+            })
+            .collect();
+        self.toggle_checks(tags);
     }
 }
 

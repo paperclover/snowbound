@@ -1,39 +1,33 @@
 #![no_main]
-//! Chains text edits on a protected section: every written image unlocks with the same
-//! password, reads back as the model predicts and stores none of the new text in clear.
-//! Text typed at the end of a text whose empty final run keeps an insertion style takes
-//! that style, which the page model cannot show, so only its characters are predicted.
+//! Chains text edits on a protected section kept open under its key, now and then writing
+//! it anew under another password: every sealed image opens with the key, reads back as the
+//! model predicts and stores none of the new text in clear. Text typed at the end of a text
+//! whose empty final run keeps an insertion style takes that style, which the page model
+//! cannot show, so only its characters are predicted.
 use libfuzzer_sys::fuzz_target;
 use onestore::{
-    ExGuid, RevisionIndex, Store,
-    document::Kind,
+    Arena, ExGuid, Section,
     op::{Edit, Op, PageOp, predict},
     page::{Page, PageObject},
-    protected::{Limits, UnlockedSection},
+    protected::{Key, rekey},
 };
+use std::sync::LazyLock;
 
 const SOURCE: &[u8] =
     include_bytes!("../../corpus/native-encrypted/encrypted-01/notebook/synthetic.one");
-const PASSWORD: &str = "fictitious-only";
+static KEYS: LazyLock<[Key; 2]> = LazyLock::new(|| {
+    [
+        Key::open(SOURCE, "fictitious-only").unwrap(),
+        Key::new("another fictitious password").unwrap(),
+    ]
+});
 
-/// The first page, and the texts whose empty final run keeps an insertion style.
-fn page(bytes: &[u8]) -> (ExGuid, Page, Vec<ExGuid>) {
-    let store = Store::parse(bytes).unwrap();
-    let index = RevisionIndex::parse(&store).unwrap();
-    let unlocked = UnlockedSection::open(&index, PASSWORD, Limits::default()).unwrap();
-    let document = unlocked.document().unwrap();
-    let (space, _) = document.pages().unwrap()[0];
-    let view = &document.spaces[&space];
-    let hidden = view.revisions[&view.contexts[&ExGuid::default()]]
-        .nodes
-        .iter()
-        .filter(|(_, node)| {
-            matches!(&node.kind, Kind::RichText { text, runs, .. }
-                if !text.is_empty() && runs.len() > 1 && runs.last().is_some_and(|r| r.start == r.end))
-        })
-        .map(|(id, _)| *id)
-        .collect();
-    (space, Page::from_space(&document, space).unwrap(), hidden)
+/// The first page.
+fn page(bytes: &[u8], key: &Key) -> (ExGuid, Page) {
+    let arena = Arena::default();
+    let mut section = Section::unlock(&arena, bytes.to_vec(), key).unwrap();
+    let (space, ..) = section.pages().unwrap()[0];
+    (space, section.page(space).unwrap())
 }
 
 fn texts(page: &Page) -> Vec<String> {
@@ -50,11 +44,20 @@ fn texts(page: &Page) -> Vec<String> {
 
 fuzz_target!(|data: &[u8]| {
     let mut bytes = SOURCE.to_vec();
+    let mut key = &KEYS[0];
     for (at, step) in (0..).zip(data.chunks(12).take(4)) {
         if step.len() < 4 {
             return;
         }
-        let (space, mut expected, hidden) = page(&bytes);
+        if step[3] == 0xff {
+            let other = &KEYS[usize::from(std::ptr::eq(key, &KEYS[0]))];
+            let before = page(&bytes, key).1;
+            bytes = rekey(&bytes, Some(key), Some(other)).unwrap();
+            key = other;
+            assert_eq!(texts(&page(&bytes, key).1), texts(&before));
+            continue;
+        }
+        let (space, mut expected) = page(&bytes, key);
         let candidates: Vec<_> = expected
             .objects
             .iter()
@@ -74,7 +77,6 @@ fuzz_target!(|data: &[u8]| {
             "\u{1f512}sealed\u{1f512}{}",
             String::from_utf8_lossy(&step[3..]).replace(['\0', '\n', '\u{fffc}'], "")
         );
-        let styled = hidden.contains(&text.id) && stop == end;
         let op = PageOp::Text {
             text: text.id,
             range: start..stop,
@@ -87,10 +89,10 @@ fuzz_target!(|data: &[u8]| {
             at: 133_000_000_000_000_000 + at * 10_000_000,
             ops: vec![Op::Page { space, op }],
         };
-        let store = Store::parse(&bytes).unwrap();
-        let index = RevisionIndex::parse(&store).unwrap();
-        let unlocked = UnlockedSection::open(&index, PASSWORD, Limits::default()).unwrap();
-        let transaction = unlocked.apply("Fuzz", &edit).unwrap();
+        let arena = Arena::default();
+        let mut section = Section::unlock(&arena, bytes.clone(), key).unwrap();
+        section.apply("Fuzz", &edit).unwrap();
+        let transaction = section.seal().unwrap().unwrap();
         let mut written = bytes.clone();
         transaction.apply(&mut written).unwrap();
         let clear: Vec<u8> = inserted.encode_utf16().flat_map(u16::to_le_bytes).collect();
@@ -99,12 +101,7 @@ fuzz_target!(|data: &[u8]| {
                 .windows(clear.len())
                 .any(|w| w == clear)
         );
-        let (_, stored, _) = page(&written);
-        if styled {
-            assert_eq!(texts(&stored), texts(&expected));
-        } else {
-            assert!(stored.objects == expected.objects);
-        }
+        assert_eq!(texts(&page(&written, key).1), texts(&expected));
         bytes = written;
     }
 });

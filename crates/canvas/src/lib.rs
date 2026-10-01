@@ -5,6 +5,7 @@ pub mod language;
 pub mod layout;
 pub mod math;
 pub mod outline;
+pub mod reading;
 pub mod search;
 pub mod spelling;
 pub mod template;
@@ -16,6 +17,16 @@ pub mod gpu;
 pub mod interaction;
 #[cfg(feature = "pdf")]
 pub mod print;
+
+/// Where an object stored with `layout` lies; an unset coordinate is zero.
+pub(crate) fn origin(layout: &onestore::document::Layout) -> [f32; 2] {
+    [layout.x.unwrap_or(0.0), layout.y.unwrap_or(0.0)]
+}
+
+/// `[x0, y0, x1, y1]` moved by `[x, y]`.
+pub(crate) fn translated([x0, y0, x1, y1]: [f32; 4], [x, y]: [f32; 2]) -> [f32; 4] {
+    [x0 + x, y0 + y, x1 + x, y1 + y]
+}
 
 /// Parley's caret affinity mapped onto the page model's hidden-field affinity.
 pub fn affinity(affinity: parley::Affinity) -> onestore::page::text::Affinity {

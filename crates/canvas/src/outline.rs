@@ -21,7 +21,7 @@ pub struct OutlineLayout {
     pub paragraphs: Vec<ParagraphLayout>,
     pub tables: Vec<TableLayout>,
     /// Pictures, files and handwriting that occupy a paragraph of their own.
-    pub objects: Vec<ObjectLayout>,
+    pub(crate) objects: Vec<ObjectLayout>,
     pub size: [f32; 2],
     /// One per root node, so an edit places anew only what it changes and moves what follows.
     blocks: Vec<Block>,
@@ -49,37 +49,37 @@ struct Block {
 
 /// A layout of root nodes `range` once an edit applies, and how the nodes after them move.
 pub(crate) struct Relayout {
-    pub range: Range<usize>,
-    pub segment: OutlineLayout,
+    pub(crate) range: Range<usize>,
+    pub(crate) segment: OutlineLayout,
     /// Each following node's new top and flow state, up to the first that stays.
     moved: Vec<(f32, (f64, Option<f32>))>,
-    pub size: [f32; 2],
+    pub(crate) size: [f32; 2],
     widths: [f32; 2],
 }
 
 #[derive(Clone)]
-pub struct ObjectLayout {
+pub(crate) struct ObjectLayout {
     /// The object's identity, which keys a picture's or file icon's decoded image.
-    pub id: ExGuid,
+    pub(crate) id: ExGuid,
     /// Where the picture, file icon, drawing or placeholder draws, outline-local.
-    pub rect: [f32; 4],
-    pub kind: ObjectKind,
+    pub(crate) rect: [f32; 4],
+    pub(crate) kind: ObjectKind,
     /// Outline-local bottom of the whole object, label included.
-    pub bottom: f32,
-    pub tags: Option<BlockTags>,
+    pub(crate) bottom: f32,
+    pub(crate) tags: Option<BlockTags>,
 }
 
 /// The note tags of a table, picture or file, which OneNote centres on it in the tag column.
 #[derive(Clone)]
-pub struct BlockTags {
+pub(crate) struct BlockTags {
     /// The paragraph holding the block.
-    pub paragraph: ExGuid,
+    pub(crate) paragraph: ExGuid,
     /// Its siblings' group, whose list markers the tags clear.
     parent: Option<ExGuid>,
     /// The block's left edge, outline-local.
     x: f32,
     /// Origins are outline-local.
-    pub tags: Vec<ParagraphTag>,
+    pub(crate) tags: Vec<ParagraphTag>,
 }
 
 impl BlockTags {
@@ -130,7 +130,7 @@ impl BlockTags {
 }
 
 #[derive(Clone)]
-pub enum ObjectKind {
+pub(crate) enum ObjectKind {
     Picture,
     /// A file's icon with its name centered below.
     File(ParagraphLayout),
@@ -141,7 +141,7 @@ pub enum ObjectKind {
 }
 
 impl ObjectLayout {
-    pub fn label(&self) -> Option<&ParagraphLayout> {
+    pub(crate) fn label(&self) -> Option<&ParagraphLayout> {
         match &self.kind {
             ObjectKind::File(label) | ObjectKind::Unsupported(label) => Some(label),
             ObjectKind::Picture | ObjectKind::Ink(_) => None,
@@ -243,7 +243,7 @@ pub struct TableLayout {
     /// Cells are in paragraph order with disjoint visible ranges.
     pub cells: Vec<CellLayout>,
     pub borders: bool,
-    pub tags: Option<BlockTags>,
+    pub(crate) tags: Option<BlockTags>,
 }
 
 #[derive(Clone)]
@@ -251,12 +251,12 @@ pub struct CellLayout {
     pub id: ExGuid,
     pub rect: [f32; 4],
     /// Visible paragraph indices, including paragraphs in nested tables.
-    pub paragraphs: std::ops::Range<usize>,
+    pub(crate) paragraphs: std::ops::Range<usize>,
 }
 
 impl CellLayout {
     /// Native ink gutters extend beyond the cell borders.
-    pub fn text_bounds(&self) -> [f32; 4] {
+    pub(crate) fn text_bounds(&self) -> [f32; 4] {
         [
             self.rect[0] - 2.7,
             self.rect[1],
@@ -265,7 +265,7 @@ impl CellLayout {
         ]
     }
 
-    pub fn clip(&self, rect: parley::BoundingBox) -> Option<parley::BoundingBox> {
+    pub(crate) fn clip(&self, rect: parley::BoundingBox) -> Option<parley::BoundingBox> {
         let [left, top, right, bottom] = self.text_bounds().map(f64::from);
         let rect = parley::BoundingBox::new(
             rect.x0.max(left),
@@ -296,7 +296,7 @@ pub struct ParagraphLayout {
     pub math: Vec<crate::math::MathLayout>,
     /// A highlight of the whole paragraph (its own `highlight`), COLORREF: a band across its
     /// outline behind its lines, as OneNote marks a conflict page's conflicting changes.
-    pub band: Option<u32>,
+    pub(crate) band: Option<u32>,
 }
 
 /// How the page draws a note tag.
@@ -318,13 +318,13 @@ impl TagIcon {
         })
     }
 
-    pub fn checkable(self) -> bool {
+    pub(crate) fn checkable(self) -> bool {
         matches!(self, Self::Symbol { shape, .. } if checkable(shape))
     }
 }
 
 /// Whether tag symbol `shape` is a check box, as MS-ONE's NoteTagShape marks them.
-pub fn checkable(shape: u16) -> bool {
+pub(crate) fn checkable(shape: u16) -> bool {
     matches!(
         shape,
         1..=12 | 28 | 30 | 32 | 48 | 50 | 52 | 69 | 71 | 73 | 89..=99
@@ -498,9 +498,9 @@ pub struct ParagraphTag {
 
 impl ParagraphTag {
     /// The icon's side beside 10 to 17.5 pt text.
-    pub const SIZE: f32 = 12.0;
+    pub(crate) const SIZE: f32 = 12.0;
     /// How far a 12 pt icon starts left of its text when no sibling has a list marker.
-    pub const INSET: f32 = 20.25;
+    pub(crate) const INSET: f32 = 20.25;
     /// Space between a tag and the leftmost list marker among its paragraph's siblings.
     const MARKER_GAP: f32 = 0.9;
 
@@ -1258,7 +1258,7 @@ pub(crate) fn visible_paragraphs<'a>(
 impl OutlineLayout {
     /// OneNote gives an outline one tag column, as wide as its most-tagged paragraph needs; each
     /// paragraph's tags start at the column's left edge. Tag origins assume a one-tag column.
-    pub fn tag_column_offset(&self) -> f32 {
+    pub(crate) fn tag_column_offset(&self) -> f32 {
         -self
             .paragraphs
             .iter()
@@ -1296,7 +1296,7 @@ impl OutlineLayout {
     }
 
     /// Innermost table cell containing a visible paragraph index.
-    pub fn paragraph_cell(&self, index: usize) -> Option<&CellLayout> {
+    pub(crate) fn paragraph_cell(&self, index: usize) -> Option<&CellLayout> {
         self.tables.iter().rev().find_map(|table| {
             let cell = table
                 .cells

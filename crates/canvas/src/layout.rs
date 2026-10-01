@@ -42,11 +42,11 @@ const SUBSCRIPT_DROP: f32 = 0.08;
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct TextBrush {
     /// COLORREF, or `None` for OneNote's automatic colour, which follows the paper.
-    pub color: Option<u32>,
-    pub highlight: Option<u32>,
+    pub(crate) color: Option<u32>,
+    pub(crate) highlight: Option<u32>,
     /// Points the run draws above the line's baseline: positive for a superscript,
     /// negative for a subscript. Line metrics and hit-testing keep the baseline.
-    pub rise: f32,
+    pub(crate) rise: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -72,11 +72,11 @@ pub struct TextLayout {
 /// Room kept in a line for something drawn inline, such as an equation, before the text at
 /// byte `index`; the line grows to its ascent and descent.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct InlineSpace {
-    pub index: usize,
-    pub width: f32,
-    pub ascent: f32,
-    pub descent: f32,
+pub(crate) struct InlineSpace {
+    pub(crate) index: usize,
+    pub(crate) width: f32,
+    pub(crate) ascent: f32,
+    pub(crate) descent: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,8 +106,8 @@ impl fmt::Display for LayoutError {
 impl std::error::Error for LayoutError {}
 
 /// What a run without a font or size of its own is laid out in.
-pub const DEFAULT_FONT: &str = "Arial";
-pub const DEFAULT_FONT_SIZE: f32 = 11.0;
+pub(crate) const DEFAULT_FONT: &str = "Arial";
+pub(crate) const DEFAULT_FONT_SIZE: f32 = 11.0;
 
 /// Metric-compatible faces for the fonts OneNote pages use most, under the SIL Open Font
 /// Licence files beside them, by the family each stands in for.
@@ -425,7 +425,7 @@ impl TextEngine {
     }
 
     /// Lays out `paragraph` keeping `spaces` inline, for what draws in them.
-    pub fn layout_with(
+    pub(crate) fn layout_with(
         &mut self,
         paragraph: &Paragraph,
         width: f32,
@@ -531,7 +531,7 @@ impl TextEngine {
 
 impl TextLayout {
     /// Process-unique identity for caches of an externally immutable layout.
-    pub fn id(&self) -> u64 {
+    pub(crate) fn id(&self) -> u64 {
         self.id
     }
 
@@ -592,11 +592,11 @@ impl TextLayout {
         last.top + last.height
     }
 
-    pub fn cursor(&self, byte: usize, affinity: Affinity) -> Cursor {
+    pub(crate) fn cursor(&self, byte: usize, affinity: Affinity) -> Cursor {
         Cursor::from_byte_index(&self.shaped, byte, affinity)
     }
 
-    pub fn hit_test(&self, x: f32, y: f32) -> Cursor {
+    pub(crate) fn hit_test(&self, x: f32, y: f32) -> Cursor {
         let index = self
             .lines
             .partition_point(|line| line.top + line.height <= y)
@@ -645,7 +645,7 @@ impl TextLayout {
 
     /// Each line's part of `selection` as a mark under the text runs: its left, its right
     /// and the line's baseline.
-    pub fn underlines(&self, selection: Selection) -> Vec<[f32; 3]> {
+    pub(crate) fn underlines(&self, selection: Selection) -> Vec<[f32; 3]> {
         selection
             .geometry(&self.shaped)
             .into_iter()

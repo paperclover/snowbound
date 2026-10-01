@@ -1,5 +1,6 @@
 //! Conflict pages and page versions as OneNote shows them.
 
+use crate::document::descendants;
 use onestore::{
     ExGuid,
     page::{Page, PageObject, PageParagraph, ParagraphContent},
@@ -21,9 +22,19 @@ pub fn highlighted(page: Page, objects: &[ExGuid]) -> Page {
 /// banded as OneNote shows it; all of it without one.
 pub fn changes(version: Page, older: Option<&Page>) -> Page {
     let texts = |page: &Page| {
-        let mut texts = Vec::new();
-        each_text(page, &mut |id, text| texts.push((id, text.to_owned())));
-        texts
+        page.objects
+            .iter()
+            .flat_map(|object| match object {
+                PageObject::Outline(outline) => std::slice::from_ref(outline),
+                PageObject::Title(title) => title.outlines.as_slice(),
+                _ => &[],
+            })
+            .flat_map(|outline| descendants(&outline.paragraphs, None))
+            .filter_map(|(_, _, node)| match &node.content {
+                ParagraphContent::Text(text) => Some((text.id, text.text.text().to_owned())),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
     };
     let before = older.map(texts).unwrap_or_default();
     let changed: Vec<ExGuid> = texts(&version)
@@ -32,33 +43,6 @@ pub fn changes(version: Page, older: Option<&Page>) -> Page {
         .map(|(id, _)| id)
         .collect();
     banded(version, &changed, CHANGED)
-}
-
-fn each_text(page: &Page, f: &mut impl FnMut(ExGuid, &str)) {
-    fn walk(paragraphs: &[PageParagraph], f: &mut impl FnMut(ExGuid, &str)) {
-        for paragraph in paragraphs {
-            match &paragraph.content {
-                ParagraphContent::Table(table) => {
-                    for cell in table.rows.iter().flat_map(|row| &row.cells) {
-                        walk(&cell.paragraphs, f);
-                    }
-                }
-                ParagraphContent::Text(text) => f(text.id, text.text.text()),
-                _ => {}
-            }
-        }
-    }
-    for object in &page.objects {
-        match object {
-            PageObject::Outline(outline) => walk(&outline.paragraphs, f),
-            PageObject::Title(title) => {
-                for outline in &title.outlines {
-                    walk(&outline.paragraphs, f);
-                }
-            }
-            _ => {}
-        }
-    }
 }
 
 fn banded(mut page: Page, objects: &[ExGuid], color: u32) -> Page {

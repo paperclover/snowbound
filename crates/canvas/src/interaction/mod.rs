@@ -35,7 +35,7 @@ const HANDLE_HEIGHT: f32 = 6.75;
 /// Accessible names of the page date's fields.
 pub const DATE_LABELS: [&str; 2] = ["Page date", "Page time"];
 
-pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
+pub(crate) type Result<T> = std::result::Result<T, Box<dyn Error>>;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Cursor {
@@ -112,7 +112,7 @@ pub struct Correction {
 pub struct Response {
     pub changed: bool,
     pub moved: bool,
-    pub redraw: bool,
+    pub(crate) redraw: bool,
     pub request: Option<Request>,
 }
 
@@ -359,7 +359,7 @@ impl PageView {
     }
 
     /// Shows a page reloaded from storage in place of the edited one, whose editor it returns.
-    pub fn replace(
+    pub(crate) fn replace(
         &mut self,
         mut editor: CanvasEditor,
         scene: Option<(PageScene, [f32; 2])>,
@@ -435,10 +435,16 @@ impl PageView {
         }
     }
 
-    /// OneNote 2010 opens a page scrolled fully left and up, however far down its content
-    /// lies.
+    /// OneNote 2010 opens a page scrolled fully up, however far down its content lies, and
+    /// fully left, or right on a right-to-left page.
     fn place_opened(&mut self) {
-        self.viewport.origin = self.scroll().min.map(|offset| -offset);
+        let scroll = self.scroll();
+        let x = if self.editor.rtl() {
+            scroll.max[0]
+        } else {
+            scroll.min[0]
+        };
+        self.viewport.origin = [-x, -scroll.min[1]];
     }
 
     pub fn modifiers(&self) -> Modifiers {
@@ -478,6 +484,12 @@ impl PageView {
     /// Text input goes to the editor unless an object holds focus.
     pub fn accepts_text(&self) -> bool {
         self.object_focus.is_none()
+    }
+
+    /// Edits from the toolbar and menus wait while an input method composes or an object holds
+    /// focus.
+    fn edits_wait(&self) -> bool {
+        !self.accepts_text() || self.editor.marked_range().is_some()
     }
 
     /// The outline being dragged and where it would land.
@@ -624,7 +636,7 @@ impl PageView {
     /// Page coordinates of a focused object.
     fn object_rect(&self, focus: ObjectFocus) -> [f32; 4] {
         let (scene, offset) = self.scene.as_ref().unwrap();
-        let [x0, y0, x1, y1] = match focus {
+        let rect = match focus {
             ObjectFocus::ReadOnly(index) => scene
                 .read_only(Some(&self.editor))
                 .nth(index)
@@ -636,12 +648,7 @@ impl PageView {
             }
             ObjectFocus::File(id) => self.editor.attachment_rect(id).unwrap(),
         };
-        [
-            x0 + offset[0],
-            y0 + offset[1],
-            x1 + offset[0],
-            y1 + offset[1],
-        ]
+        crate::translated(rect, *offset)
     }
 
     /// Keeps the view in bounds and restarts the caret blink after a change.
@@ -778,10 +785,7 @@ impl PageView {
                 return self.moved();
             }
         }
-        Ok(Response {
-            redraw: true,
-            ..Response::default()
-        })
+        Ok(Response::redraw())
     }
 
     /// Moves the caret by lines until it has gone a view's height, then scrolls as far so
@@ -881,18 +885,16 @@ impl PageView {
                 .content_bounds(&self.editor)
                 .map(move |(rect, padded)| {
                     (
-                        [
-                            rect[0] + offset[0],
-                            rect[1] + offset[1],
-                            rect[2] + offset[0],
-                            rect[3] + offset[1],
-                        ],
+                        crate::translated(rect, *offset),
                         if padded { pad } else { 0.0 },
                     )
                 })
         });
-        let mut scroll =
-            scroll::Scroll::new(self.viewport, editable.map(|rect| (rect, pad)).chain(fixed));
+        let mut scroll = scroll::Scroll::new(
+            self.viewport,
+            editable.map(|rect| (rect, pad)).chain(fixed),
+            self.editor.rtl(),
+        );
         if let Some(reach) = self.reach {
             for axis in 0..2 {
                 scroll.min[axis] = scroll.min[axis].min(reach[axis] * self.viewport.scale);
@@ -989,17 +991,7 @@ impl PageView {
             preview,
             self.object_focus,
             Paint {
-                caret: if self.focused
-                    && !matches!(
-                        self.drag,
-                        Some(
-                            Drag::Outline { .. }
-                                | Drag::Resize { .. }
-                                | Drag::Column { .. }
-                                | Drag::Image { .. }
-                                | Drag::Space { .. }
-                        )
-                    ) {
+                caret: if self.focused && matches!(self.drag, None | Some(Drag::Text { .. })) {
                     self.caret
                 } else {
                     0.0
@@ -1069,7 +1061,6 @@ impl PageView {
         if self.drawing() {
             return Cursor::Crosshair;
         }
-        let point = self.viewport.document_point(self.pointer);
         if self.drag.is_none() && self.play_button(point).is_some() {
             return Cursor::Pointer;
         }
@@ -1111,8 +1102,12 @@ impl PageView {
         (repaint, hold.map(|hold| now + hold))
     }
 
-    /// `size` in device pixels.
+    /// `size` in device pixels. A right-to-left page keeps its right edge in place, as
+    /// OneNote 2010's does.
     pub fn resized(&mut self, size: [u32; 2]) -> Result<Response> {
+        if self.editor.rtl() {
+            self.viewport.origin[0] += size[0] as f32 - self.viewport.size[0] as f32;
+        }
         self.viewport.size = size;
         if size.contains(&0) {
             return Ok(Response::default());
@@ -1534,7 +1529,7 @@ impl PageView {
         {
             return self.edited();
         }
-        if !self.accepts_text() || self.editor.marked_range().is_some() {
+        if self.edits_wait() {
             return Ok(Response::default());
         }
         self.editor.format(&mut self.engine, command)?;
@@ -1783,7 +1778,7 @@ impl PageView {
 
     /// Alt+= and the toolbar's Equation: see [`CanvasEditor::insert_equation`].
     pub fn insert_equation(&mut self) -> Result<Response> {
-        if !self.accepts_text() || self.editor.marked_range().is_some() {
+        if self.edits_wait() {
             return Ok(Response::default());
         }
         self.editor.insert_equation(&mut self.engine)?;
@@ -1792,7 +1787,7 @@ impl PageView {
 
     /// Insert, Table: see [`CanvasEditor::insert_table`].
     pub fn insert_table(&mut self, rows: usize, columns: usize) -> Result<Response> {
-        if !self.accepts_text() || self.editor.marked_range().is_some() {
+        if self.edits_wait() {
             return Ok(Response::default());
         }
         self.editor.insert_table(&mut self.engine, rows, columns)?;
@@ -1802,7 +1797,7 @@ impl PageView {
     /// Insert, Picture, or a pasted one: a PNG, JPEG or GIF `size` points large; see
     /// [`CanvasEditor::insert_picture`].
     pub fn insert_picture(&mut self, bytes: Vec<u8>, size: [f32; 2]) -> Result<Response> {
-        if !self.accepts_text() || self.editor.marked_range().is_some() {
+        if self.edits_wait() {
             return Ok(Response::default());
         }
         let image = crate::editor::picture(bytes, size)?;
@@ -1818,7 +1813,7 @@ impl PageView {
         pieces: Vec<Piece>,
         language: u32,
     ) -> Result<(Vec<Awaited>, Response)> {
-        if !self.accepts_text() || self.editor.marked_range().is_some() {
+        if self.edits_wait() {
             return Ok((Vec::new(), Response::default()));
         }
         let awaited = self
@@ -1845,7 +1840,7 @@ impl PageView {
 
     /// Record Audio: see [`CanvasEditor::start_recording`]; none where text cannot go.
     pub fn start_recording(&mut self, label: &str) -> Result<(Option<[u8; 16]>, Response)> {
-        if !self.accepts_text() || self.editor.marked_range().is_some() {
+        if self.edits_wait() {
             return Ok((None, Response::default()));
         }
         let id = self.editor.start_recording(&mut self.engine, label)?;
@@ -1879,7 +1874,7 @@ impl PageView {
     /// Insert, Attach File: see [`CanvasEditor::insert_attachment`]. A file without an icon
     /// takes the page's blank one.
     pub fn insert_attachment(&mut self, mut file: onestore::page::Attachment) -> Result<Response> {
-        if !self.accepts_text() || self.editor.marked_range().is_some() {
+        if self.edits_wait() {
             return Ok(Response::default());
         }
         file.preview
@@ -2051,17 +2046,7 @@ impl PageView {
                 return self.edited();
             }
         }
-        if matches!(
-            self.drag,
-            Some(
-                Drag::Outline { .. }
-                    | Drag::Resize { .. }
-                    | Drag::Column { .. }
-                    | Drag::Image { .. }
-                    | Drag::Space { .. }
-            )
-        ) || self.space
-        {
+        if !matches!(self.drag, None | Some(Drag::Text { .. })) || self.space {
             self.drag = None;
             self.space = false;
             if key == &Key::Named(NamedKey::Escape) {
@@ -2270,7 +2255,7 @@ pub enum Hit {
 }
 
 /// What a document point lands on; `pixel` is document points per device pixel.
-pub fn page_hit_test(
+pub(crate) fn page_hit_test(
     editor: &CanvasEditor,
     scene: Option<&(PageScene, [f32; 2])>,
     point: [f32; 2],
@@ -2574,16 +2559,7 @@ fn page_primitives<'a>(
         if let Some((scene, _)) = scene {
             let moving = match preview {
                 Some(PointerFeedback::Image(id, origin, size)) => {
-                    let [x0, y0, x1, y1] = image_rect(origin, size);
-                    Some((
-                        id,
-                        [
-                            x0 + offset[0],
-                            y0 + offset[1],
-                            x1 + offset[0],
-                            y1 + offset[1],
-                        ],
-                    ))
+                    Some((id, crate::translated(image_rect(origin, size), offset)))
                 }
                 _ => None,
             };
@@ -2663,13 +2639,10 @@ fn page_primitives<'a>(
     }
     if let Some(ObjectFocus::ReadOnly(index)) = object_focus {
         let (scene, offset) = scene.unwrap();
-        let [x0, y0, x1, y1] = scene.read_only(Some(editor)).nth(index).unwrap().rect();
-        let [x0, y0, x1, y1] = [
-            x0 + offset[0],
-            y0 + offset[1],
-            x1 + offset[0],
-            y1 + offset[1],
-        ];
+        let [x0, y0, x1, y1] = crate::translated(
+            scene.read_only(Some(editor)).nth(index).unwrap().rect(),
+            *offset,
+        );
         let border = 2.0 / paint.scale;
         for rect in [
             [x0, y0, x1, y0 + border],
@@ -2899,12 +2872,7 @@ fn append_outline_chrome(
     let [x, y] = origin;
     let (bounds, body_top) = outline_chrome(outline, pixel);
     let [dx, dy] = [x - outline.origin()[0], y - outline.origin()[1]];
-    let [left, top, right, bottom] = [
-        bounds[0] + dx,
-        bounds[1] + dy,
-        bounds[2] + dx,
-        bounds[3] + dy,
-    ];
+    let [left, top, right, bottom] = crate::translated(bounds, [dx, dy]);
     let body_top = body_top + dy;
     if outline.title {
         primitives.push(Primitive::RoundedRect {

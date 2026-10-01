@@ -32,7 +32,7 @@ impl PageDate {
         &self.layout
     }
 
-    pub fn fields(&self) -> impl Iterator<Item = (DateField, &PageParagraph)> {
+    pub(crate) fn fields(&self) -> impl Iterator<Item = (DateField, &PageParagraph)> {
         let swapped = self
             .source
             .paragraphs

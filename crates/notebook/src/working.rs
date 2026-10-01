@@ -8,6 +8,7 @@ use onestore::{
     Arena, ExGuid, Section, Transaction,
     op::{Edit, OpError},
     page::Page,
+    protected::Key,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{
@@ -96,18 +97,19 @@ impl Request {
     }
 }
 
-type Worker = Arc<Mutex<Weak<Signal>>>;
-
 /// The section thread as the replica sees it. Rereading the section after the queue was
 /// replaced (a rebase, a released attempt) happens on a new thread while the current one
 /// keeps answering page reads from the section as it was; the new thread then takes the
 /// requests over, so reads never wait for a rebuild.
 pub(crate) struct Thread {
-    connection: Arc<Mutex<Connection>>,
-    worker: Worker,
+    pub(crate) connection: Mutex<Connection>,
+    /// The sync worker, which a durable burst of edits wakes.
+    pub(crate) worker: Mutex<Weak<Signal>>,
     /// Taken when the replica drops, which ends every section thread.
     sender: Mutex<Option<mpsc::Sender<Request>>>,
     threads: Mutex<Vec<thread::JoinHandle<()>>>,
+    /// A password-protected section's key, under which its queue is sealed too.
+    pub(crate) key: Option<Key>,
 }
 
 impl Thread {
@@ -148,16 +150,14 @@ impl Thread {
 }
 
 /// Starts the section thread once the queue opens.
-pub(crate) fn spawn(
-    connection: Arc<Mutex<Connection>>,
-    worker: Worker,
-) -> Result<(Arc<Thread>, ExGuid)> {
+pub(crate) fn spawn(connection: Connection, key: Option<Key>) -> Result<(Arc<Thread>, ExGuid)> {
     let (sender, requests) = mpsc::channel();
     let shared = Arc::new(Thread {
-        connection,
-        worker,
+        connection: Mutex::new(connection),
+        worker: Mutex::new(Weak::new()),
         sender: Mutex::new(Some(sender)),
         threads: Mutex::new(Vec::new()),
+        key,
     });
     let (ready, opened) = mpsc::sync_channel(1);
     shared.start(move |shared| run(shared, requests, VecDeque::new(), Some(ready)))?;
@@ -188,7 +188,7 @@ fn run(
 ) {
     loop {
         let arena = Arena::default();
-        let working = match Working::open(&arena, &shared.connection) {
+        let working = match Working::open(&arena, &shared.connection, shared.key.as_ref()) {
             Ok(working) => working,
             Err(error) => {
                 if let Some(ready) = ready.take() {
@@ -237,17 +237,19 @@ enum Job {
 fn build(shared: Arc<Thread>, job: Job, signal: mpsc::Sender<Request>) {
     let answer: Box<dyn FnOnce() + Send> = match job {
         Job::Reopen { reply } => Box::new(move || reply(Ok(()))),
-        Job::Rebase { image, reply } => match rebase(&shared.connection, image) {
-            Ok(changed) => Box::new(move || reply(Ok(changed))),
-            Err(error) => {
-                reply(Err(error));
-                let _ = signal.send(Request::Resume);
-                return;
+        Job::Rebase { image, reply } => {
+            match rebase(&shared.connection, image, shared.key.as_ref()) {
+                Ok(changed) => Box::new(move || reply(Ok(changed))),
+                Err(error) => {
+                    reply(Err(error));
+                    let _ = signal.send(Request::Resume);
+                    return;
+                }
             }
-        },
+        }
     };
     let arena = Arena::default();
-    let opened = Working::open(&arena, &shared.connection);
+    let opened = Working::open(&arena, &shared.connection, shared.key.as_ref());
     let (to, from) = mpsc::sync_channel(1);
     if signal.send(Request::Handover(to)).is_err() {
         return;
@@ -286,8 +288,8 @@ struct Working<'a> {
 }
 
 impl<'a> Working<'a> {
-    fn open(arena: &'a Arena, connection: &Mutex<Connection>) -> Result<Self> {
-        let (section, open, touched) = replay(arena, &*lock(connection)?)?;
+    fn open(arena: &'a Arena, connection: &Mutex<Connection>, key: Option<&Key>) -> Result<Self> {
+        let (section, open, touched) = replay(arena, &*lock(connection)?, key)?;
         Ok(Self {
             section,
             open,
@@ -301,7 +303,7 @@ impl<'a> Working<'a> {
         requests: &mpsc::Receiver<Request>,
         backlog: &mut VecDeque<Request>,
     ) -> Next {
-        let (connection, worker) = (&*shared.connection, &shared.worker);
+        let connection = &shared.connection;
         // While another thread rebuilds the section, reads answer from this one and every
         // other request waits for the rebuilt section.
         let mut held: Option<VecDeque<Request>> = None;
@@ -356,7 +358,7 @@ impl<'a> Working<'a> {
                         edit,
                         reply,
                     } => self
-                        .accept(author, edit, reply, &mut accepted, connection, worker)
+                        .accept(author, edit, reply, &mut accepted, shared)
                         .err()
                         .unwrap_or(false),
                     Request::Page { space, reply } => {
@@ -390,7 +392,7 @@ impl<'a> Working<'a> {
                         false
                     }
                     Request::Flush { reply } => {
-                        let written = self.flush(connection, worker, &mut accepted);
+                        let written = self.flush(shared, &mut accepted);
                         reply(if written {
                             Ok(())
                         } else {
@@ -399,7 +401,7 @@ impl<'a> Working<'a> {
                         !written
                     }
                     Request::Seal { reply } => {
-                        if !self.flush(connection, worker, &mut accepted) {
+                        if !self.flush(shared, &mut accepted) {
                             reply(Err(
                                 io::Error::other("The queue could not be written").into()
                             ));
@@ -412,7 +414,7 @@ impl<'a> Working<'a> {
                         }
                     }
                     Request::Rebase { image, reply } => {
-                        if self.flush(connection, worker, &mut accepted) {
+                        if self.flush(shared, &mut accepted) {
                             held = self
                                 .rebuild(shared, Job::Rebase { image, reply })
                                 .then(VecDeque::new);
@@ -425,7 +427,7 @@ impl<'a> Working<'a> {
                         }
                     }
                     Request::Reopen { reply } => {
-                        self.flush(connection, worker, &mut accepted);
+                        self.flush(shared, &mut accepted);
                         held = self
                             .rebuild(shared, Job::Reopen { reply })
                             .then(VecDeque::new);
@@ -438,7 +440,7 @@ impl<'a> Working<'a> {
                     return Next::Reopen;
                 }
             }
-            if !self.flush(connection, worker, &mut accepted) {
+            if !self.flush(shared, &mut accepted) {
                 return Next::Reopen;
             }
         }
@@ -476,8 +478,7 @@ impl<'a> Working<'a> {
         edit: Edit,
         reply: Reply<u64>,
         accepted: &mut Vec<Accepted>,
-        connection: &Mutex<Connection>,
-        worker: &Worker,
+        shared: &Thread,
     ) -> std::result::Result<(), bool> {
         match self.section.apply(&author, &edit) {
             Ok(()) => {
@@ -493,7 +494,7 @@ impl<'a> Working<'a> {
             Err(error) => {
                 let broken = matches!(error, OpError::Failed(_));
                 if broken {
-                    self.flush(connection, worker, accepted);
+                    self.flush(shared, accepted);
                 }
                 reply(Err(error.into()));
                 Err(broken)
@@ -503,17 +504,12 @@ impl<'a> Working<'a> {
 
     /// Writes the accepted edits in one transaction, then answers their senders; false
     /// when the write failed and the section holds edits the queue lacks.
-    fn flush(
-        &mut self,
-        connection: &Mutex<Connection>,
-        worker: &Worker,
-        accepted: &mut Vec<Accepted>,
-    ) -> bool {
+    fn flush(&mut self, shared: &Thread, accepted: &mut Vec<Accepted>) -> bool {
         if accepted.is_empty() {
             return true;
         }
         let written = (|| -> Result<Vec<u64>> {
-            let mut connection = lock(connection)?;
+            let mut connection = lock(&shared.connection)?;
             let transaction =
                 connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             let batch = match self.open {
@@ -527,6 +523,7 @@ impl<'a> Working<'a> {
             for edit in accepted.iter() {
                 ids.push(queue::insert(
                     &transaction,
+                    shared.key.as_ref(),
                     None,
                     batch,
                     &edit.author,
@@ -543,7 +540,7 @@ impl<'a> Working<'a> {
                 for (edit, id) in accepted.drain(..).zip(ids) {
                     (edit.reply)(Ok(id));
                 }
-                crate::edited(worker);
+                crate::edited(&shared.worker);
             }
             Err(error) => {
                 let message = error.to_string();
@@ -600,7 +597,11 @@ impl<'a> Working<'a> {
 /// Replays every queued edit on `image`, which becomes the base; each page whose local
 /// version the remote could not take gains a conflict page holding it, queued as a new edit.
 /// Returns the pages the remote changed.
-fn rebase(connection: &Mutex<Connection>, image: Option<Vec<u8>>) -> Result<Vec<ExGuid>> {
+fn rebase(
+    connection: &Mutex<Connection>,
+    image: Option<Vec<u8>>,
+    key: Option<&Key>,
+) -> Result<Vec<ExGuid>> {
     let (base_image, image, edits) = {
         let connection = lock(connection)?;
         if connection.query_row(
@@ -614,22 +615,20 @@ fn rebase(connection: &Mutex<Connection>, image: Option<Vec<u8>>) -> Result<Vec<
             )
             .into());
         }
-        let base_image = base::read(&connection, base::Image::Base)?.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "The cache has no base image")
-        })?;
+        let base_image = base::base(&connection)?;
         let image = match image {
             Some(image) => image,
             None => {
                 base::read(&connection, base::Image::Remote)?.unwrap_or_else(|| base_image.clone())
             }
         };
-        (base_image, image, queue::load(&connection, None)?)
+        (base_image, image, queue::load(&connection, key, None)?)
     };
     let old_arena = Arena::default();
-    let mut old = Section::open(&old_arena, base_image)?;
+    let mut old = open(&old_arena, base_image, key)?;
     let before: BTreeMap<ExGuid, ExGuid> = old.revisions().collect();
     let remote_arena = Arena::default();
-    let remote = Section::open(&remote_arena, image.clone())?;
+    let remote = open(&remote_arena, image.clone(), key)?;
     if old.root() != remote.root() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -645,10 +644,10 @@ fn rebase(connection: &Mutex<Connection>, image: Option<Vec<u8>>) -> Result<Vec<
     let mut converged = BTreeSet::new();
     let (rewritten, added) = loop {
         let arena = Arena::default();
-        let mut new = Section::open(&arena, image.clone())?;
+        let mut new = open(&arena, image.clone(), key)?;
         let merged = merge::rebase(&mut old, &mut new, &edits, &converged)?;
         if !merged.conflicts.is_empty() && local.is_none() {
-            local = Some(replay(&local_arena, &*lock(connection)?)?.0);
+            local = Some(replay(&local_arena, &*lock(connection)?, key)?.0);
         }
         let pages: BTreeMap<ExGuid, Page> = merged
             .conflicts
@@ -694,10 +693,10 @@ fn rebase(connection: &Mutex<Connection>, image: Option<Vec<u8>>) -> Result<Vec<
     transaction.execute("UPDATE edits SET batch=?1", [batch])?;
     transaction.execute("DELETE FROM batches WHERE id<>?1", [batch])?;
     for (id, edit) in rewritten {
-        queue::rewrite(&transaction, id, &edit)?;
+        queue::rewrite(&transaction, key, id, &edit)?;
     }
     for (author, edit) in &added {
-        queue::insert(&transaction, None, batch, author, edit)?;
+        queue::insert(&transaction, key, None, batch, author, edit)?;
     }
     if transaction.query_row("SELECT count(*) FROM edits", [], |row| row.get::<_, i64>(0))? == 0 {
         transaction.execute("DELETE FROM batches", [])?;
@@ -743,10 +742,10 @@ fn batches(connection: &Connection) -> Result<Vec<(i64, Option<Option<Transactio
 fn replay<'a>(
     arena: &'a Arena,
     connection: &Connection,
+    key: Option<&Key>,
 ) -> Result<(Section<'a>, Option<i64>, BTreeSet<ExGuid>)> {
-    let image = base::read(connection, base::Image::Base)?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "The cache has no base image"))?;
-    let mut section = Section::open(arena, image)?;
+    let image = base::base(connection)?;
+    let mut section = open(arena, image, key)?;
     let mut open = None;
     let mut touched = BTreeSet::new();
     for (batch, sealed) in batches(connection)? {
@@ -761,7 +760,7 @@ fn replay<'a>(
             Some(Some(transaction)) => section.replay(&transaction)?,
             Some(None) => {}
             None => {
-                for queued in queue::load(connection, Some(batch))? {
+                for queued in queue::load(connection, key, Some(batch))? {
                     section
                         .apply(&queued.author, &queued.edit)
                         .map_err(|error| {
@@ -781,11 +780,19 @@ fn replay<'a>(
 
 /// The image the queue leaves, its unsealed edits sealed as one more revision; that
 /// revision's identities are fresh on every call. O(section), for tests and recovery.
-pub(crate) fn image(connection: &Connection) -> Result<Vec<u8>> {
+pub(crate) fn image(connection: &Connection, key: Option<&Key>) -> Result<Vec<u8>> {
     let arena = Arena::default();
-    let (mut section, ..) = replay(&arena, connection)?;
+    let (mut section, ..) = replay(&arena, connection, key)?;
     section.seal()?;
     Ok(section.image())
+}
+
+/// A section image, a password-protected one under `key`.
+pub(crate) fn open<'a>(arena: &'a Arena, image: Vec<u8>, key: Option<&Key>) -> Result<Section<'a>> {
+    Ok(match key {
+        Some(key) => Section::unlock(arena, image, key)?,
+        None => Section::open(arena, image)?,
+    })
 }
 
 /// The sealed batch waiting for publication, if any.

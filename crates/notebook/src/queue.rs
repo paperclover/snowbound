@@ -1,14 +1,23 @@
 //! Edit rows. An edit is stored as its serialized ops with picture and attachment bytes
 //! moved to the `payloads` table, named by SHA-256 in the order `slots` visits them.
+//!
+//! A password-protected section's queue keeps none of it in the clear: each edit and
+//! payload is sealed with AES-256-GCM (a random nonce, the row's kind as associated data)
+//! and payloads are named by HMAC-SHA256, both under keys HMAC-SHA256 derives from the
+//! section's own key. Only the author's name and the payload names stay readable.
 
 use crate::{PendingEdit, Result, signed, unsigned};
+use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
+use hmac::{Hmac, Mac};
 use onestore::{
     op::{Edit, Op, PageOp, SectionOp, TableEdit},
     page::{PageObject, PageParagraph, ParagraphContent, TableCell},
+    protected::Key,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
 use std::{io, sync::Arc};
+use zeroize::Zeroizing;
 
 type Payload = Option<Arc<[u8]>>;
 
@@ -92,16 +101,79 @@ fn damaged(message: &'static str) -> crate::Error {
     io::Error::new(io::ErrorKind::InvalidData, message).into()
 }
 
-/// Stores `edit` in `batch` under `id`, or the next id, its payloads once each by hash;
+/// A key `key` derives for `purpose`.
+fn derived(key: &Key, purpose: &[u8]) -> Zeroizing<[u8; 32]> {
+    let mut mac =
+        <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(key.secret()).expect("any key length");
+    mac.update(purpose);
+    Zeroizing::new(mac.finalize().into_bytes().into())
+}
+
+fn cipher(key: &Key) -> Aes256Gcm {
+    Aes256Gcm::new_from_slice(&*derived(key, b"Snowbound queue v1")).expect("a 32-byte key")
+}
+
+/// A payload's name: its SHA-256, or in a protected section's queue an HMAC.
+fn name(key: Option<&Key>, bytes: &[u8]) -> String {
+    match key {
+        Some(key) => {
+            let mut mac = <Hmac<Sha256> as hmac::KeyInit>::new_from_slice(&*derived(
+                key,
+                b"Snowbound payload names v1",
+            ))
+            .expect("any key length");
+            mac.update(bytes);
+            hex(&mac.finalize().into_bytes())
+        }
+        None => hex(&Sha256::digest(bytes)),
+    }
+}
+
+/// `clear` sealed under `key` as `kind`: a random nonce, then the ciphertext and tag.
+fn seal(key: &Key, kind: &[u8], clear: &[u8]) -> Result<Vec<u8>> {
+    let mut nonce = [0; 12];
+    getrandom::fill(&mut nonce).map_err(|_| io::Error::other("System random source failed"))?;
+    let sealed = cipher(key)
+        .encrypt(
+            &nonce.into(),
+            aes_gcm::aead::Payload {
+                msg: clear,
+                aad: kind,
+            },
+        )
+        .map_err(|_| io::Error::other("A queued edit could not be sealed"))?;
+    Ok([&nonce[..], &sealed].concat())
+}
+
+/// The inverse of `seal`.
+fn open(key: &Key, kind: &[u8], sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    let (nonce, sealed) = sealed
+        .split_first_chunk::<12>()
+        .ok_or_else(|| damaged("A sealed queue row is truncated"))?;
+    Ok(Zeroizing::new(
+        cipher(key)
+            .decrypt(
+                &(*nonce).into(),
+                aes_gcm::aead::Payload {
+                    msg: sealed,
+                    aad: kind,
+                },
+            )
+            .map_err(|_| damaged("A sealed queue row does not open under the section's key"))?,
+    ))
+}
+
+/// Stores `edit` in `batch` under `id`, or the next id, its payloads once each by name;
 /// returns the edit's id.
 pub(crate) fn insert(
     connection: &Connection,
+    key: Option<&Key>,
     id: Option<u64>,
     batch: i64,
     author: &str,
     edit: &Edit,
 ) -> Result<u64> {
-    let (text, names) = encode(connection, edit)?;
+    let (text, names) = encode(connection, key, edit)?;
     connection.execute(
         "INSERT INTO edits(id, batch, author, edit, payloads) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![id.map(signed).transpose()?, batch, author, text, names],
@@ -114,8 +186,13 @@ fn hex(digest: &[u8]) -> String {
 }
 
 /// Replaces a stored edit's ops.
-pub(crate) fn rewrite(connection: &Connection, id: u64, edit: &Edit) -> Result<()> {
-    let (text, names) = encode(connection, edit)?;
+pub(crate) fn rewrite(
+    connection: &Connection,
+    key: Option<&Key>,
+    id: u64,
+    edit: &Edit,
+) -> Result<()> {
+    let (text, names) = encode(connection, key, edit)?;
     connection.execute(
         "UPDATE edits SET edit=?1, payloads=?2 WHERE id=?3",
         params![text, names, signed(id)?],
@@ -123,26 +200,38 @@ pub(crate) fn rewrite(connection: &Connection, id: u64, edit: &Edit) -> Result<(
     Ok(())
 }
 
-/// The serialized edit without payload bytes and the payload names, storing the payloads.
-fn encode(connection: &Connection, edit: &Edit) -> Result<(String, Option<String>)> {
+/// The serialized edit without payload bytes and the payload names, storing the payloads;
+/// sealed under `key` for a protected section.
+fn encode(
+    connection: &Connection,
+    key: Option<&Key>,
+    edit: &Edit,
+) -> Result<(String, Option<String>)> {
     let mut edit = edit.clone();
     let mut names: Vec<Option<String>> = Vec::new();
     let mut failure = None;
     slots(&mut edit, |payload| {
         let name = payload.take().map(|bytes| {
-            let digest = Sha256::digest(&bytes);
-            if let Err(error) = connection.execute(
-                "INSERT INTO payloads(sha256, bytes) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
-                params![&digest[..], &bytes[..]],
-            ) {
+            let name = name(key, &bytes);
+            let stored = match key {
+                Some(key) => seal(key, b"payload", &bytes),
+                None => Ok(bytes.to_vec()),
+            };
+            let stored = stored.and_then(|stored| {
+                Ok(connection.execute(
+                    "INSERT INTO payloads(sha256, bytes) VALUES (unhex(?1), ?2) ON CONFLICT DO NOTHING",
+                    params![&name, &stored[..]],
+                )?)
+            });
+            if let Err(error) = stored {
                 failure.get_or_insert(error);
             }
-            hex(&digest)
+            name
         });
         names.push(name);
     });
     if let Some(error) = failure {
-        return Err(error.into());
+        return Err(error);
     }
     let names = names
         .iter()
@@ -150,15 +239,39 @@ fn encode(connection: &Connection, edit: &Edit) -> Result<(String, Option<String
         .then(|| serde_json::to_string(&names))
         .transpose()
         .map_err(io::Error::other)?;
-    Ok((
-        serde_json::to_string(&edit).map_err(io::Error::other)?,
-        names,
-    ))
+    let text = Zeroizing::new(serde_json::to_string(&edit).map_err(io::Error::other)?);
+    let text = match key {
+        Some(key) => {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(seal(key, b"edit", text.as_bytes())?)
+        }
+        None => text.to_string(),
+    };
+    Ok((text, names))
 }
 
-fn decode(connection: &Connection, text: &str, names: Option<String>) -> Result<Edit> {
-    let mut edit: Edit = serde_json::from_str(text)
-        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+/// A stored edit's ops, without its payloads.
+pub(crate) fn parse(key: Option<&Key>, text: &str) -> Result<Edit> {
+    Ok(match key {
+        Some(key) => {
+            use base64::Engine;
+            let sealed = base64::engine::general_purpose::STANDARD
+                .decode(text)
+                .map_err(|_| damaged("A sealed queued edit is damaged"))?;
+            serde_json::from_slice(&open(key, b"edit", &sealed)?)
+        }
+        None => serde_json::from_str(text),
+    }
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?)
+}
+
+fn decode(
+    connection: &Connection,
+    key: Option<&Key>,
+    text: &str,
+    names: Option<String>,
+) -> Result<Edit> {
+    let mut edit = parse(key, text)?;
     let Some(names) = names else {
         return Ok(edit);
     };
@@ -176,18 +289,24 @@ fn decode(connection: &Connection, text: &str, names: Option<String>) -> Result<
         let Some(name) = name else {
             return;
         };
-        match query
+        let bytes = query
             .query_row([&name], |row| row.get::<_, Vec<u8>>(0))
-            .optional()
-        {
-            Ok(Some(bytes)) if hex(&Sha256::digest(&bytes)) == name => {
+            .optional();
+        let bytes = match (key, bytes) {
+            (Some(key), Ok(Some(sealed))) => {
+                open(key, b"payload", &sealed).map(|bytes| Some(bytes.to_vec()))
+            }
+            (_, bytes) => bytes.map_err(Into::into),
+        };
+        match bytes {
+            Ok(Some(bytes)) if self::name(key, &bytes) == name => {
                 *payload = Some(Arc::from(bytes));
             }
             Ok(_) => {
                 failure.get_or_insert(damaged("A queued payload is missing or damaged"));
             }
             Err(error) => {
-                failure.get_or_insert(error.into());
+                failure.get_or_insert(error);
             }
         }
     });
@@ -201,7 +320,11 @@ fn decode(connection: &Connection, text: &str, names: Option<String>) -> Result<
 }
 
 /// Queued edits, oldest first; of one batch when `batch` is given.
-pub(crate) fn load(connection: &Connection, batch: Option<i64>) -> Result<Vec<PendingEdit>> {
+pub(crate) fn load(
+    connection: &Connection,
+    key: Option<&Key>,
+    batch: Option<i64>,
+) -> Result<Vec<PendingEdit>> {
     let mut query = connection.prepare_cached(
         "SELECT id, author, edit, payloads FROM edits WHERE ?1 IS NULL OR batch=?1 ORDER BY id",
     )?;
@@ -211,7 +334,7 @@ pub(crate) fn load(connection: &Connection, batch: Option<i64>) -> Result<Vec<Pe
         edits.push(PendingEdit {
             id: unsigned(row.get(0)?)?,
             author: row.get(1)?,
-            edit: decode(connection, &row.get::<_, String>(2)?, row.get(3)?)?,
+            edit: decode(connection, key, &row.get::<_, String>(2)?, row.get(3)?)?,
         });
     }
     Ok(edits)
@@ -304,7 +427,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let id = insert(&connection, None, 1, "Author", &edit).unwrap();
+        let id = insert(&connection, None, None, 1, "Author", &edit).unwrap();
         let stored: String = connection
             .query_row("SELECT edit FROM edits WHERE id=?1", [id as i64], |row| {
                 row.get(0)
@@ -315,7 +438,7 @@ mod tests {
             .query_row("SELECT count(*) FROM payloads", [], |row| row.get(0))
             .unwrap();
         assert_eq!(payloads, 1);
-        let loaded = load(&connection, None).unwrap();
+        let loaded = load(&connection, None, None).unwrap();
         assert_eq!(loaded[0].edit, edit);
         let Op::Page {
             op:

@@ -272,29 +272,21 @@ fn run(
 fn sections(library: &Library) -> Vec<String> {
     match &library.notebook {
         Ok(Some(notebook)) => {
-            let mut paths = Vec::new();
-            let mut folders = vec![notebook.catalog()];
-            while let Some(folder) = folders.pop() {
-                paths.extend(
-                    folder
-                        .sections
-                        .iter()
-                        .filter(|section| {
-                            matches!(
-                                section.state,
-                                notebook::discover::SectionState::Readable { .. }
-                            )
-                        })
-                        .map(|section| section.path.clone()),
-                );
-                folders.extend(
-                    folder
-                        .groups
-                        .iter()
-                        .filter(|group| !crate::library::recycle_bin(&group.path)),
-                );
-            }
-            paths
+            let enter =
+                |group: &notebook::discover::Folder| !crate::library::recycle_bin(&group.path);
+            crate::library::folders(notebook.catalog(), enter)
+                .into_iter()
+                .flat_map(|folder| &folder.sections)
+                .filter(|section| match section.state {
+                    notebook::discover::SectionState::Readable { .. } => true,
+                    // OneNote searches a protected section only while it is unlocked.
+                    notebook::discover::SectionState::Locked => {
+                        library.unlocked(&section.path).is_some()
+                    }
+                    _ => false,
+                })
+                .map(|section| section.path.clone())
+                .collect()
         }
         Ok(None) => vec![library.location.clone()],
         Err(_) => Vec::new(),
@@ -339,7 +331,10 @@ fn sync(
                     Some(notebook) => notebook.read_section(&path)?,
                     None => onestore::read_file(&file)?,
                 };
-                let stored = notebook::session::stored_pages(&bytes)?;
+                let stored = match library.unlocked(&path) {
+                    Some(key) => notebook::session::stored_pages_unlocked(&bytes, &key)?,
+                    None => notebook::session::stored_pages(&bytes)?,
+                };
                 let modified = |space: ExGuid| {
                     stored
                         .iter()
@@ -485,12 +480,10 @@ impl State {
     /// Brings the index to the open notebooks and section when they changed, and when
     /// `always` or sections `changed` names, by key, to the section files changed since.
     pub(crate) fn sync_index(&mut self, always: bool, changed: Vec<String>) {
-        let open = self.session.as_ref().map(|session| {
-            (
-                session.library.key(&session.tabs[session.tab].path),
-                Arc::downgrade(session.section.replica()),
-            )
-        });
+        let open = self
+            .session
+            .as_ref()
+            .map(|session| (session.key(), Arc::downgrade(session.section.replica())));
         let identity: Vec<usize> = self
             .notebooks
             .iter()
@@ -511,11 +504,8 @@ impl State {
     /// Tells the index an edit changed page `space` of the open section.
     pub(crate) fn edited(&self, spaces: Vec<ExGuid>) {
         if let Some(session) = &self.session {
-            self.search.changed(
-                session.library.key(&session.tabs[session.tab].path),
-                session.section.replica(),
-                spaces,
-            );
+            self.search
+                .changed(session.key(), session.section.replica(), spaces);
         }
     }
 
@@ -544,7 +534,7 @@ impl State {
         let open = self
             .session
             .as_ref()
-            .map(|session| session.library.key(&session.tabs[session.tab].path))
+            .map(crate::Session::key)
             .unwrap_or_default();
         let wanted = (query.clone(), self.search.scope, version, open);
         if self.search.found_for.as_ref() == Some(&wanted) {
@@ -673,12 +663,10 @@ impl State {
     ) -> Result<(), Box<dyn Error>> {
         let (location, path) = section.split_once('\n').unwrap_or_default();
         self.search.reveal = Some((space, paragraph));
-        let open = self.session.as_ref().map(|session| {
-            (
-                session.library.key(&session.tabs[session.tab].path),
-                session.space,
-            )
-        });
+        let open = self
+            .session
+            .as_ref()
+            .map(|session| (session.key(), session.space));
         match open {
             Some((key, shown)) if key == section && shown == space => self.refind(true)?,
             Some((key, _)) if key == section => self.commands.push(Command::OpenPage(space)),

@@ -10,6 +10,7 @@ use onestore::{
     ExGuid,
     op::{Edit, OpError},
     page::Page,
+    protected::Key,
 };
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::{
@@ -26,6 +27,7 @@ mod base;
 pub mod location;
 mod merge;
 mod migrate;
+pub mod package;
 mod queue;
 mod recovery;
 mod resolve;
@@ -61,7 +63,7 @@ pub enum Error {
     Rejected(#[from] OpError),
     #[error("External payload identity now refers to different bytes")]
     AssetChanged,
-    #[cfg(feature = "protected")]
+    /// A password-protected section's password did not match, or its format is unknown.
     #[error(transparent)]
     Protected(#[from] onestore::protected::Error),
 }
@@ -98,10 +100,8 @@ pub enum Resolution {
 /// Edits apply on the cache's section thread, which keeps the section parsed; SQLite's
 /// exclusive connection retains ownership between local transactions.
 pub struct Replica {
-    connection: Arc<Mutex<Connection>>,
     section: Arc<working::Thread>,
     synchronization: Mutex<()>,
-    worker: Arc<Mutex<std::sync::Weak<worker::Signal>>>,
     /// The section's root object space, which names the document.
     root: ExGuid,
     /// Last, so that it runs once the fields above have closed the cache.
@@ -124,30 +124,31 @@ impl Replica {
     /// Seeds a new cache from a validated section image, refusing any existing path.
     /// An initialization error preserves the created file for inspection.
     pub fn create(path: impl AsRef<Path>, source: &[u8]) -> Result<Self> {
-        Self::seed(path.as_ref(), source)?;
-        Self::start(cache_connection(path.as_ref())?)
+        Self::seed(path.as_ref(), source, None)?;
+        Self::start(cache_connection(path.as_ref())?, None)
     }
 
-    /// Opens the cache at `path`, first creating it from the image `source` reads where there
-    /// is none. A cache another thread creates meanwhile, as the background makes an offline
-    /// copy, is opened instead.
+    /// Opens the cache at `path`, a protected section's under `key`, first creating it from
+    /// the image `source` reads where there is none. A cache another thread creates meanwhile,
+    /// as the background makes an offline copy, is opened instead.
     pub fn open_or_create(
         path: impl AsRef<Path>,
+        key: Option<&Key>,
         source: impl FnOnce() -> Result<Vec<u8>>,
     ) -> Result<Self> {
         let path = path.as_ref();
         if !path.exists() {
-            match Self::seed(path, &source()?) {
+            match Self::seed(path, &source()?, key) {
                 Err(Error::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 seeded => seeded?,
             }
         }
-        Self::open(path)
+        Self::open_with(path, key.cloned())
     }
 
     /// `create` without opening the cache it made, as for an offline copy.
-    pub(crate) fn seed(path: &Path, source: &[u8]) -> Result<()> {
-        validate(source)?;
+    pub(crate) fn seed(path: &Path, source: &[u8], key: Option<&Key>) -> Result<()> {
+        validate(source, key)?;
         // Built under a name of its own and linked into place whole, so that a cache that
         // exists is complete, and two threads making the same one never share a build.
         static BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -201,7 +202,10 @@ impl Replica {
     /// a conversion that cannot reproduce every queued page leaves it untouched.
     /// Unrecognized databases and unsupported journal modes are rejected.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
+        Self::open_with(path.as_ref(), None)
+    }
+
+    fn open_with(path: &Path, key: Option<Key>) -> Result<Self> {
         let mut connection = cache_connection(path)?;
         let application: u32 =
             connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
@@ -233,25 +237,21 @@ impl Replica {
             }
         }
         write_ahead(&connection)?;
-        Self::start(connection)
+        Self::start(connection, key)
     }
 
-    fn start(connection: Connection) -> Result<Self> {
-        let connection = Arc::new(Mutex::new(connection));
-        let worker = Arc::new(Mutex::new(std::sync::Weak::new()));
-        let (section, root) = working::spawn(Arc::clone(&connection), Arc::clone(&worker))?;
+    fn start(connection: Connection, key: Option<Key>) -> Result<Self> {
+        let (section, root) = working::spawn(connection, key)?;
         Ok(Self {
-            connection,
             section,
             synchronization: Mutex::new(()),
-            worker,
             root,
             released: Released::default(),
         })
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
-        lock(&self.connection)
+        lock(&self.section.connection)
     }
 
     /// Hands `request` to the section thread.
@@ -329,9 +329,9 @@ impl Replica {
 
     /// The section image the queued edits leave, the unsealed ones sealed as one more
     /// revision whose identities differ per call: O(section).
-    pub(crate) fn snapshot(&self) -> Result<Vec<u8>> {
+    pub fn snapshot(&self) -> Result<Vec<u8>> {
         self.written()?;
-        working::image(&*self.lock()?)
+        working::image(&*self.lock()?, self.section.key.as_ref())
     }
 
     /// Waits until the edits applied before it are written to the queue, as reads answer
@@ -342,18 +342,51 @@ impl Replica {
 
     /// The section file's identity, which internal links name as `section-id`.
     pub fn identity(&self) -> Result<[u8; 16]> {
-        let stamp = base::stamp(&*self.lock()?, base::Image::Base)?
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Damaged cached image"))?;
+        let stamp = base::base_stamp(&*self.lock()?)?;
         Ok(onestore::Header::parse(&stamp.header)?.file_id)
     }
 
     /// Queued edits, oldest first.
     pub fn pending(&self) -> Result<Vec<PendingEdit>> {
-        pending(&*self.lock()?)
+        pending(&*self.lock()?, self.section.key.as_ref())
+    }
+
+    /// The edits putting each page the queue changed, as the queue leaves it, into another
+    /// section as a copy under fresh identities, by the author of the first edit changing it;
+    /// content outside the page model stays behind.
+    pub(crate) fn copies(&self) -> Result<Vec<(String, Edit)>> {
+        let arena = onestore::Arena::default();
+        let base = base::base(&*self.lock()?)?;
+        let base = working::open(&arena, base, self.section.key.as_ref())?;
+        let mut seen = std::collections::BTreeSet::from([self.root]);
+        let mut copies = Vec::new();
+        for queued in self.pending()? {
+            for space in queue::spaces(&queued.edit, self.root) {
+                if !seen.insert(space) {
+                    continue;
+                }
+                let Ok(mut page) = self.page(space) else {
+                    continue;
+                };
+                if base.page(space).is_ok_and(|base| base == page) {
+                    continue;
+                }
+                page.objects
+                    .retain(|object| !matches!(object, onestore::page::PageObject::Unsupported(_)));
+                let creation =
+                    onestore::PageCreation::new(None, Some(&page.title), &queued.author)?;
+                let ops = vec![onestore::op::Op::Section(onestore::op::SectionOp::Import {
+                    creation,
+                    page: page.copy()?,
+                })];
+                copies.push((queued.author.clone(), Edit { at: now(), ops }));
+            }
+        }
+        Ok(copies)
     }
 
     fn wake_sync(&self) {
-        wake(&self.worker);
+        wake(&self.section.worker);
     }
 }
 
@@ -386,10 +419,14 @@ fn wake(worker: &Mutex<std::sync::Weak<worker::Signal>>) {
     }
 }
 
-/// Fully validates a section image, returning its root object space.
-fn validate(source: &[u8]) -> Result<ExGuid> {
+/// Fully validates a section image, a protected one under `key`, returning its root object
+/// space.
+fn validate(source: &[u8], key: Option<&Key>) -> Result<ExGuid> {
     let arena = onestore::Arena::default();
-    Ok(onestore::Section::open(&arena, source.to_vec())?.root())
+    Ok(match key {
+        Some(key) => onestore::Section::unlock(&arena, source.to_vec(), key)?.root(),
+        None => onestore::Section::open(&arena, source.to_vec())?.root(),
+    })
 }
 
 /// A closed cache, without opening the replica.
@@ -405,25 +442,14 @@ fn closed(path: &Path) -> Result<Connection> {
 }
 
 /// A closed cache's base stamp and how many edits wait.
-fn peek(path: &Path) -> Result<(onestore::Stamp, u64)> {
-    let connection = closed(path)?;
-    let base = base::stamp(&connection, base::Image::Base)?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "The cache has no base image"))?;
+fn peek(connection: &Connection) -> Result<(onestore::Stamp, u64)> {
+    let base = base::base_stamp(connection)?;
     let queued: i64 = connection.query_row("SELECT count(*) FROM edits", [], |row| row.get(0))?;
     Ok((base, unsigned(queued)?))
 }
 
-/// A closed cache's base image, if its stamp is `stamp`: the section file as it stands.
-fn copied(path: &Path, stamp: &onestore::Stamp) -> Result<Option<Vec<u8>>> {
-    let connection = closed(path)?;
-    if base::stamp(&connection, base::Image::Base)?.as_ref() != Some(stamp) {
-        return Ok(None);
-    }
-    base::read(&connection, base::Image::Base)
-}
-
-fn pending(connection: &Connection) -> Result<Vec<PendingEdit>> {
-    queue::load(connection, None)
+fn pending(connection: &Connection, key: Option<&Key>) -> Result<Vec<PendingEdit>> {
+    queue::load(connection, key, None)
 }
 
 fn unsigned(value: i64) -> Result<u64> {

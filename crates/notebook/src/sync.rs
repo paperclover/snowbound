@@ -84,8 +84,7 @@ struct Blocked {
 }
 
 fn state(connection: &Connection) -> Result<State> {
-    let base = base::stamp(connection, base::Image::Base)?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "The cache has no base image"))?;
+    let base = base::base_stamp(connection)?;
     let blocked = connection
         .query_row(
             "SELECT id, revisions FROM batches WHERE attempted=1 ORDER BY id LIMIT 1",
@@ -158,20 +157,17 @@ fn newest(connection: &Connection, batch: i64) -> Result<u64> {
 impl Replica {
     /// Returns a durable receipt or the persisted state of a locally acknowledged edit.
     pub fn status(&self, id: u64) -> Result<Option<EditStatus>> {
-        status(&*self.lock()?, id)
+        status(&*self.lock()?, id, self.section.key.as_ref())
     }
 
     /// The last observed remote image. Observation alone does not acknowledge any pending
     /// edit's remote durability.
     pub(crate) fn remote_snapshot(&self) -> Result<Vec<u8>> {
         let connection = self.lock()?;
-        let image = match base::read(&connection, base::Image::Remote)? {
-            Some(image) => Some(image),
-            None => base::read(&connection, base::Image::Base)?,
-        };
-        Ok(image.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "The cache has no base image")
-        })?)
+        match base::read(&connection, base::Image::Remote)? {
+            Some(image) => Ok(image),
+            None => base::base(&connection),
+        }
     }
 
     /// Publishes the oldest unpublished batch, rebasing the queue first when the remote
@@ -208,7 +204,8 @@ impl Replica {
             return Ok(Synced {
                 edit: Some((
                     id,
-                    status(&*self.lock()?, id)?.unwrap_or(EditStatus::Pending),
+                    status(&*self.lock()?, id, self.section.key.as_ref())?
+                        .unwrap_or(EditStatus::Pending),
                 )),
                 changed: Vec::new(),
             });
@@ -217,9 +214,15 @@ impl Replica {
             observed if observed == state.base => None,
             _ => {
                 let image = remote.read().map_err(Error::RemoteIo)?;
+                // Protected elsewhere: a section written anew, which only its key reads.
+                if self.section.key.is_none() && crate::discover::locked(&Store::parse(&image)?) {
+                    return Err(Error::RemoteIo(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "Password protected",
+                    )));
+                }
                 // A read image is compared whole: a stamp stands for it only when read alone.
-                let base = base::read(&*self.lock()?, base::Image::Base)?;
-                (base.as_deref() != Some(&image[..])).then_some(image)
+                (base::base(&*self.lock()?)? != image).then_some(image)
             }
         };
         let mut changed = Vec::new();
@@ -265,7 +268,8 @@ impl Replica {
                         return Ok(Synced {
                             edit: Some((
                                 id,
-                                status(&*self.lock()?, id)?.unwrap_or(EditStatus::Pending),
+                                status(&*self.lock()?, id, self.section.key.as_ref())?
+                                    .unwrap_or(EditStatus::Pending),
                             )),
                             changed,
                         });
@@ -301,7 +305,8 @@ impl Replica {
             return Ok(Synced {
                 edit: Some((
                     id,
-                    status(&*self.lock()?, id)?.unwrap_or(EditStatus::Pending),
+                    status(&*self.lock()?, id, self.section.key.as_ref())?
+                        .unwrap_or(EditStatus::Pending),
                 )),
                 changed,
             });
@@ -329,9 +334,7 @@ impl Replica {
         let id = newest(&*self.lock()?, batch)?;
         let Some(transaction) = transaction else {
             // Edits that changed nothing are published once the remote's image is durable.
-            let base = base::stamp(&*self.lock()?, base::Image::Base)?.ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "The cache holds no base image")
-            })?;
+            let base = base::base_stamp(&*self.lock()?)?;
             if let Err(error) = remote.confirm(&base) {
                 if error.state == CommitState::Committed {
                     self.acknowledge(batch, None, None)?;
@@ -373,15 +376,13 @@ impl Replica {
         sealed: Option<&Transaction>,
         revisions: &BTreeMap<ExGuid, ExGuid>,
     ) -> Result<bool> {
-        let base = base::read(&*self.lock()?, base::Image::Base)?.ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "The cache has no base image")
-        })?;
+        let base = base::base(&*self.lock()?)?;
         let (local, remote) = (onestore::Arena::default(), onestore::Arena::default());
-        let mut local = onestore::Section::open(&local, base)?;
+        let mut local = working::open(&local, base, self.section.key.as_ref())?;
         if let Some(sealed) = sealed {
             local.replay(sealed)?;
         }
-        let mut remote = onestore::Section::open(&remote, image.to_vec())?;
+        let mut remote = working::open(&remote, image.to_vec(), self.section.key.as_ref())?;
         // A page's versions change without its page changing.
         let versions = |section: &mut onestore::Section<'_>| {
             section.versions().map(|versions| {
@@ -403,7 +404,7 @@ impl Replica {
     }
 
     fn receipt(&self, id: u64) -> Result<ExGuid> {
-        match status(&*self.lock()?, id)? {
+        match status(&*self.lock()?, id, self.section.key.as_ref())? {
             Some(EditStatus::Published { revision }) => Ok(revision),
             _ => Err(io::Error::other("A published edit has no receipt").into()),
         }
@@ -431,7 +432,7 @@ impl Replica {
                 |row| row.get::<_, String>(0),
             )?)?,
         };
-        for queued in queue::load(&database, Some(batch))? {
+        for queued in queue::load(&database, self.section.key.as_ref(), Some(batch))? {
             database.execute(
                 "INSERT INTO receipts(edit_id, revision) VALUES (?1, ?2)",
                 params![
@@ -527,7 +528,11 @@ impl Replica {
     }
 }
 
-pub(crate) fn status(connection: &Connection, id: u64) -> Result<Option<EditStatus>> {
+pub(crate) fn status(
+    connection: &Connection,
+    id: u64,
+    key: Option<&onestore::protected::Key>,
+) -> Result<Option<EditStatus>> {
     let id = signed(id)?;
     if let Some(revision) = connection
         .query_row(
@@ -563,8 +568,7 @@ pub(crate) fn status(connection: &Connection, id: u64) -> Result<Option<EditStat
         None => None,
         Some((true, revisions, edit)) => {
             let revisions = decode_revisions(revisions.as_deref().unwrap_or("{}"))?;
-            let edit: onestore::op::Edit = serde_json::from_str(&edit)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let edit = queue::parse(key, &edit)?;
             let revision = revision_of(&edit, &revisions)?;
             Some(EditStatus::AwaitingConfirmation { revision })
         }

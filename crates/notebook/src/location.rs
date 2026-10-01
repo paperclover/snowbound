@@ -110,7 +110,7 @@ pub(crate) fn claim(
             if !replica.exists() {
                 continue;
             }
-            let adoptable = match crate::peek(&replica) {
+            let adoptable = match crate::closed(&replica).and_then(|held| crate::peek(&held)) {
                 Ok((base, _)) => {
                     legacy || stamp(identity).is_some_and(|file| follows(&file, &base))
                 }

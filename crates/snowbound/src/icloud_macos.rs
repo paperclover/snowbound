@@ -363,12 +363,17 @@ pub fn section(
     notebook: &Notebook,
     root: &Path,
     path: &str,
+    key: Option<&onestore::protected::Key>,
     notify: impl Fn() + Send + 'static,
 ) -> Result<Section, notebook::Error> {
     if !notebook.replica_path(path)?.exists() {
         fetch(&root.join(path))?;
     }
-    let section = notebook.section_with(path, |file| Ok(Coordinated(file.to_owned())), notify)?;
+    let connect = |file: &Path| Ok(Coordinated(file.to_owned()));
+    let section = match key {
+        Some(key) => notebook.section_unlocked_with(path, key, connect, notify)?,
+        None => notebook.section_with(path, connect, notify)?,
+    };
     section.set_pause(PAUSE);
     Ok(section)
 }
@@ -576,7 +581,7 @@ mod tests {
             let notebook = Notebook::create(&root, &cache, Notebook::NEW_COLOR, &page).unwrap();
             assert!(ubiquitous(&root));
             let path = notebook.catalog().sections[0].path.clone();
-            let section = section(&notebook, &root, &path, || {}).unwrap();
+            let section = section(&notebook, &root, &path, None, || {}).unwrap();
             let (space, ..) = section.pages().unwrap()[0].clone();
             let title = section
                 .page(space)

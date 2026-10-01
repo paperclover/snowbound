@@ -226,22 +226,7 @@ impl State {
             }
         }
         ui.close();
-        ui.open(
-            "buttons",
-            Spec {
-                size: [fill(), children()],
-                pad: [0.0, 8.0],
-                gap: 8.0,
-                ..Spec::default()
-            },
-        );
-        ui.leaf(
-            "space",
-            Spec {
-                size: [fill(), px(1.0)],
-                ..Spec::default()
-            },
-        );
+        crate::buttons(ui);
         let ok = ui::button(ui, "ok", "OK").clicked || entered;
         let cancel = ui::button(ui, "cancel", "Cancel").clicked;
         ui.close();

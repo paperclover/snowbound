@@ -68,7 +68,7 @@ impl CanvasEditor {
                     layout,
                     below_title: None,
                 } => {
-                    let [x, y] = [source.layout.x, source.layout.y].map(|v| v.unwrap_or(0.0));
+                    let [x, y] = crate::origin(&source.layout);
                     (source.id, [x, y, x + layout.size[0], y + layout.size[1]])
                 }
                 page::Content::Image(image) => {
@@ -109,13 +109,13 @@ impl CanvasEditor {
 
     /// How far back from `line` Insert Space can take the page along `axis`: never over what
     /// stays before the line, so at most zero.
-    pub fn space_limit(&self, axis: usize, line: f32) -> f32 {
+    pub(crate) fn space_limit(&self, axis: usize, line: f32) -> f32 {
         (self.spaced(axis, line).1 - line).min(0.0)
     }
 
     /// The extents, as `[x0, y0, x1, y1]` page points, of what Insert Space at `line` along
     /// `axis` moves.
-    pub fn space_preview(&self, axis: usize, line: f32) -> Vec<[f32; 4]> {
+    pub(crate) fn space_preview(&self, axis: usize, line: f32) -> Vec<[f32; 4]> {
         self.spaced(axis, line)
             .0
             .into_iter()
@@ -156,7 +156,7 @@ impl CanvasEditor {
                     let layout = self.object_layout_mut(id).unwrap();
                     // Undo restores an unset coordinate as the zero it stands for, as ops
                     // cannot unset one.
-                    let origin = [layout.x, layout.y].map(|v| v.unwrap_or(0.0));
+                    let origin = crate::origin(layout);
                     let previous = origin.map(Some);
                     [layout.x, layout.y] = shift(origin).map(Some);
                     self.undo.push(History::Position {
@@ -182,25 +182,14 @@ impl CanvasEditor {
                 }
             };
             if let Err(error) = result {
-                self.group(depth);
+                self.group(depth, false);
                 return Err(error);
             }
         }
-        self.group(depth);
+        self.group(depth, false);
         self.redo.clear();
         self.preferred_x = None;
         Ok(true)
-    }
-
-    /// Makes the history entries past `depth` one undo step that leaves the selection alone.
-    fn group(&mut self, depth: usize) {
-        let entries = self.undo.split_off(depth);
-        if !entries.is_empty() {
-            self.undo.push(History::Group {
-                entries,
-                page: false,
-            });
-        }
     }
 
     /// Parts outline `id`'s root nodes from `at` into new outline `part` at `position`, which

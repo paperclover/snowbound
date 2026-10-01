@@ -81,6 +81,11 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     private var origin = CGPoint.zero
     private var syncing = false
     private var scrolled = false
+    private var drag: Drag?
+    /// The zoom and finger spread a pinch started from.
+    private var pinchStart: (zoom: CGFloat, spread: CGFloat)?
+    private var inDetent = false
+    private let detentTick = UISelectionFeedbackGenerator()
     /// How far right of the content's corner a page opens.
     private var left: CGFloat = 0
     /// The zoom a double tap returns to.
@@ -230,7 +235,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
             paper()
             sync()
             let skip = margin
-            resting = openingZoom()
+            resting = openingZoom(skipping: skip)
             zoomScale = resting
             left = skip * resting
             home()
@@ -301,12 +306,14 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         dirty = true
     }
 
-    /// The zoom the reader last pinched to, within reason; before that, 100%, where OneNote's
-    /// 11 pt body text shows at 17 points.
-    private func openingZoom() -> CGFloat {
-        guard let zoom = UserDefaults.standard.object(forKey: Self.zoomKey) as? Double else { return 1 }
-        // A page opens readable however far the last one was pinched.
-        return min(2, max(0.75, zoom))
+    /// The zoom the reader last pinched to, within reason, or before that 100%, where OneNote's
+    /// 11 pt body text shows at 17 points; less where that fits the page right of `skip`
+    /// across the screen.
+    private func openingZoom(skipping skip: CGFloat) -> CGFloat {
+        let pinched = UserDefaults.standard.object(forKey: Self.zoomKey) as? CGFloat ?? 1
+        let fit = bounds.inset(by: safeAreaInsets).width / max(1, content.bounds.width - skip)
+        // A page opens readable however far the last one was pinched or however wide it is.
+        return max(0.75, min(2, pinched, fit))
     }
 
     /// The empty page left of its first outline, which a phone skips on opening, keeping
@@ -329,22 +336,114 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         if !scrolled { contentOffset = CGPoint(x: left - adjustedContentInset.left, y: -adjustedContentInset.top) }
     }
 
-    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { scrolled = true }
-    func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) { scrolled = true }
+    /// A drag that starts within 30° of an axis sticks to it; a 24-point stretch of the
+    /// finger more than 40° off it lets go, and the page catches up over the next 48 points.
+    private struct Drag {
+        static let snap = tan(CGFloat.pi / 6)
+        static let release = tan(CGFloat.pi * 2 / 9)
+        static let stretch: CGFloat = 24
+        static let catchUp: CGFloat = 48
+
+        /// The axis the lock holds still.
+        let cross: WritableKeyPath<CGPoint, CGFloat>
+        var locked = true
+        /// The offset last shown, from which the scroll view's next step is measured.
+        var offset: CGPoint
+        /// The translation where the stretch of the gesture being judged began.
+        var stretch: CGPoint
+        /// How far the held axis trails the finger.
+        var lag: CGFloat = 0
+    }
+
+    func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+        scrolled = true
+        let moved = panGestureRecognizer.translation(in: self)
+        let cross: WritableKeyPath<CGPoint, CGFloat>? =
+            abs(moved.x) <= abs(moved.y) * Drag.snap ? \.x : abs(moved.y) <= abs(moved.x) * Drag.snap ? \.y : nil
+        drag = cross.map { Drag(cross: $0, offset: contentOffset, stretch: moved) }
+    }
+
+    func scrollViewWillBeginZooming(_ scrollView: UIScrollView, with view: UIView?) {
+        scrolled = true
+        drag = nil
+        pinchStart = spread.map { (zoomScale, $0) }
+        inDetent = abs(log(zoomScale)) < Self.detent
+        detentTick.prepare()
+    }
+
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { content }
-    func scrollViewDidScroll(_ scrollView: UIScrollView) { transform() }
+
+    func scrollViewDidScroll(_ scrollView: UIScrollView) {
+        if var drag, isDragging || isDecelerating, !isZooming {
+            let cross = drag.cross
+            let along = cross == \CGPoint.x ? \CGPoint.y : \CGPoint.x
+            var offset = contentOffset
+            let step = offset[keyPath: cross] - drag.offset[keyPath: cross]
+            if drag.locked {
+                drag.lag += step
+                offset[keyPath: cross] = drag.offset[keyPath: cross]
+                let moved = panGestureRecognizer.translation(in: self)
+                let stretch = CGPoint(x: moved.x - drag.stretch.x, y: moved.y - drag.stretch.y)
+                if isTracking, hypot(stretch.x, stretch.y) >= Drag.stretch {
+                    drag.locked = abs(stretch[keyPath: cross]) <= abs(stretch[keyPath: along]) * Drag.release
+                    drag.stretch = moved
+                }
+            } else {
+                let travel = hypot(step, offset[keyPath: along] - drag.offset[keyPath: along])
+                let paid = drag.lag * (1 - exp(-travel / Drag.catchUp))
+                offset[keyPath: cross] += paid
+                drag.lag -= paid
+            }
+            drag.offset = offset
+            self.drag = drag.locked || abs(drag.lag) >= 0.5 ? drag : nil
+            if offset != contentOffset { contentOffset = offset }
+        }
+        transform()
+    }
+
+    /// How far apart a pinch's two fingers are.
+    private var spread: CGFloat? {
+        guard let pinch = pinchGestureRecognizer, pinch.numberOfTouches == 2 else { return nil }
+        let a = pinch.location(ofTouch: 0, in: self), b = pinch.location(ofTouch: 1, in: self)
+        return hypot(a.x - b.x, a.y - b.y)
+    }
+
+    /// How far either side of 100% a pinch sticks, as a log of the zoom.
+    private static let detent = log(CGFloat(1.1))
+
+    /// Pinching near 100% sticks there: within `detent` of it the zoom follows the fingers
+    /// on a curve flat at 100% that meets them again at the band's edges.
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        if let pinch = pinchGestureRecognizer, pinch.state == .changed, let pinchStart, let spread {
+            // The scroll view's pinch reports the zoom it shows, so the fingers give the raw one.
+            let raw = log(pinchStart.zoom * spread / pinchStart.spread)
+            let x = abs(raw) / Self.detent
+            if x < 1 {
+                if !inDetent { detentTick.selectionChanged() }
+                let shown = exp(Self.detent * x * x * (2 - x) * (raw < 0 ? -1 : 1))
+                if abs(shown - zoomScale) > 0.0001 {
+                    let focus = pinch.location(in: content)
+                    let screen = CGPoint(x: pinch.location(in: self).x - contentOffset.x, y: pinch.location(in: self).y - contentOffset.y)
+                    zoomScale = shown
+                    contentOffset = CGPoint(x: focus.x * shown - screen.x, y: focus.y * shown - screen.y)
+                }
+            }
+            inDetent = x < 1
+        }
         transform()
         // Scrolling carries the caret and handles along; zooming moves them within the page.
         display.setNeedsSelectionUpdate()
     }
 
     func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+        pinchStart = nil
         if tapZooming {
             tapZooming = false
         } else {
-            resting = scale
-            UserDefaults.standard.set(Double(scale), forKey: Self.zoomKey)
+            // A pinch let go within the detent settles on 100%.
+            resting = abs(log(scale)) < Self.detent ? 1 : scale
+            if resting != scale { setZoomScale(resting, animated: true) }
+            UserDefaults.standard.set(Double(resting), forKey: Self.zoomKey)
         }
     }
 
@@ -694,8 +793,10 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         edit(external: true) { sb_delete_backward(handle) }
     }
 
-    /// Runs a change to the page, telling the system when it did not ask for it.
-    private func edit(external: Bool = false, _ change: () -> Bool) {
+    /// Runs a change to the page, telling the system when it did not ask for it; returns
+    /// whether it changed.
+    @discardableResult
+    private func edit(external: Bool = false, _ change: () -> Bool) -> Bool {
         if external {
             inputDelegate?.selectionWillChange(self)
             inputDelegate?.textWillChange(self)
@@ -712,6 +813,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         }
         display.setNeedsSelectionUpdate()
         changedSelection()
+        return changed
     }
 
     /// Tells the bar buttons and the format bar what the selection now has.
@@ -736,6 +838,10 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     override var inputAccessoryView: UIView? { formatBar }
 
     override func becomeFirstResponder() -> Bool {
+        if Prototype.welcome, Author.name == nil, let controller = window?.rootViewController {
+            Prototype.askName(from: controller) { [weak self] in _ = self?.becomeFirstResponder() }
+            return false
+        }
         guard super.becomeFirstResponder() else { return false }
         if let handle { sb_view_focus(handle, true) }
         display.isActivated = true
@@ -876,6 +982,37 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     /// A conflict page, which shows what is stored and takes no edits.
     var readOnly: Bool { handle.map(sb_view_read_only) ?? false }
 
+    /// The column a reading view fills: the screen's width less the room tags hang in.
+    private var readingWidth: Float { Float(bounds.inset(by: safeAreaInsets).width - 34 - 12) }
+
+    /// Whether the page has a reading view here, and how it reads or why not.
+    var reading: (offered: Bool, verdict: String)? {
+        struct Reading: Decodable {
+            let offered: Bool
+            let verdict: String
+        }
+        guard let handle, let read = decode(Reading.self, sb_view_reading(handle, readingWidth)) else { return nil }
+        return (read.offered, read.verdict)
+    }
+
+    /// Whether the page shows reflowed, as `showReading` left it.
+    private(set) var readingShown = false
+
+    /// Shows the page reflowed into the screen's width at 100%, read-only, or as laid out.
+    func showReading(_ on: Bool) {
+        guard let handle else { return }
+        _ = resignFirstResponder()
+        readingShown = sb_view_set_reading(handle, on ? readingWidth : 0)
+        zoomScale = 1
+        resting = 1
+        scrolled = false
+        sync()
+        left = margin
+        home()
+        dirty = true
+        onChange?()
+    }
+
     /// The title as typed; nil on a page without an editable title.
     var pageTitle: String? { handle.flatMap { take(sb_view_title($0)) } }
 
@@ -933,11 +1070,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     /// Selects paragraph `id` and brings it into view.
     func selectParagraph(_ id: String) -> Bool {
         guard let handle else { return false }
-        var found = false
-        edit(external: true) {
-            found = sb_view_select_paragraph(handle, id)
-            return found
-        }
+        let found = edit(external: true) { sb_view_select_paragraph(handle, id) }
         if found { reveal(selectedTextRange.map { firstRect(for: $0) } ?? .zero) }
         return found
     }
@@ -966,11 +1099,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     /// Selects the first place `query` occurs and brings it into view.
     func find(_ query: String) -> Bool {
         guard let handle else { return false }
-        var found = false
-        edit(external: true) {
-            found = sb_view_find(handle, query)
-            return found
-        }
+        let found = edit(external: true) { sb_view_find(handle, query) }
         if found { reveal(selectedTextRange.map { firstRect(for: $0) } ?? .zero) }
         return found
     }
@@ -978,12 +1107,7 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     /// Puts the caret at the end of the page title.
     func focusTitle() -> Bool {
         guard let handle else { return false }
-        var focused = false
-        edit(external: true) {
-            focused = sb_view_focus_title(handle)
-            return focused
-        }
-        return focused
+        return edit(external: true) { sb_view_focus_title(handle) }
     }
 
     /// A photo as OneNote 2010 can read it: JPEG, at most 2048 pixels across, shown at most

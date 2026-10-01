@@ -159,6 +159,9 @@ pub struct Page {
     /// FILETIME ticks from the page's TopologyCreationTimeStamp.
     pub created: Option<u64>,
     pub margin_origin: [f32; 2],
+    /// Right-to-left page direction, whose positions keep the left-to-right frame.
+    #[serde(default)]
+    pub rtl: bool,
     /// The page's colour (View, Page Color), COLORREF; `None` is OneNote's "No color".
     #[serde(default)]
     pub color: Option<u32>,
@@ -814,6 +817,7 @@ impl Page {
         let Kind::Page {
             margin_origin_x,
             margin_origin_y,
+            rtl,
             ..
         } = &root.kind
         else {
@@ -845,6 +849,7 @@ impl Page {
                 margin_origin_x.unwrap_or(1.0_f32 * 36.0),
                 margin_origin_y.unwrap_or(0.4_f32 * 36.0),
             ],
+            rtl: rtl.unwrap_or(false),
             color: root
                 .extra
                 .first()

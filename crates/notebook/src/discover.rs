@@ -50,8 +50,28 @@ pub struct Folder {
     pub toc: Option<Toc>,
     pub sections: Vec<Section>,
     pub groups: Vec<Folder>,
+    /// The paths of `sections` and `groups` together, in the order the TOC lists them, those
+    /// it doesn't last by path.
+    pub order: Vec<String>,
     /// Child section files and groups that could not be read.
     pub unavailable: Vec<Unavailable>,
+}
+
+impl Folder {
+    /// This folder and every group under it, in catalog order.
+    pub(crate) fn folders(&self) -> impl Iterator<Item = &Folder> {
+        let mut stack = vec![self];
+        std::iter::from_fn(move || {
+            let folder = stack.pop()?;
+            stack.extend(folder.groups.iter().rev());
+            Some(folder)
+        })
+    }
+
+    /// The sections of this folder and every group under it, in catalog order.
+    pub(crate) fn sections(&self) -> impl Iterator<Item = &Section> {
+        self.folders().flat_map(|folder| &folder.sections)
+    }
 }
 
 /// A section file or group folder denied or gone while listing; each discovery tries it again.
@@ -346,6 +366,7 @@ fn scan(
         toc: None,
         sections: Vec::new(),
         groups: Vec::new(),
+        order: Vec::new(),
         unavailable: Vec::new(),
     };
     for entry in &listing {
@@ -551,26 +572,26 @@ fn scan(
         .flat_map(|toc| &toc.unresolved)
         .map(|entry| (entry.file, entry.order))
         .collect();
-    result.sections.sort_by(|a, b| {
-        (order.get(&a.file_id).copied().unwrap_or(u32::MAX), &a.path)
-            .cmp(&(order.get(&b.file_id).copied().unwrap_or(u32::MAX), &b.path))
-    });
-    result.groups.sort_by(|a, b| {
-        (
-            a.toc
-                .as_ref()
-                .and_then(|toc| order.get(&toc.file_id).copied())
-                .unwrap_or(u32::MAX),
-            &a.path,
+    let rank = |file: Option<[u8; 16]>| file.and_then(|file| order.get(&file).copied());
+    let ranked = |file, path: &String| (rank(file).unwrap_or(u32::MAX), path.clone());
+    result
+        .sections
+        .sort_by_cached_key(|section| ranked(Some(section.file_id), &section.path));
+    let group_file = |group: &Folder| group.toc.as_ref().map(|toc| toc.file_id);
+    result
+        .groups
+        .sort_by_cached_key(|group| ranked(group_file(group), &group.path));
+    let mut entries: Vec<(u32, String)> = (result.sections.iter())
+        .map(|section| ranked(Some(section.file_id), &section.path))
+        .chain(
+            result
+                .groups
+                .iter()
+                .map(|group| ranked(group_file(group), &group.path)),
         )
-            .cmp(&(
-                b.toc
-                    .as_ref()
-                    .and_then(|toc| order.get(&toc.file_id).copied())
-                    .unwrap_or(u32::MAX),
-                &b.path,
-            ))
-    });
+        .collect();
+    entries.sort();
+    result.order = entries.into_iter().map(|(_, path)| path).collect();
     let listed = |file: [u8; 16], path: &str| {
         let name = path.rsplit('/').next().unwrap_or(path);
         result

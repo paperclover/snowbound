@@ -133,6 +133,13 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
 
     func reload() {
         guard isViewLoaded else { return }
+        if Prototype.welcome {
+            let welcome = Prototype.welcome(
+                new: { [weak self] in self?.newNotebook(inCloud: ICloud.documents != nil) },
+                openFolder: { [weak self] in self?.openFolder() }, connect: { [weak self] in self?.connect() })
+            contentUnavailableConfiguration = welcome
+            if welcome != nil { return dataSource.apply(.init(), animatingDifferences: false) }
+        }
         let copied = Notebooks.onDevice.contains { $0.source == .documents(path: Notebooks.guide) }
         let guide: [Item] = Notebooks.guideOffered && !copied ? [.guide] : []
         let cloud: [(Location, [Notebook], [Item])] =
@@ -184,6 +191,14 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
             }
         }
         reload()
+    }
+
+    /// Lists the notebooks again and opens the first section of the one from `source`.
+    private func rescan(opening source: Source) {
+        rescan { [weak self] notebook in
+            guard notebook.source == source, let tab = notebook.tabs.first(where: \.readable) else { return }
+            self?.onOpen?(tab, notebook)
+        }
     }
 
     private func showOnDevice(_ shown: Bool) {
@@ -239,7 +254,9 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
             content.image = UIImage(
                 systemName: tab.readable ? "rectangle.portrait.fill" : tab.downloading ? "icloud.and.arrow.down" : "lock.fill")
             content.imageProperties.tintColor = tab.uiColor
-            if !tab.readable {
+            if tab.locked {
+                content.secondaryText = "Password protected"
+            } else if !tab.readable {
                 content.secondaryText = tab.downloading ? "Downloading…" : tab.problem ?? "Can’t be opened here"
                 content.textProperties.color = .secondaryLabel
             }
@@ -370,7 +387,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
             return closed ? nil : problem ?? ""
         }) { [weak self] problem in
             if let problem {
-                self?.refuse(title, problem)
+                self?.alert(title, problem)
                 return
             }
             notebook.pause()
@@ -387,7 +404,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
                 isFile ? name + "." + folder.pathExtension : name)
             guard target != folder else { return }
             guard !FileManager.default.fileExists(atPath: target.path) else {
-                self?.refuse("“\(name)” Already Exists", "Choose a different name.")
+                self?.alert("“\(name)” Already Exists", "Choose a different name.")
                 return
             }
             self?.close(notebook, refusing: "Can’t Rename") {
@@ -395,7 +412,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
                     try FileManager.default.moveItem(at: folder, to: target)
                     _ = sb_notebook_moved(cacheDirectory.path, folder.path, target.path, nil)
                 } catch {
-                    self?.refuse("Can’t Rename", error.localizedDescription)
+                    self?.alert("Can’t Rename", error.localizedDescription)
                 }
                 self?.rescan()
             }
@@ -406,10 +423,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
             field.clearButtonMode = .whileEditing
             NotificationCenter.default.addObserver(
                 forName: UITextField.textDidChangeNotification, object: field, queue: .main
-            ) { _ in
-                let name = (field.text ?? "").trimmingCharacters(in: .whitespaces)
-                rename.isEnabled = !name.isEmpty && !name.hasPrefix(".") && !name.contains("/")
-            }
+            ) { _ in rename.isEnabled = Self.namesFile(field) }
         }
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(rename)
@@ -417,11 +431,17 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         present(alert, animated: true)
     }
 
+    /// Whether `field` holds a name a notebook's folder can take.
+    private static func namesFile(_ field: UITextField) -> Bool {
+        let name = (field.text ?? "").trimmingCharacters(in: .whitespaces)
+        return !name.isEmpty && !name.hasPrefix(".") && !name.contains("/")
+    }
+
     /// Copies the notebook beside itself, named as Files names a duplicate.
     private func duplicate(_ folder: URL, of notebook: Notebook) {
         // The copy takes what the open sections have stored.
         for section in Section.all where section.notebook === notebook && !section.flush(10) {
-            return refuse("Can’t Duplicate", "Some changes haven’t been saved to the notebook yet.")
+            return alert("Can’t Duplicate", "Some changes haven’t been saved to the notebook yet.")
         }
         let base = folder.deletingPathExtension().lastPathComponent
         let ext = folder.pathExtension
@@ -436,7 +456,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
             do { try FileManager.default.copyItem(at: folder, to: target) } catch { return error.localizedDescription }
             return nil
         }) { [weak self] problem in
-            if let problem { self?.refuse("Can’t Duplicate", problem) }
+            if let problem { self?.alert("Can’t Duplicate", problem) }
             self?.rescan()
         }
     }
@@ -475,7 +495,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         })
         alert.addAction(UIAlertAction(title: "Delete", style: .destructive) { [weak self] _ in
             do { try FileManager.default.removeItem(at: folder) } catch {
-                self?.refuse("Can’t Delete", error.localizedDescription)
+                self?.alert("Can’t Delete", error.localizedDescription)
             }
             self?.rescan()
         })
@@ -495,7 +515,8 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         guard let item = dataSource.itemIdentifier(for: indexPath) else { return false }
         switch item {
         case .section(let id, let path):
-            return notebook(id)?.tabs.first(where: { $0.path == path })?.readable == true
+            let tab = notebook(id)?.tabs.first(where: { $0.path == path })
+            return tab?.readable == true || tab?.locked == true
         case .status(let id):
             guard let notebook = notebook(id), notebook.problem != nil else { return false }
             let spinner = UIActivityIndicatorView(style: .medium)
@@ -532,7 +553,34 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         guard case .section(let id, let path) = dataSource.itemIdentifier(for: indexPath), let notebook = notebook(id),
             let tab = notebook.tabs.first(where: { $0.path == path })
         else { return }
+        if tab.locked { return unlock(tab, of: notebook, wrong: false) }
         onOpen?(tab, notebook)
+    }
+
+    /// Asks for a protected section's password, as OneNote's Protected Section dialog does,
+    /// and opens it once unlocked.
+    private func unlock(_ tab: Tab, of notebook: Notebook, wrong: Bool) {
+        let alert = UIAlertController(
+            title: "Protected Section",
+            message: wrong ? "Password is incorrect." : "Section “\(tab.name)” is password protected.",
+            preferredStyle: .alert)
+        alert.addTextField { field in
+            field.isSecureTextEntry = true
+            field.placeholder = "Password"
+        }
+        alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+        alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self, weak alert] _ in
+            let password = alert?.textFields?.first?.text ?? ""
+            notebook.unlock(tab.path, password: password) { unlocked in
+                self?.reload()
+                if unlocked, let opened = notebook.tabs.first(where: { $0.path == tab.path }) {
+                    self?.onOpen?(opened, notebook)
+                } else {
+                    self?.unlock(tab, of: notebook, wrong: true)
+                }
+            }
+        })
+        present(alert, animated: true)
     }
 
     private func add(_ notebook: Notebook) {
@@ -572,10 +620,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
             field.autocapitalizationType = .words
             NotificationCenter.default.addObserver(
                 forName: UITextField.textDidChangeNotification, object: field, queue: .main
-            ) { _ in
-                let name = (field.text ?? "").trimmingCharacters(in: .whitespaces)
-                create.isEnabled = !name.isEmpty && !name.hasPrefix(".") && !name.contains("/")
-            }
+            ) { _ in create.isEnabled = Self.namesFile(field) }
         }
         alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
         alert.addAction(create)
@@ -587,7 +632,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         let place = inCloud ? ICloud.documents : documentsDirectory
         guard let folder = place?.appendingPathComponent(name) else { return }
         guard !FileManager.default.fileExists(atPath: folder.path) else {
-            return refuse("“\(name)” Already Exists", "Choose a different name.")
+            return alert("“\(name)” Already Exists", "Choose a different name.")
         }
         let (date, time) = titleDate()
         background({ () -> String? in
@@ -597,14 +642,9 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
             return made ? nil : problem ?? ""
         }) { [weak self] problem in
             guard let self else { return }
-            if let problem { return refuse("Can’t Create Notebook", problem) }
+            if let problem { return alert("Can’t Create Notebook", problem) }
             if !inCloud && !Notebooks.showsOnDevice { Notebooks.showsOnDevice = true }
-            rescan { [weak self] notebook in
-                guard notebook.source == (inCloud ? .icloud(path: name) : .documents(path: name)),
-                    let tab = notebook.tabs.first(where: \.readable)
-                else { return }
-                self?.onOpen?(tab, notebook)
-            }
+            rescan(opening: inCloud ? .icloud(path: name) : .documents(path: name))
         }
     }
 
@@ -621,21 +661,10 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
             return nil
         }) { [weak self] problem in
             guard let self else { return }
-            if let problem { return refuse("Can’t Open the Guide", problem) }
+            if let problem { return alert("Can’t Open the Guide", problem) }
             if !Notebooks.showsOnDevice { Notebooks.showsOnDevice = true }
-            rescan { [weak self] notebook in
-                guard notebook.source == .documents(path: Notebooks.guide),
-                    let tab = notebook.tabs.first(where: \.readable)
-                else { return }
-                self?.onOpen?(tab, notebook)
-            }
+            rescan(opening: .documents(path: Notebooks.guide))
         }
-    }
-
-    private func refuse(_ title: String, _ message: String) {
-        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .default))
-        present(alert, animated: true)
     }
 
     private func openFolder() {
@@ -721,6 +750,11 @@ final class PagesViewController: UITableViewController {
     /// Opens a page of the section.
     var onOpen: ((Section, String) -> Void)?
 
+    /// The section strip prototype, over the pages.
+    private lazy var strip = SectionStrip { [weak self] tab, notebook in
+        (self?.view.window?.windowScene?.delegate as? SceneDelegate)?.open(tab, of: notebook)
+    }
+
     init() {
         super.init(style: .plain)
     }
@@ -740,6 +774,25 @@ final class PagesViewController: UITableViewController {
         ]
         NotificationCenter.default.addObserver(
             self, selector: #selector(changed), name: Section.changed, object: nil)
+        if Prototype.sectionStrip {
+            for direction in [UISwipeGestureRecognizer.Direction.left, .right] {
+                let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swiped))
+                swipe.direction = direction
+                tableView.addGestureRecognizer(swipe)
+            }
+        }
+    }
+
+    @objc private func swiped(_ swipe: UISwipeGestureRecognizer) {
+        if let tab = strip.neighbour(swipe.direction == .left ? 1 : -1) { strip.pick(tab) }
+    }
+
+    override func tableView(_ tableView: UITableView, viewForHeaderInSection section: Int) -> UIView? {
+        Prototype.sectionStrip && strip.notebook != nil ? strip : nil
+    }
+
+    override func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {
+        Prototype.sectionStrip && strip.notebook != nil ? 50 : 0
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -751,6 +804,10 @@ final class PagesViewController: UITableViewController {
         section = nil
         items = []
         title = tab.name
+        if Prototype.sectionStrip, let notebook = strip.notebook {
+            title = notebook.name
+            strip.select(tab.path)
+        }
         tableView.reloadData()
         var loading = UIContentUnavailableConfiguration.loading()
         loading.text = "Opening…"
@@ -768,7 +825,7 @@ final class PagesViewController: UITableViewController {
         navigationController?.setToolbarHidden(true, animated: false)
     }
 
-    func failed(_ tab: Tab, _ problem: String?) {
+    func failed(_ problem: String?) {
         var empty = UIContentUnavailableConfiguration.empty()
         empty.text = "Can’t Open Section"
         empty.secondaryText = problem
@@ -778,6 +835,10 @@ final class PagesViewController: UITableViewController {
     func load(_ section: Section) {
         self.section = section
         title = section.tab.name
+        if Prototype.sectionStrip {
+            title = section.notebook.name
+            strip.show(section.notebook, selected: section.tab.path)
+        }
         navigationController?.setToolbarHidden(false, animated: false)
         reload()
     }
@@ -816,7 +877,7 @@ final class PagesViewController: UITableViewController {
     }
 
     private func delete(_ item: Item) {
-        section?.delete(item.id) { _ in }
+        section?.delete(item.id)
     }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int { items.count }
@@ -859,6 +920,8 @@ final class PagesViewController: UITableViewController {
     override func tableView(
         _ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath
     ) -> UISwipeActionsConfiguration? {
+        // A swipe across the list changes section instead; the context menu deletes.
+        if Prototype.sectionStrip { return nil }
         let item = items[indexPath.row]
         let delete = UIContextualAction(style: .destructive, title: "Delete") { [weak self] _, _, done in
             self?.delete(item)

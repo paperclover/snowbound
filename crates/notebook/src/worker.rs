@@ -166,6 +166,7 @@ impl Replica {
             ));
         }
         let mut owner = self
+            .section
             .worker
             .lock()
             .map_err(|_| io::Error::other("Synchronization worker registration panicked"))?;

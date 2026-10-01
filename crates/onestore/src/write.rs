@@ -487,16 +487,8 @@ pub(crate) struct PropertyObject {
 
 pub(crate) enum RevisionEdit {
     Update(BTreeMap<ExGuid, PropertyObject>),
-    #[cfg(any(test, feature = "protected"))]
+    #[cfg(test)]
     Create {
-        roots: BTreeMap<u32, ExGuid>,
-        objects: BTreeMap<ExGuid, PropertyObject>,
-    },
-    /// A complete revision of an existing space under a context and role, without history.
-    #[cfg(feature = "protected")]
-    Label {
-        context: ExGuid,
-        role: u32,
         roots: BTreeMap<u32, ExGuid>,
         objects: BTreeMap<ExGuid, PropertyObject>,
     },
@@ -801,14 +793,16 @@ impl PropertyObject {
     }
 }
 
-/// A password-protected section's unlocked view, through which its revisions are
-/// read as plaintext and written back in their stored form.
+/// A password-protected section's key, under which a writer stores what it appends.
 pub(crate) trait Protection {
-    fn resolve(&self, space: ExGuid, revision: ExGuid) -> Result<crate::ResolvedRevision<'_>>;
-    /// The stored bytes a resolved object's plaintext was decoded from.
+    /// The stored bytes an object's clear bytes were decoded from.
     fn stored(&self, clear: &[u8]) -> Option<&[u8]>;
     fn seal_property(&self, clear: &[u8]) -> Result<Vec<u8>>;
-    fn seal_file(&self, clear: &[u8]) -> Vec<u8>;
+    fn seal_file(&self, clear: &[u8]) -> Result<Vec<u8>>;
+    fn open_property(&self, stored: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>>;
+    fn open_file(&self, stored: &[u8]) -> Result<zeroize::Zeroizing<Vec<u8>>>;
+    /// The encryption data's chunk, which every revision names.
+    fn metadata(&self) -> Chunk;
 }
 
 /// The global-ID entries a group of objects declared together uses: each object's own
@@ -1281,7 +1275,7 @@ pub(crate) fn revisions(
     let store = Store::parse(source)?;
     let index = RevisionIndex::parse(&store)?;
     index.validate_current()?;
-    build_on(&index, &[], None, edit)
+    build_on(&index, &[], edit)
 }
 
 /// A test fixture: `source` with `edit`'s revisions appended.
@@ -1290,32 +1284,17 @@ pub(crate) fn write_revisions(
     source: &[u8],
     edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
 ) -> Result<Vec<u8>> {
-    publish(source, &[], None, true, edit)
+    publish(source, true, edit)
 }
 
-/// `source` with `edit`'s revisions and the `payloads` appended, without validating that
-/// current revisions are complete: a protected section is validated by unlocking it,
-/// through `protection`.
-#[cfg(feature = "protected")]
-pub(crate) fn append_revisions(
-    source: &[u8],
-    payloads: &[([u8; 16], &[u8])],
-    protection: Option<&dyn Protection>,
-    edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
-) -> Result<Vec<u8>> {
-    publish(source, payloads, protection, false, edit)
-}
-
-#[cfg(any(test, feature = "protected"))]
+#[cfg(test)]
 fn publish(
     source: &[u8],
-    payloads: &[([u8; 16], &[u8])],
-    protection: Option<&dyn Protection>,
     validate: bool,
     edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
 ) -> Result<Vec<u8>> {
     // The parsed source is released before the result is parsed.
-    let output = build(source, payloads, protection, validate, edit)?;
+    let output = build(source, validate, edit)?;
     check(&output, validate)?;
     Ok(output)
 }
@@ -1332,11 +1311,9 @@ pub(crate) fn check(output: &[u8], validate: bool) -> Result<()> {
 
 /// The written image, unchecked: `check` follows once the caller has released whatever
 /// `edit` borrowed.
-#[cfg(any(test, feature = "protected"))]
+#[cfg(test)]
 fn build(
     source: &[u8],
-    payloads: &[([u8; 16], &[u8])],
-    protection: Option<&dyn Protection>,
     validate: bool,
     edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
 ) -> Result<Vec<u8>> {
@@ -1345,10 +1322,7 @@ fn build(
     if validate {
         index.validate_current()?;
     }
-    applied(
-        source,
-        build_on(&index, payloads, protection, edit)?.as_ref(),
-    )
+    applied(source, build_on(&index, &[], edit)?.as_ref())
 }
 
 /// `write_revision` on a source the caller has parsed and validated.
@@ -1360,7 +1334,7 @@ pub(crate) fn write_revision_on(
 ) -> Result<Vec<u8>> {
     let output = applied(
         index.store.data,
-        build_on(index, &[], None, update(space, edit))?.as_ref(),
+        build_on(index, &[], update(space, edit))?.as_ref(),
     )?;
     check(&output, true)?;
     Ok(output)
@@ -1377,7 +1351,6 @@ thread_local! {
 pub(crate) fn build_on(
     index: &RevisionIndex<'_>,
     payloads: &[([u8; 16], &[u8])],
-    protection: Option<&dyn Protection>,
     edit: impl FnOnce(&RevisionIndex<'_>) -> Result<BTreeMap<ExGuid, RevisionEdit>>,
 ) -> Result<Option<crate::Transaction>> {
     #[cfg(test)]
@@ -1391,10 +1364,6 @@ pub(crate) fn build_on(
             message: "Cannot write a file with transaction checksum damage",
         });
     }
-    let resolve = |space, rid| match protection {
-        Some(protection) => protection.resolve(space, rid),
-        None => index.resolve(space, rid),
-    };
     let changes = edit(index)?;
     let mut appending = Appending::new(store.state()?);
     for (space, change) in changes {
@@ -1402,9 +1371,15 @@ pub(crate) fn build_on(
         let (rid, label, revision, replacements, new_space) = match change {
             RevisionEdit::Update(objects) => {
                 let rid = index.active(space)?;
-                (Some(rid), current, resolve(space, rid)?, objects, false)
+                (
+                    Some(rid),
+                    current,
+                    index.resolve(space, rid)?,
+                    objects,
+                    false,
+                )
             }
-            #[cfg(any(test, feature = "protected"))]
+            #[cfg(test)]
             RevisionEdit::Create { roots, objects } => {
                 if !is_section || space.guid == [0; 16] || index.spaces.contains_key(&space) {
                     return Err(Error {
@@ -1427,30 +1402,6 @@ pub(crate) fn build_on(
                     },
                     objects,
                     true,
-                )
-            }
-            #[cfg(feature = "protected")]
-            RevisionEdit::Label {
-                context,
-                role,
-                roots,
-                objects,
-            } => {
-                if !is_section || role > 0xffff || !index.spaces.contains_key(&space) {
-                    return Err(Error {
-                        offset: 0,
-                        message: "Choose a label in a section's object space",
-                    });
-                }
-                (
-                    None,
-                    (context, role),
-                    crate::ResolvedRevision {
-                        roots,
-                        objects: BTreeMap::new(),
-                    },
-                    objects,
-                    false,
                 )
             }
         };
@@ -1478,25 +1429,6 @@ pub(crate) fn build_on(
                 })
                 .collect::<Result<Vec<_>>>()?,
         )?;
-        // A dependent revision inherits its key, as OneNote writes it.
-        let key = if protection.is_some() && commit.checkpoint {
-            Some(
-                index
-                    .spaces
-                    .get(&space)
-                    .and_then(|space| {
-                        space.revisions.values().find_map(|revision| {
-                            revision.nodes.first().filter(|node| node.id == 0x7c)
-                        })
-                    })
-                    .ok_or(Error {
-                        offset: 0,
-                        message: "Protected revisions continue a protected object space",
-                    })?,
-            )
-        } else {
-            None
-        };
         appending.revision(
             &Sealing {
                 space,
@@ -1510,11 +1442,10 @@ pub(crate) fn build_on(
                 created: &created,
             },
             &[(0, source)],
-            protection,
-            key,
+            None,
         )?;
     }
-    appending.payloads(payloads, protection)?;
+    appending.payloads(payloads, None)?;
     Ok(appending.finish()?.map(|(transaction, _)| transaction))
 }
 
@@ -1528,7 +1459,6 @@ pub(crate) fn applied(source: &[u8], transaction: Option<&crate::Transaction>) -
 }
 
 /// Payload identities the file-data store of `store` declares, in order.
-#[cfg(any(test, feature = "protected"))]
 pub(crate) fn declared_payloads(store: &Store<'_>) -> Vec<[u8; 16]> {
     store
         .lists
@@ -1541,13 +1471,12 @@ pub(crate) fn declared_payloads(store: &Store<'_>) -> Vec<[u8; 16]> {
 
 /// Writes the live objects of each `edited` revision that differ from its space's active
 /// revision in the validated `source` as one revision per space, embedding the `payloads`
-/// it lacks. A protected `source` takes the revisions its plaintext twin gained.
-#[cfg(any(test, feature = "protected"))]
+/// it lacks.
+#[cfg(test)]
 pub(crate) fn squash(
     source: &RevisionIndex<'_>,
     edited: &[(ExGuid, &crate::ResolvedRevision<'_>)],
     payloads: &[([u8; 16], &[u8])],
-    protection: Option<&dyn Protection>,
 ) -> Result<Option<crate::Transaction>> {
     let existing = declared_payloads(source.store);
     let payloads: Vec<_> = payloads
@@ -1555,13 +1484,10 @@ pub(crate) fn squash(
         .filter(|(guid, _)| !existing.contains(guid))
         .copied()
         .collect();
-    build_on(source, &payloads, protection, |index| {
+    build_on(source, &payloads, |index| {
         let mut changes = BTreeMap::new();
         for (space, after) in edited {
-            let before = match protection {
-                Some(protection) => protection.resolve(*space, index.active(*space)?)?,
-                None => index.resolve_active(*space)?,
-            };
+            let before = index.resolve_active(*space)?;
             if before.roots != after.roots {
                 return Err(Error {
                     offset: 0,
@@ -1588,6 +1514,111 @@ pub(crate) fn squash(
         }
         Ok(changes)
     })
+}
+
+/// A whole revision for `rewrite`, with the labels it is current under.
+pub(crate) struct Labelled<'a> {
+    pub labels: Vec<(ExGuid, u32)>,
+    pub revision: crate::ResolvedRevision<'a>,
+}
+
+/// `skeleton` (`create::skeleton`) with `spaces` appended, each revision a checkpoint under
+/// its labels, and `payloads`, all stored under `key` when one is given.
+pub(crate) fn rewrite(
+    skeleton: Vec<u8>,
+    spaces: &[(ExGuid, Vec<Labelled<'_>>)],
+    payloads: &[([u8; 16], &[u8])],
+    key: Option<&crate::protected::Key>,
+) -> Result<Vec<u8>> {
+    let store = Store::parse(&skeleton)?;
+    let state = store.state()?;
+    let declared: BTreeSet<ExGuid> = state.spaces.keys().copied().collect();
+    let mut appending = Appending::new(state);
+    let opened = key
+        .map(|key| -> Result<_> {
+            let mut container = 0xfb6ba385dad1a067_u64.to_le_bytes().to_vec();
+            container.extend_from_slice(key.metadata());
+            container.extend_from_slice(&0x2649294f8e198b3c_u64.to_le_bytes());
+            Ok(crate::protected::Opened::sealing(
+                key,
+                appending.append(&container)?,
+            ))
+        })
+        .transpose()?;
+    let protection = opened.as_ref().map(|opened| opened as &dyn Protection);
+    for (space, revisions) in spaces {
+        let new = !declared.contains(space);
+        let mut manifest = Vec::new();
+        let mut labels = Vec::new();
+        for (
+            index,
+            Labelled {
+                labels: names,
+                revision,
+            },
+        ) in revisions.iter().enumerate()
+        {
+            let mut live = LiveRevision::new(
+                crate::ResolvedRevision {
+                    roots: revision.roots.clone(),
+                    objects: BTreeMap::new(),
+                },
+                0,
+            )?;
+            let commit = live.commit(
+                revision
+                    .objects
+                    .iter()
+                    .map(|(id, object)| {
+                        let mut object = object.clone();
+                        object.reference_count = 0;
+                        (*id, object)
+                    })
+                    .collect(),
+            )?;
+            let all: BTreeSet<ExGuid> = live.revision.objects.keys().copied().collect();
+            let (first, others) = names.split_first().ok_or(Error {
+                offset: 0,
+                message: "A rewritten revision needs a label",
+            })?;
+            let (rid, _) = appending.manifest(
+                &Sealing {
+                    space: *space,
+                    previous: None,
+                    new_space: new && index == 0,
+                    label: *first,
+                    rid: None,
+                    live: &live,
+                    commit: &commit,
+                    replaced: &all,
+                    created: &all,
+                },
+                &[],
+                protection,
+                &mut manifest,
+            )?;
+            for (context, role) in others {
+                let mut payload = Vec::new();
+                rid.encode(&mut payload);
+                payload.extend_from_slice(&role.to_le_bytes());
+                let id = if *context == ExGuid::default() {
+                    0x5c
+                } else {
+                    context.encode(&mut payload);
+                    0x5d
+                };
+                labels.push(node(id, None, &payload)?);
+            }
+        }
+        manifest.extend(labels);
+        appending.close(*space, new, &manifest)?;
+    }
+    appending.payloads(payloads, protection)?;
+    let (transaction, _) = appending.finish()?.ok_or(Error {
+        offset: 0,
+        message: "A rewritten section holds nothing",
+    })?;
+    applied(&skeleton, Some(&transaction))
 }
 
 /// A space's revision as `LiveRevision::commit` left it, ready to append.
@@ -1664,7 +1695,7 @@ impl Appending {
         self.base.length + self.append.len() as u64
     }
 
-    fn append(&mut self, bytes: &[u8]) -> Result<Chunk> {
+    pub(crate) fn append(&mut self, bytes: &[u8]) -> Result<Chunk> {
         let length = u64::from(u32::try_from(bytes.len()).map_err(|_| Error {
             offset: 0,
             message: "Chunk exceeds the encoded length limit",
@@ -1743,10 +1774,9 @@ impl Appending {
         sealing: &Sealing<'_, '_>,
         segments: &[(u64, &[u8])],
         protection: Option<&dyn Protection>,
-        key: Option<&crate::Node<'_>>,
     ) -> Result<(ExGuid, Vec<(ExGuid, Chunk)>)> {
         let mut manifest = Vec::new();
-        let written = self.manifest(sealing, segments, protection, key, &mut manifest)?;
+        let written = self.manifest(sealing, segments, protection, &mut manifest)?;
         self.close(sealing.space, sealing.new_space, &manifest)?;
         Ok(written)
     }
@@ -1759,7 +1789,6 @@ impl Appending {
         sealing: &Sealing<'_, '_>,
         segments: &[(u64, &[u8])],
         protection: Option<&dyn Protection>,
-        key: Option<&crate::Node<'_>>,
         manifest: &mut Vec<Vec<u8>>,
     ) -> Result<(ExGuid, Vec<(ExGuid, Chunk)>)> {
         let is_section = self.state.file_type == FileType::Section;
@@ -1863,12 +1892,14 @@ impl Appending {
             None,
             &start,
         )?);
-        if protection.is_some() && checkpoint {
-            let key = key.ok_or(Error {
-                offset: 0,
-                message: "Protected revisions continue a protected object space",
-            })?;
-            manifest.push(node(0x7c, key.reference, key.payload)?);
+        // MS-ONESTORE 2.5.19 has every revision of a protected space name its key; OneNote
+        // names it only in revisions without a dependency, and reads either.
+        if let Some(protection) = protection {
+            manifest.push(node(
+                0x7c,
+                Some(Reference::Data(protection.metadata())),
+                &[],
+            )?);
         }
         let mut stored = Vec::new();
         for (table, objects) in groups {
@@ -2084,7 +2115,9 @@ impl Appending {
                 0xe7, 0x16, 0xe3, 0xbd, 0x65, 0x26, 0x11, 0x45, 0xa4, 0xc4, 0x8d, 0x4d, 0x0b, 0x7a,
                 0x9e, 0xac,
             ];
-            let sealed = protection.map(|protection| protection.seal_file(payload));
+            let sealed = protection
+                .map(|protection| protection.seal_file(payload))
+                .transpose()?;
             let payload = sealed.as_deref().unwrap_or(*payload);
             blob.extend_from_slice(&(payload.len() as u64).to_le_bytes());
             blob.extend_from_slice(&[0; 12]);
@@ -2279,6 +2312,7 @@ pub(crate) struct Written<'r, 'a> {
 /// object parses, names identities its group's table holds and objects reachable after its
 /// revision, carries its incremental reference count and, if read-only, its MD5; roots stay
 /// unless a space is new. Validates nothing the transaction leaves as it was.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn check_transaction(
     before: &StoreState,
     after: &StoreState,
@@ -2287,8 +2321,10 @@ pub(crate) fn check_transaction(
     revisions: &[Written<'_, '_>],
     labels: &[(ExGuid, ExGuid, ExGuid)],
     payloads: &[([u8; 16], &[u8])],
+    protection: Option<&dyn Protection>,
 ) -> Result<()> {
     let wrong = |message| Error { offset: 0, message };
+    let encoding: [u8; 2] = if protection.is_some() { [2, 0] } else { [0, 0] };
     let base = transaction.base.length;
     // A chunk's bytes with this transaction's writes: nothing read here is patched earlier.
     let read = |chunk: Chunk| -> Result<Vec<u8>> {
@@ -2449,12 +2485,19 @@ pub(crate) fn check_transaction(
                 || c.exguid()? != rid
                 || c.exguid()? != dependency
                 || c.read::<4>()? != label.1.to_le_bytes()
-                || c.read::<2>()? != [0, 0]
+                || c.read::<2>()? != encoding
                 || (contextual && c.exguid()? != label.0)
             {
                 return Err(wrong(
                     "A revision starts with the wrong identity, dependency or label",
                 ));
+            }
+            if let Some(protection) = protection {
+                let node = next()?;
+                if node.id != 0x7c || node.reference != Some(Reference::Data(protection.metadata()))
+                {
+                    return Err(wrong("A protected revision does not name its key"));
+                }
             }
             let mut declared = BTreeSet::new();
             let mut roots = BTreeMap::new();
@@ -2513,10 +2556,14 @@ pub(crate) fn check_transaction(
                                         return Err(wrong("An object declaration lacks its data"));
                                     };
                                     let data = read(at)?;
+                                    let clear = match protection {
+                                        Some(protection) => protection.open_property(&data)?,
+                                        None => zeroize::Zeroizing::new(data.clone()),
+                                    };
                                     let stored = crate::Object {
                                         jcid,
                                         reference_count: count,
-                                        data: ObjectData::Properties(&data),
+                                        data: ObjectData::Properties(&clear),
                                         global_ids: Arc::new(table.clone()),
                                     };
                                     let references = stored.references()?;
@@ -2525,11 +2572,14 @@ pub(crate) fn check_transaction(
                                             !references.object_spaces.is_empty()
                                                 || !references.contexts.is_empty(),
                                         ) << 1);
-                                    if object.data != ObjectData::Properties(&data)
+                                    let hash = match protection {
+                                        Some(_) => crate::protected::digest(&clear),
+                                        None => md5::compute(&data).0,
+                                    };
+                                    if object.data != ObjectData::Properties(&clear)
                                         || flags != Some(expected)
                                         || (item.id == 0xc5) != (jcid & 0x100000 != 0)
-                                        || (item.id == 0xc5
-                                            && c.read::<16>()? != md5::compute(&data).0)
+                                        || (item.id == 0xc5 && c.read::<16>()? != hash)
                                     {
                                         return Err(wrong(
                                             "An object's stored bytes differ from its revision",
@@ -2640,8 +2690,12 @@ pub(crate) fn check_transaction(
                 return Err(wrong("A payload declaration lacks its data"));
             };
             let data = read(at)?;
-            let blob = crate::files::payload(&data, at.offset as usize);
-            if node.id != 0x94 || node.payload != guid || blob.ok() != Some(*payload) {
+            let blob = crate::files::payload(&data, at.offset as usize)?;
+            let blob = match protection {
+                Some(protection) => protection.open_file(blob)?,
+                None => zeroize::Zeroizing::new(blob.to_vec()),
+            };
+            if node.id != 0x94 || node.payload != guid || blob.as_slice() != *payload {
                 return Err(wrong("An embedded payload differs from its declaration"));
             }
         }

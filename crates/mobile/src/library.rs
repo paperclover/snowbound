@@ -2,7 +2,7 @@
 //! SMB share through the embedded client. A section opens through its replica in the app's
 //! cache, which stores each edit at once and publishes it in the background.
 
-use crate::{Result, owned, report, string};
+use crate::{Result, owned, report, srgb, string};
 use canvas::search::{Entry, Index, Query, Tagged};
 use notebook::{
     Remote, Replica,
@@ -14,6 +14,7 @@ use onestore::{
     CommitError, CommitState, ExGuid, PageCreation, PageEdit, Stamp, Transaction,
     op::{Edit, Op, SectionOp},
     page::Page,
+    protected::Key,
 };
 use std::{
     collections::{BTreeMap, HashMap},
@@ -249,6 +250,15 @@ pub(crate) fn files(folder: &Folder, files: &mut BTreeMap<String, String>) {
     }
 }
 
+/// Catalog `path` from the top of the share holding a notebook at `root`.
+pub(crate) fn on_share(root: &str, path: &str) -> String {
+    if root.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{root}/{path}")
+    }
+}
+
 /// When a section's file was last checked for changes, and how it was then.
 struct Checked {
     at: Instant,
@@ -267,6 +277,8 @@ pub struct Library {
     open: Mutex<Vec<(String, Weak<Shared>)>>,
     /// Work Offline, which sections opened later follow too.
     offline: AtomicBool,
+    /// Keys of the protected sections unlocked this run, by catalog path; in memory only.
+    keys: Mutex<HashMap<String, Key>>,
     /// How long edits wait for a pause in typing before they publish (`Section::set_pause`):
     /// a file provider such as iCloud Drive uploads each publication, and makes one concurrent
     /// with another device's a conflict version.
@@ -285,8 +297,12 @@ pub(crate) struct Tab {
     pub(crate) group: String,
     /// The tab colour in sRGB.
     pub(crate) color: [u8; 3],
-    /// Password-protected or unreadable sections list but do not open.
+    /// Password-protected or unreadable sections list but do not open; a protected one opens
+    /// once unlocked.
     pub(crate) readable: bool,
+    /// Password protected and not unlocked (`sb_library_unlock`).
+    #[serde(default)]
+    pub(crate) locked: bool,
     /// Not on this device yet, as iCloud Drive keeps it elsewhere; the host downloads it.
     #[serde(default)]
     pub(crate) downloading: bool,
@@ -295,9 +311,9 @@ pub(crate) struct Tab {
     pub(crate) problem: Option<String>,
 }
 
-fn rgb(colorref: u32) -> [u8; 3] {
-    let [red, green, blue, _] = colorref.to_le_bytes();
-    [red, green, blue]
+/// Titles keep OneNote's line breaks, which a one-line list shows as spaces.
+fn one_line(title: &str) -> String {
+    title.replace(|char: char| char.is_control(), " ")
 }
 
 fn stem(path: &str) -> String {
@@ -309,18 +325,21 @@ fn stem(path: &str) -> String {
 
 /// A folder's sections, its groups' after them, leaving out the recycle bin OneNote keeps
 /// deleted sections and pages in.
-fn tabs(folder: &Folder, tabs: &mut Vec<Tab>) {
+fn tabs(folder: &Folder, unlocked: &HashMap<String, Key>, tabs: &mut Vec<Tab>) {
     for section in &folder.sections {
         let (name, color, readable) = match &section.state {
             SectionState::Readable { name, color, .. } => (name.clone(), *color, true),
-            SectionState::Locked | SectionState::Unreadable(_) => (None, None, false),
+            SectionState::Locked => (None, None, unlocked.contains_key(&section.path)),
+            SectionState::Unreadable(_) => (None, None, false),
         };
+        let locked = matches!(section.state, SectionState::Locked) && !readable;
         tabs.push(Tab {
             name: name.unwrap_or_else(|| stem(&section.path)),
             path: section.path.clone(),
             group: folder.path.clone(),
-            color: rgb(color.unwrap_or(SECTION_COLOR)),
+            color: srgb(color.unwrap_or(SECTION_COLOR)),
             readable,
+            locked,
             downloading: false,
             problem: None,
         });
@@ -330,8 +349,9 @@ fn tabs(folder: &Folder, tabs: &mut Vec<Tab>) {
             name: stem(&entry.path),
             path: entry.path.clone(),
             group: folder.path.clone(),
-            color: rgb(SECTION_COLOR),
+            color: srgb(SECTION_COLOR),
             readable: false,
+            locked: false,
             downloading: entry.reason == Reason::Evicted,
             problem: match entry.reason {
                 Reason::InUse => Some("Section in use".into()),
@@ -342,7 +362,7 @@ fn tabs(folder: &Folder, tabs: &mut Vec<Tab>) {
     }
     for group in &folder.groups {
         if !group.path.ends_with("OneNote_RecycleBin") {
-            self::tabs(group, tabs);
+            self::tabs(group, unlocked, tabs);
         }
     }
 }
@@ -377,6 +397,7 @@ impl Library {
             background,
             open: Mutex::default(),
             offline: AtomicBool::new(false),
+            keys: Default::default(),
             pause: if local { Duration::ZERO } else { PAUSE },
         })
     }
@@ -399,6 +420,7 @@ impl Library {
             background: Some(background),
             open: Mutex::default(),
             offline: AtomicBool::new(false),
+            keys: Default::default(),
             pause: Duration::ZERO,
         };
         let reached = library.with_notebook(false, |_| Ok(()));
@@ -501,6 +523,24 @@ impl Library {
         change(reopened)
     }
 
+    fn unlocked(&self) -> std::sync::MutexGuard<'_, HashMap<String, Key>> {
+        self.keys.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
+    /// Unlocks the protected section at catalog `path` with `password`; whether it matched.
+    pub(crate) fn unlock(&self, path: &str, password: &str) -> Result<bool> {
+        let key = self.with_notebook(false, |notebook| match notebook.unlock(path, password) {
+            Ok(key) => Ok(Some(key)),
+            Err(notebook::Error::Protected(_)) => Ok(None),
+            Err(error) => Err(error.into()),
+        })?;
+        let unlocked = key.is_some();
+        if let Some(key) = key {
+            self.unlocked().insert(path.to_owned(), key);
+        }
+        Ok(unlocked)
+    }
+
     /// The notebook's sections, read again.
     pub(crate) fn tabs(&self) -> Result<Vec<Tab>> {
         if let Place::File(file) = &self.place {
@@ -509,8 +549,9 @@ impl Library {
                 name: stem(&path),
                 path,
                 group: String::new(),
-                color: rgb(SECTION_COLOR),
+                color: srgb(SECTION_COLOR),
                 readable: true,
+                locked: false,
                 downloading: false,
                 problem: None,
             }]);
@@ -521,7 +562,7 @@ impl Library {
                 tabs: Vec::new(),
                 files: BTreeMap::new(),
             };
-            tabs(notebook.catalog(), &mut listed.tabs);
+            tabs(notebook.catalog(), &self.unlocked(), &mut listed.tabs);
             files(notebook.catalog(), &mut listed.files);
             if let (Place::Folder(_), Some(background)) = (&self.place, &self.background) {
                 background.watch(notebook.replicas());
@@ -586,25 +627,36 @@ impl Library {
                 |file| Ok(Coordinated(file.to_owned())),
                 notify,
             )?),
-            Place::Folder(_) => Ok(self
-                .notebook()
-                .as_ref()
-                .ok_or("A lone section has no notebook")?
-                .section_with(path, |file| Ok(Coordinated(file.to_owned())), notify)?),
+            Place::Folder(_) => {
+                let notebook = self.notebook();
+                let notebook = notebook.as_ref().ok_or("A lone section has no notebook")?;
+                let connect = |file: &Path| Ok(Coordinated(file.to_owned()));
+                Ok(match self.unlocked().get(path) {
+                    Some(key) => notebook.section_unlocked_with(path, key, connect, notify)?,
+                    None => notebook.section_with(path, connect, notify)?,
+                })
+            }
             Place::Share { server, root, .. } => {
-                let file = if root.is_empty() {
-                    path.to_owned()
-                } else {
-                    format!("{root}/{path}")
+                let file = on_share(root, path);
+                let key = self.unlocked().get(path).cloned();
+                // A protected section's replica is named by the identity its file holds.
+                let cache = match &key {
+                    Some(_) => self
+                        .notebook()
+                        .as_ref()
+                        .ok_or("The notebook hasn’t been read")?
+                        .replica_path(path)?,
+                    None => {
+                        let identity = self
+                            .listed()
+                            .and_then(|mut listed| listed.files.remove(path))
+                            .ok_or("The notebook hasn’t listed this section")?;
+                        let replicas = self.share_replicas().ok_or("Not a share")?;
+                        replicas.join(format!("{identity}.sqlite"))
+                    }
                 };
-                let identity = self
-                    .listed()
-                    .and_then(|mut listed| listed.files.remove(path))
-                    .ok_or("The notebook hasn’t listed this section")?;
-                let replicas = self.share_replicas().ok_or("Not a share")?;
-                let cache = replicas.join(format!("{identity}.sqlite"));
-                std::fs::create_dir_all(&replicas)?;
-                let replica = Replica::open_or_create(&cache, || {
+                std::fs::create_dir_all(cache.parent().ok_or("No cache")?)?;
+                let replica = Replica::open_or_create(&cache, key.as_ref(), || {
                     let client = self.client().ok_or_else(|| {
                         std::io::Error::new(
                             std::io::ErrorKind::NotConnected,
@@ -642,13 +694,20 @@ pub(crate) enum Status {
 pub(crate) struct Shared {
     pub section: session::Section,
     /// Who the edits name, as OneNote names the Office user.
-    pub author: String,
+    pub author: Mutex<String>,
     pub status: AtomicU8,
 }
 
 impl Shared {
+    pub fn author(&self) -> String {
+        self.author
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
     pub fn apply(&self, edit: Edit) -> Result<()> {
-        self.section.apply(&self.author, edit)?;
+        self.section.apply(&self.author(), edit)?;
         self.status.store(Status::Saving as u8, Ordering::Relaxed);
         Ok(())
     }
@@ -694,7 +753,7 @@ pub(crate) struct Version {
     pub(crate) created: Option<i64>,
 }
 
-fn unix(filetime: u64) -> i64 {
+pub(crate) fn unix(filetime: u64) -> i64 {
     (filetime / 10_000_000) as i64 - 11_644_473_600
 }
 
@@ -709,7 +768,7 @@ pub(crate) fn filetime() -> u64 {
 /// A page OneNote 2010 would create now, titled `date` and `time` as the host formats
 /// them: the long date and the short time; titled in the Default font's face.
 fn dated(author: &str, date: &str, time: &str) -> Result<PageCreation> {
-    let font = crate::options().1;
+    let font = crate::options().1.clone();
     Ok(PageCreation::new(None, Some(""), author)?
         .titled_in(&font.face, font.color)?
         .dated(date, time)?)
@@ -718,12 +777,8 @@ fn dated(author: &str, date: &str, time: &str) -> Result<PageCreation> {
 impl Section {
     /// The notebook's themes; none for a lone section.
     pub(crate) fn themes(&self) -> notebook::sidecar::themes::Themes {
-        let notebook = self
-            .library
-            .notebook
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        notebook
+        self.library
+            .notebook()
             .as_ref()
             .and_then(|notebook| crate::report(notebook.themes().map_err(Into::into)))
             .unwrap_or_default()
@@ -731,12 +786,8 @@ impl Section {
 
     /// Merges `change` into the notebook's themes.
     pub(crate) fn save_themes(&self, change: notebook::sidecar::themes::Themes) -> Result<()> {
-        let notebook = self
-            .library
-            .notebook
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        notebook
+        self.library
+            .notebook()
             .as_ref()
             .ok_or("A section on its own keeps no themes")?
             .save_themes(change)?;
@@ -772,7 +823,7 @@ impl Section {
     ) -> Result<Self> {
         let shared = Arc::new(Shared {
             section: library.section(path, notify)?,
-            author,
+            author: Mutex::new(author),
             status: AtomicU8::new(0),
         });
         let mut open = library
@@ -792,8 +843,7 @@ impl Section {
             .into_iter()
             .map(|(space, title, level)| Row {
                 id: space.to_string(),
-                // Titles keep OneNote's line breaks, which a one-line list shows as spaces.
-                title: title.replace(|char: char| char.is_control(), " "),
+                title: one_line(&title),
                 level,
                 versions: conflicts
                     .iter()
@@ -821,7 +871,7 @@ impl Section {
         date: &str,
         time: &str,
     ) -> Result<ExGuid> {
-        let creation = dated(&self.shared.author, date, time)?;
+        let creation = dated(&self.shared.author(), date, time)?;
         let space = creation.space();
         let mut ops = vec![Op::Section(SectionOp::Create(creation))];
         if let Some(parent) = parent {
@@ -857,14 +907,14 @@ impl Section {
         if listed.iter().any(|(page, ..)| *page == space) {
             if self.library.notebook().is_some() {
                 let page = section.page(space)?;
-                let author = &self.shared.author;
+                let author = self.shared.author();
                 self.library.with_notebook(true, |notebook| {
-                    Ok(notebook.recycle_pages(std::slice::from_ref(&page), author)?)
+                    Ok(notebook.recycle_pages(std::slice::from_ref(&page), &author)?)
                 })?;
             }
             if listed.len() == 1 {
                 ops.push(Op::Section(SectionOp::Create(dated(
-                    &self.shared.author,
+                    &self.shared.author(),
                     date,
                     time,
                 )?)));
@@ -958,7 +1008,7 @@ impl Library {
                 .map(|found| Found {
                     section: found.section,
                     page: found.space.to_string(),
-                    title: found.title.replace(|char: char| char.is_control(), " "),
+                    title: one_line(&found.title),
                     snippet: found.snippet,
                 })
                 .collect()
@@ -975,7 +1025,7 @@ impl Library {
                 .map(|tagged: Tagged| Tag {
                     section: tagged.section,
                     page: tagged.space.to_string(),
-                    title: tagged.title.replace(|char: char| char.is_control(), " "),
+                    title: one_line(&tagged.title),
                     paragraph: tagged.paragraph.to_string(),
                     name: tagged.name,
                     shape: tagged.shape,
@@ -1169,11 +1219,7 @@ impl Library {
         let (stamp, read): (Vec<u8>, Reader) = match &self.place {
             Place::Share { root, .. } => {
                 let client = self.client().ok_or("Not a share")?;
-                let file = if root.is_empty() {
-                    path.to_owned()
-                } else {
-                    format!("{root}/{path}")
-                };
+                let file = on_share(root, path);
                 let stamp = client.stamp(&file)?;
                 let mut key = stamp.header.to_vec();
                 key.extend(stamp.length.to_le_bytes());
@@ -1240,6 +1286,16 @@ fn boxed<T>(result: Result<T>, error: *mut *mut c_char) -> *mut T {
     }
 }
 
+fn shared(result: Result<Library>, error: *mut *mut c_char) -> *const Library {
+    match result {
+        Ok(library) => Arc::into_raw(Arc::new(library)),
+        Err(cause) => {
+            failed(cause, error);
+            std::ptr::null()
+        }
+    }
+}
+
 pub(crate) fn json(value: Result<impl serde::Serialize>) -> *mut c_char {
     report(value.and_then(|value| Ok(serde_json::to_string(&value)?)))
         .map_or(std::ptr::null_mut(), owned)
@@ -1247,10 +1303,6 @@ pub(crate) fn json(value: Result<impl serde::Serialize>) -> *mut c_char {
 
 pub(crate) fn optional(text: *const c_char) -> Option<String> {
     (!text.is_null()).then(|| string(text))
-}
-
-fn space(text: *const c_char) -> Result<ExGuid> {
-    Ok(string(text).parse()?)
 }
 
 /// The notebook folder or lone section file at `path`, its section replicas kept in the
@@ -1267,13 +1319,10 @@ pub unsafe extern "C" fn sb_library_open(
     local: bool,
     error: *mut *mut c_char,
 ) -> *const Library {
-    match Library::open(Path::new(&string(path)), Path::new(&string(cache)), local) {
-        Ok(library) => Arc::into_raw(Arc::new(library)),
-        Err(cause) => {
-            failed(cause, error);
-            std::ptr::null()
-        }
-    }
+    shared(
+        Library::open(Path::new(&string(path)), Path::new(&string(cache)), local),
+        error,
+    )
 }
 
 /// The notebook folder `root`, `/`-separated from the top of `share` on the server at
@@ -1295,13 +1344,10 @@ pub unsafe extern "C" fn sb_library_server(
     error: *mut *mut c_char,
 ) -> *const Library {
     let server = server(address, share, user, password, domain);
-    match Library::server(server, &string(root), Path::new(&string(cache))) {
-        Ok(library) => Arc::into_raw(Arc::new(library)),
-        Err(cause) => {
-            failed(cause, error);
-            std::ptr::null()
-        }
-    }
+    shared(
+        Library::server(server, &string(root), Path::new(&string(cache))),
+        error,
+    )
 }
 
 /// Creates the notebook folder `path` holding one section with one page titled with `date`
@@ -1419,9 +1465,32 @@ pub unsafe extern "C" fn sb_library_tagged(
     json(library.tagged(open.map(|section| (path.as_str(), section))))
 }
 
-/// Each section's sync status as JSON, in the notebook's order: `path`, `state` (0 up to
-/// date, 1 syncing, 2 in use elsewhere, 3 not connected, 4 read-only, 5 failed), `synced`
-/// (seconds since 1970, or null before the file was reached), `queued` changes and `error`.
+/// Unlocks the password-protected section at catalog `path` with `password`, as OneNote's
+/// Protected Section dialog does; false for a wrong password. The key stays in memory until
+/// `sb_library_lock_all`.
+///
+/// # Safety
+/// `path` and `password` are NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_library_unlock(
+    library: &Library,
+    path: *const c_char,
+    password: *const c_char,
+) -> bool {
+    let password = zeroize::Zeroizing::new(string(password));
+    report(library.unlock(&string(path), &password)).unwrap_or(false)
+}
+
+/// Locks every protected section of the notebook, forgetting their keys: they open again only
+/// once unlocked.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_library_lock_all(library: &Library) {
+    library.unlocked().clear();
+}
+
+/// Each section's sync status as JSON, in the notebook's order: `path`, `state` (`SyncState`
+/// by its place, best first), `synced` (seconds since 1970, or null before the file was
+/// reached), `queued` changes and `error`.
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_library_sync_status(library: &Library) -> *mut c_char {
     json(Ok(library.sync_status()))
@@ -1735,8 +1804,11 @@ pub unsafe extern "C" fn sb_section_delete_page(
     date: *const c_char,
     time: *const c_char,
 ) -> bool {
-    report(space(id).and_then(|space| section.delete_page(space, &string(date), &string(time))))
-        .is_some()
+    let deleted = string(id)
+        .parse()
+        .map_err(Into::into)
+        .and_then(|space| section.delete_page(space, &string(date), &string(time)));
+    report(deleted).is_some()
 }
 
 /// Waits for every edit to be stored in the cache, then up to `seconds` for them to be
@@ -1744,6 +1816,19 @@ pub unsafe extern "C" fn sb_section_delete_page(
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_section_flush(section: &Section, seconds: f64) -> bool {
     section.flush(Duration::from_secs_f64(seconds))
+}
+
+/// Names `author` in the section's edits from now on, as when the reader changes their name.
+///
+/// # Safety
+/// `author` is NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_section_set_author(section: &Section, author: *const c_char) {
+    *section
+        .shared
+        .author
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = string(author);
 }
 
 /// Asks the section to look for changes made elsewhere now, as when the app returns.

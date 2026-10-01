@@ -1,6 +1,7 @@
 //! Spelling through Enchant, loaded at run time with whichever dictionaries its providers
 //! (Hunspell, Nuspell, Aspell) have. Without Enchant, words go unmarked.
 
+use crate::platform::symbol;
 use canvas::spelling::{Dictionary, pick};
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
@@ -96,12 +97,6 @@ impl Dictionary for Checker {
             unsafe { (enchant.api.add)(*dict, word.as_ptr(), length) };
         }
     }
-}
-
-/// The function `name` in `library`, of C signature `F`.
-unsafe fn symbol<F: Copy>(library: *mut c_void, name: &CStr) -> Option<F> {
-    let symbol = unsafe { libc::dlsym(library, name.as_ptr()) };
-    (!symbol.is_null()).then(|| unsafe { std::mem::transmute_copy::<*mut c_void, F>(&symbol) })
 }
 
 unsafe extern "C" fn describe(

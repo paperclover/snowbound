@@ -7,14 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		5B0000000000000000000101 /* Sample in Resources */ = {isa = PBXBuildFile; fileRef = 5B0000000000000000000201 /* Sample */; };
 		5B0000000000000000000126 /* Snowbound Guide in Resources */ = {isa = PBXBuildFile; fileRef = 5B0000000000000000000226 /* Snowbound Guide */; };
 		5B0000000000000000000102 /* Snowbound-Tahoe.icon in Resources */ = {isa = PBXBuildFile; fileRef = 5B0000000000000000000205 /* Snowbound-Tahoe.icon */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
 		5B0000000000000000000200 /* Snowbound.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Snowbound.app; sourceTree = BUILT_PRODUCTS_DIR; };
-		5B0000000000000000000201 /* Sample */ = {isa = PBXFileReference; lastKnownFileType = folder; name = Sample; path = "../../corpus/m6/native-features-01/notebook"; sourceTree = SOURCE_ROOT; };
 		5B0000000000000000000226 /* Snowbound Guide */ = {isa = PBXFileReference; lastKnownFileType = folder; name = "Snowbound Guide"; path = "../../docs/guide-notebook/Snowbound Guide"; sourceTree = SOURCE_ROOT; };
 		5B0000000000000000000202 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		5B0000000000000000000203 /* Snowbound-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Snowbound-Bridging-Header.h"; sourceTree = "<group>"; };
@@ -45,7 +43,6 @@
 			isa = PBXGroup;
 			children = (
 				5B0000000000000000000300 /* Snowbound */,
-				5B0000000000000000000201 /* Sample */,
 				5B0000000000000000000226 /* Snowbound Guide */,
 				5B0000000000000000000205 /* Snowbound-Tahoe.icon */,
 				5B0000000000000000000202 /* Info.plist */,
@@ -126,7 +123,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				5B0000000000000000000101 /* Sample in Resources */,
 				5B0000000000000000000126 /* Snowbound Guide in Resources */,
 				5B0000000000000000000102 /* Snowbound-Tahoe.icon in Resources */,
 			);

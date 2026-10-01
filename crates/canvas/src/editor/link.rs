@@ -3,18 +3,18 @@
 //! typed and ended by a space or Enter becomes a link of its own text, typing after a label
 //! is plain text, and Remove Link leaves the label as plain text.
 
-use super::format::{leaves_mut, restyle, selected};
+use super::format::restyle;
 use super::*;
 
 /// A link in a paragraph, in UTF-16 offsets of its stored text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Link {
-    pub paragraph: usize,
+    pub(crate) paragraph: usize,
     /// The hidden field code naming the address, before the label; none where the label is
     /// its own address.
-    pub code: Option<Range<u32>>,
+    pub(crate) code: Option<Range<u32>>,
     pub label: Range<u32>,
-    pub target: String,
+    pub(crate) target: String,
 }
 
 impl Link {
@@ -193,7 +193,7 @@ impl CanvasEditor {
 
     /// The address of the link drawn under document point `point` of outline `id`, which a
     /// click opens as OneNote's does.
-    pub fn link_under(&self, id: ExGuid, [x, y]: [f32; 2]) -> Option<String> {
+    pub(crate) fn link_under(&self, id: ExGuid, [x, y]: [f32; 2]) -> Option<String> {
         let outline = self.visible_outlines().find(|outline| outline.id == id)?;
         let index = outline.paragraph_at(x, y).ok()?;
         let paragraph = &outline.shaped.paragraphs[index];
@@ -414,7 +414,7 @@ impl CanvasEditor {
     }
 
     /// Select Link: the label of the link at the caret.
-    pub fn select_link(&mut self) -> Result<bool, EditError> {
+    pub(crate) fn select_link(&mut self) -> Result<bool, EditError> {
         let [anchor, focus] = self.active_outline().selection.positions;
         let Some(link) = self.link_at(anchor.min(focus)) else {
             return Ok(false);
@@ -491,25 +491,20 @@ impl CanvasEditor {
         text: Paragraph,
         selection: Selection,
     ) -> Result<(), EditorError> {
-        let document = &self.active_outline().document;
-        let at = TextPosition {
-            paragraph,
-            offset: 0,
-        };
-        let (container, range, [(id, _), _]) = selected(document, [at; 2].into())?;
-        let mut replacement = document.container(container)?[range.clone()].to_vec();
-        leaves_mut(&mut replacement, &mut |node| {
-            if node.id == id {
-                node.text_mut().unwrap().text = text.clone();
-            }
-        });
+        let (container, index, node) = self
+            .active_outline()
+            .document
+            .leaf(paragraph)
+            .ok_or(EditError::InvalidRange)?;
+        let mut node = node.clone();
+        node.text_mut().unwrap().text = text;
         self.commit(
             engine,
             DocumentEdit {
                 columns: BTreeMap::new(),
                 container,
-                range,
-                replacement,
+                range: index..index + 1,
+                replacement: vec![node],
             },
             selection,
         )

@@ -84,6 +84,11 @@ same line heights, same places. That took measuring, not guessing.
   Snap To Grid (the shape gallery's last item, kept between launches) is off. Tags
   sit in a column to the left of the text with OneNote's spacing, and a tag's
   colour paints the whole paragraph as it does there.
+- **A right-to-left page is the same frame, seen from its right.** OneNote 2010
+  keeps its positions left to right like any page's, from a margin origin some
+  10,800 pt out, and opens it scrolled to the right end of its content, keeping
+  that edge as the window resizes. The canvas does the same and stores clicks,
+  strokes and drags as on any page (`corpus/rtl-page`).
 
 These rules were established against OneNote's own output: its XML export
 gives outline sizes, its PDF export gives exact line breaks, and screenshots

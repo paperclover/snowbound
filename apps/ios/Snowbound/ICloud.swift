@@ -78,6 +78,12 @@ enum ICloud {
     /// Looks the folder up off the main thread, as asking iCloud can take a while.
     static func lookUp() {
         background({ () -> URL? in
+            #if DEBUG
+            // A simulator signs into no account; `SNOWBOUND_ICLOUD` names a folder standing in.
+            if let folder = ProcessInfo.processInfo.environment["SNOWBOUND_ICLOUD"] {
+                return URL(fileURLWithPath: folder, isDirectory: true)
+            }
+            #endif
             guard
                 let container = FileManager.default.url(forUbiquityContainerIdentifier: identifier)?
                     .appendingPathComponent("Documents", isDirectory: true)

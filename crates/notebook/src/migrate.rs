@@ -314,6 +314,7 @@ fn convert(transaction: &rusqlite::Transaction<'_>) -> Result<()> {
         }
         queue::insert(
             transaction,
+            None,
             Some(crate::unsigned(edit.id)?),
             current,
             &edit.author,

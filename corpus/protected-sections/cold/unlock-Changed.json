@@ -1,0 +1,13 @@
+{
+  "exit": 0,
+  "stdout": "Gate - Microsoft OneNote",
+  "stderr": "",
+  "w": 800,
+  "h": 600,
+  "error": null,
+  "win": {
+    "title": "Gate - Microsoft OneNote",
+    "class": "Framework::CFrame",
+    "dialog": false
+  }
+}

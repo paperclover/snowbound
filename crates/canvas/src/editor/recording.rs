@@ -259,7 +259,7 @@ const BUTTON: [f32; 2] = [10.5, 24.0];
 
 impl CanvasEditor {
     /// The recording `id` names, in an outline or on the page.
-    pub fn recording_file(&self, id: [u8; 16]) -> Option<&Attachment> {
+    pub(crate) fn recording_file(&self, id: [u8; 16]) -> Option<&Attachment> {
         let named = |file: &&Attachment| file.recording.is_some_and(|r| r.id == id);
         self.objects
             .iter()
@@ -293,7 +293,7 @@ impl CanvasEditor {
     /// The play button OneNote shows for document point `point`: beside the linked note or
     /// the recording level with it, over its outline or in the margin before it. Gives the
     /// button's square, the recording and the moment it plays from.
-    pub fn play_button(&self, point: [f32; 2]) -> Option<([f32; 4], [u8; 16], u32)> {
+    pub(crate) fn play_button(&self, point: [f32; 2]) -> Option<([f32; 4], [u8; 16], u32)> {
         let [x, y] = point;
         let outline = self.visible_outlines().find(|outline| {
             let bounds = outline.bounds();

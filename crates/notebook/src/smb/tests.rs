@@ -463,9 +463,16 @@ fn live_watch() {
 #[ignore = "requires ONESTORE_SMB_LAB pointing to disposable Samba"]
 fn live_storage_inspection() {
     let reader = client();
-    for (index, fixture) in [
-        "native-encrypted/encrypted-01/notebook/synthetic.one",
-        "native-encrypted/cold-encrypted-02/notebook/Open Notebook.one",
+    // Stably unreadable, never contention: a protected section, and a file too damaged to say.
+    for (index, (fixture, unreadable)) in [
+        (
+            "native-encrypted/encrypted-01/notebook/synthetic.one",
+            io::ErrorKind::Unsupported,
+        ),
+        (
+            "native-encrypted/cold-encrypted-02/notebook/Open Notebook.one",
+            io::ErrorKind::InvalidData,
+        ),
     ]
     .into_iter()
     .enumerate()
@@ -482,7 +489,7 @@ fn live_storage_inspection() {
         assert_eq!(reader.read_storage(&path, source.len()).unwrap(), source);
         assert_eq!(
             reader.read(&path, source.len()).unwrap_err().kind(),
-            io::ErrorKind::WouldBlock
+            unreadable
         );
         let maintenance = client();
         let guard = maintenance.open(&path, false).unwrap();
@@ -777,6 +784,42 @@ fn live_structure() {
     assert_eq!(header.ancestor, toc_id);
     assert_eq!(header.name_crc, 0x6108912a);
     assert!(fresh.section("Renamed.one", || {}).is_err());
+    // A password supersedes the file under writer coordination, never over a newer stamp, and
+    // while a reader holds it open, as OneNote's readers share it with deletion.
+    let section = format!("{root}/Renamed.one");
+    let written = format!("{root}/.Renamed.one.snowbound");
+    client.create(&written, &renamed).unwrap();
+    let mut stale = onestore::Stamp::of(&renamed).unwrap();
+    stale.length += 1;
+    let refused = client.supersede(&section, &stale, &written).unwrap_err();
+    assert_eq!(refused.state, CommitState::NotCommitted);
+    assert_eq!(client.read_storage(&section, 1 << 20).unwrap(), renamed);
+    client.delete(&written).unwrap();
+    let mut fresh = fresh;
+    let reader = client.open(&section, false).unwrap();
+    let key = fresh
+        .set_password("Renamed.one", None, Some("secret"))
+        .unwrap()
+        .unwrap();
+    reader.close().unwrap();
+    let protected = client.read_storage(&section, 1 << 20).unwrap();
+    assert_eq!(
+        onestore::protected::Key::open(&protected, "secret")
+            .unwrap()
+            .secret(),
+        key.secret()
+    );
+    assert!(matches!(
+        fresh.catalog().sections[0].state,
+        crate::discover::SectionState::Locked
+    ));
+    let names: Vec<String> = client
+        .read_dir(&root, 100)
+        .unwrap()
+        .into_iter()
+        .map(|entry| entry.name)
+        .collect();
+    assert!(!names.iter().any(|name| name.starts_with('.')), "{names:?}");
     for path in [
         "Renamed.one",
         "Kept/Inner.one",

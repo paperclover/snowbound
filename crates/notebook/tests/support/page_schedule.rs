@@ -5,12 +5,9 @@ use crate::{
 use notebook::{Remote, Replica};
 use onestore::{
     CommitError, ExGuid, PageEdit, RevisionIndex, Stamp, Store, Transaction,
-    document::{Document, Format, Kind, Layout},
+    document::{Document, Kind},
     op::SectionOp,
-    page::{
-        Outline, Page, PageObject, PageParagraph, Paragraph, ParagraphContent, TextObject,
-        text::new_id,
-    },
+    page::{Page, PageObject},
 };
 use std::{io, sync::LazyLock};
 
@@ -54,50 +51,15 @@ fn pages(source: &[u8]) -> Vec<(ExGuid, ExGuid, u32)> {
 /// Adds a body outline holding one plain paragraph, returning its text identity. A page the
 /// section just created has no body text for `model_ops::insert_outline` to copy formatting from.
 pub fn body_outline(page: &mut Page, text: &str) -> ExGuid {
-    // The writer creates outline text with the store's default style; the model must state it.
-    let format = Format {
-        font: Some("Calibri".to_owned()),
-        font_size: Some(11.0),
-        language: Some(0x409),
-        ..Default::default()
-    };
-    let content = TextObject {
-        id: new_id().unwrap(),
-        date_field: None,
-        text: Paragraph::new(text.into(), format),
-        tags: Vec::new(),
-    };
-    let id = content.id;
-    let outline = Outline {
-        id: new_id().unwrap(),
-        title: false,
-        min_width: None,
-        layout: Layout {
-            x: Some(36.0),
-            y: Some(36.0),
-            ..Default::default()
-        },
-        indents: Vec::new(),
-        paragraphs: vec![PageParagraph {
-            id: new_id().unwrap(),
-            parent: None,
-            level: 1,
-            style: None,
-            format: Default::default(),
-            content: ParagraphContent::Text(content),
-            lists: Vec::new(),
-            tags: Vec::new(),
-            media: Default::default(),
-            collapsed: false,
-        }],
-        unsupported: Vec::new(),
-    };
+    let paragraph = ops::paragraph(text);
+    let id = paragraph.text().unwrap().id;
     let at = page
         .objects
         .iter()
         .position(|object| matches!(object, PageObject::Title(_)))
         .unwrap_or(page.objects.len());
-    page.objects.insert(at, PageObject::Outline(outline));
+    page.objects
+        .insert(at, ops::outline(36.0, 36.0, vec![paragraph]));
     id
 }
 

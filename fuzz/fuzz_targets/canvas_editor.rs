@@ -209,37 +209,25 @@ fuzz_target!(|input: &[u8]| {
             .into_iter()
             .enumerate()
             {
-                objects.push(onestore::page::PageObject::Image(onestore::page::Image {
-                    id: onestore::ExGuid {
-                        n: index.try_into().unwrap(),
-                        ..Default::default()
-                    },
-                    layout: onestore::document::Layout {
-                        x: Some(x),
-                        y: Some(position[1] + y),
-                        max_width: Some(72.0),
-                        max_height: Some(40.0),
-                        ..Default::default()
-                    },
-                    bytes: Some(std::sync::Arc::from(&b"deferred decoding"[..])),
-                    background,
-                    alt: None,
-                    size: None,
-                }));
+                let mut image =
+                    canvas::editor::picture(b"deferred decoding".to_vec(), [72.0, 40.0]).unwrap();
+                image.id = onestore::ExGuid {
+                    n: index.try_into().unwrap(),
+                    ..Default::default()
+                };
+                [image.layout.x, image.layout.y] = [Some(x), Some(position[1] + y)];
+                image.background = background;
+                objects.push(onestore::page::PageObject::Image(image));
             }
-            CanvasEditor::from_page(
-                onestore::page::Page {
-                    title: String::new(),
-                    identity: None,
-                    created: date.map(|date| date.timestamp()),
-                    margin_origin: [0.0; 2],
-                    color: None,
-                    definitions: BTreeMap::new(),
-                    objects,
-                },
-                engine,
-            )
-            .unwrap()
+            // An empty editor's page is a page with every property at its default.
+            let blank = TextDocument::new(vec![Paragraph::new(String::new(), Format::default())]);
+            let mut page = CanvasEditor::new(engine, blank.unwrap(), 468.0)
+                .unwrap()
+                .page()
+                .unwrap();
+            page.created = date.map(|date| date.timestamp());
+            page.objects = objects;
+            CanvasEditor::from_page(page, engine).unwrap()
         } else {
             CanvasEditor::from_text_outlines(vec![outline], BTreeMap::new(), date).unwrap()
         };

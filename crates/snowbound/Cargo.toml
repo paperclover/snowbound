@@ -31,6 +31,8 @@ accesskit_winit = { version = "0.34.0", default-features = false, features = ["r
 # Updates: fetched over HTTPS, verified with ed25519 and SHA-256.
 ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 ring = "0.17"
+# Clears passwords typed into the password dialogs.
+zeroize = "1.9.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

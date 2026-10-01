@@ -1,5 +1,47 @@
 # Library regression lanes
 
+## The CI gate
+
+`python3 tools/ci.py` gates `main` (or `--rev REV`, or `--working-copy` for this
+checkout's `@`) in the jj workspace `../snowbound-ci`: it points that
+workspace's own commit, a child of `main`, at the revision's files, so other
+checkouts' edits in progress never reach the result, and a working copy is
+frozen as it was when the run started. Its build cache is
+`../snowbound-ci/target`, apart from every agent's `target/`. Runs wait for one
+another, and the exit status is the result.
+
+| Lane | Runs |
+| --- | --- |
+| `fmt` | `cargo fmt --all --check` |
+| `clippy` | Clippy `-D warnings` on the workspace (all targets and features), and `snowbound` without default features |
+| `test` | builds every test target, runs the executables four at a time (`--test-jobs`) from their package folders, slowest last time first, and the doctests |
+| `python` | builds the examples the suite runs, then `tools/test_*.py` under `uv` with Pillow and pdfplumber |
+| `windows-x86_64` | `platform/windows/cargo.sh` build of `snowbound` (nightly's win7 target) |
+| `windows-aarch64`, `linux-*` | Clippy `-D warnings` on what ships (libraries and binaries but `mobile`), then the `snowbound` build; Linux through `platform/linux/cargo.sh`, which links with zig against glibc 2.17 |
+| `ios` | `xcodebuild` of the simulator app, unsigned |
+| `macos-10.6` | `platform/snow-leopard/cargo.sh` build of `snowbound`; skipped, saying why, without the SDK or nightly `rust-src` |
+
+```sh
+python3 tools/ci.py                          # every lane, on main
+python3 tools/ci.py --working-copy --changed # the lanes and test packages @'s changes from main reach
+python3 tools/ci.py --rev xyz --lanes test windows   # `windows` names both windows-* lanes
+```
+
+Lanes run four at a time (`--jobs`), each under its own time limit
+(`--timeout MINUTES` overrides them all). The table it prints names each
+failure's first errors with their files and lines, to tell whose edit broke
+it; `../snowbound-ci/target/ci/runs/TIME/` keeps every lane's log and
+`summary.json` (status, seconds, errors with files, each test executable's
+time), for the last 20 runs. After a run over `--budget` (80 GB), it deletes
+the build units this run didn't use, least recently used first, which keeps
+`deps/` small for the font tests that scan it. Windows needs llvm-mingw from
+`platform/windows/toolchain.sh` in this checkout's `target/windows`, or
+`LLVM_MINGW`; Linux needs `zig`. `release.py` runs the gate on the commit it
+publishes.
+
+The workspace is made on first use; to drop it, `jj workspace forget ci` and
+delete `../snowbound-ci`.
+
 ## Public fixtures
 
 From a checkout with Rust and [uv](https://docs.astral.sh/uv/), which provides
@@ -70,6 +112,7 @@ the run's commands, inputs, outputs and teardown evidence.
 | Boundary | Entry point | Acceptance evidence |
 | --- | --- | --- |
 | Native authoring and cold reopen | `native_runner.py --help` | Independent OneNote capture; exact expected page count when known; owned clone teardown |
+| Password-protected sections | `native_protected.py NOTEBOOK PASSWORDS OUTPUT [SECTION]` | A fresh clone cold-opens Snowbound's protected sections, unlocks each in OneNote's dialog, types into one through COM and reads every page with the notebook it leaves (`corpus/protected-sections`) |
 | Mixed native/Rust/offline writers | `native_collaboration.py --help` | Recorded intents, durable receipts, independent server state and cold native comparison |
 | SMB directory pagination | `test_smb_directory.py --help` | Caller-owned Linux VM, native filesystem oracle, interrupted-page rejection |
 | SMB publication and payload interruptions | Ignored tests in `notebook` (feature `smb`) | Explicit `ONESTORE_SMB_*` lab inputs, retained protocol traces and independent recovery checks |

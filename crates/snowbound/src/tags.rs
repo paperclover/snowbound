@@ -345,26 +345,6 @@ fn picker(
     Anchor::Below(ui.rect(button).unwrap_or_default())
 }
 
-/// The trailing row of a dialog: its buttons at the right.
-fn buttons(ui: &mut Ui) {
-    ui.open(
-        "buttons",
-        Spec {
-            size: [fill(), children()],
-            pad: [0.0, 8.0],
-            gap: 8.0,
-            ..Spec::default()
-        },
-    );
-    ui.leaf(
-        "space",
-        Spec {
-            size: [fill(), px(1.0)],
-            ..Spec::default()
-        },
-    );
-}
-
 /// The frame of a dialog titled `title`, centred in the window.
 fn dialog(ui: &mut Ui, id: Id, title: &str, width: f32) {
     let theme = ui.theme.clone();
@@ -545,7 +525,7 @@ impl State {
                 .flatten()
         });
         ui.close();
-        buttons(ui);
+        crate::buttons(ui);
         let ok = button(ui, "ok", "OK", list.tags != self.tags);
         let cancel = ui::button(ui, "cancel", "Cancel").clicked;
         ui.close();
@@ -880,7 +860,7 @@ fn tag_editor(
             ..Spec::default()
         },
     );
-    buttons(ui);
+    crate::buttons(ui);
     let named = !tag.label.trim().is_empty();
     let ok = button(ui, "ok", "OK", named) || entered && named;
     let cancel = ui::button(ui, "cancel", "Cancel").clicked;

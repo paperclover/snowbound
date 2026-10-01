@@ -196,7 +196,9 @@ or worker panic. Dropping it requests cancellation without waiting. Remote
 operations and callbacks must have bounded execution times if shutdown latency
 matters. Credentials belong to the factory, not the cache database.
 
-Creation refuses existing paths. Opening validates database integrity and replays
+`create` refuses an existing path; `open_or_create(path, key, source)` opens the cache at
+`path`, reading `source` only to make it where there is none, and opens one another thread
+made meanwhile. Opening validates database integrity and replays
 the queue on its base. SQLite runs in WAL mode under exclusive locking with FULL
 synchronization and fullfsync, each queried back: every commit is durable, and the only
 file beside the cache is `<cache>-wal`, which holds committed pages until a checkpoint
@@ -324,7 +326,9 @@ identities, titles, dates and creation times, as OneNote does
 (`corpus/notebook-management`); `unrecycle_pages` takes them out again by identity, as
 OneNote's Undo of a page delete does. A bin or deleted-pages file its TOC does not list is
 placed and listed again, a bin whose TOC OneNote named otherwise keeps it, and an
-unavailable bin refuses the delete (`corpus/recycle-bin-repair`). An entry a TOC still
+unavailable bin refuses the delete (`corpus/recycle-bin-repair`). `empty_recycle_bin` is OneNote's
+Empty Recycle Bin: Deleted Pages loses every page in one revision and each binned section's
+file goes, the bin's TOC left as it was (`corpus/recycle-bin-view`). An entry a TOC still
 lists for a file gone from its folder gives way to the file an edit gives its name.
 Edits keep entries in the order their ordering numbers give; a rename or colour keeps
 the numbers. Every created, renamed or moved file is placed with
@@ -346,13 +350,34 @@ targets are `None`.
 replica, and `session::stored_pages(image)` builds its pages with each page's
 `LastModifiedTime`: the app's search indexes the sections it has not opened this way.
 
-With the optional `protected` feature, `Notebook::unlock(path, password)`
-reads a `Locked` section as `Unlocked { pages, .. }`, and
-`Notebook::apply_unlocked(path, password, &mut unlocked, author, edit)`
-applies page ops and stores them under the section's key, straight to the file:
-nothing of a protected section is cached or queued, a section written since
-`unlocked` was read refuses the edit, and a wrong password is
-`Error::Protected(PasswordMismatch)`.
+A password-protected section lists as `Locked`. `Notebook::unlock(path, password)` opens
+its key (a wrong password is `Error::Protected(PasswordMismatch)`), and
+`section_unlocked(path, &key, notify)` (`section_unlocked_with`, or
+`Replica::open_or_create(path, Some(&key), source)` for a host that opens replicas itself)
+opens it as any section opens: edits queue, publish, merge and become conflict pages as an ordinary section's do,
+each revision sealed under the section's key. The replica keeps none of it in the clear:
+its base and transactions are the file's own ciphertext, and its queued edits and payloads
+are sealed with AES-256-GCM (a random nonce each, the row's kind as associated data) under
+a key HMAC-SHA256 derives from the section's, payloads named by HMAC rather than SHA-256.
+Only the author's name, payload names and revision identities stay readable, and the
+queue opens only under the key (a recovery archive with `Recovery::open_unlocked`).
+`stored_pages_unlocked(image, &key)` reads a protected section's pages for search. The
+background never opens a locked section.
+
+`Notebook::set_password(path, key, password)` sets, changes or removes a password as
+OneNote 2010 does: the section is written anew under new identities
+(`onestore::protected::rekey`), next to the file as a dot file that `Storage::supersede`
+puts in its place under the writers' coordination while the file's stamp holds (on a share as
+OneNote's maintenance does it: the old file aside, the new one in, the old one deleted), and
+its TOC entry takes the new identity (`TocEdit::Reidentify`). The old replica, a cache of the
+old file, is deleted, so the section's session must be closed and its edits published first;
+a section whose edits wait refuses.
+
+Another device learns of the password when it reads the notebook again (`open`, `refresh`):
+a replica of the file the protected section superseded, found by the placement the rewritten
+header keeps, is deleted when nothing waits in it. Edits that wait stay until `unlock` on that
+device queues them under the key, each page they changed coming back as a copy, as a page
+another client removed does. A session open meanwhile stops as `SyncState::Protected`.
 
 `Section::import_page(page, author)` copies a page, usually read from another
 section, to the end of this one as one `SectionOp::Import` queued like the
@@ -369,12 +394,27 @@ is `Reordered`. A failed read returns the error and keeps
 the previous catalog, so an unreachable share never reads as an emptied
 notebook.
 
+## Packages
+
+`package` reads and writes OneNote packages (`.onepkg`), cabinet files of a notebook's tables
+of contents and sections at their paths in its folder. `notebook_files(notebook, image)` gathers
+what OneNote 2010's Save As packs (each folder's TOC and sections, groups after, the recycle bin
+and copies left out, its TOC entry kept), taking a section the caller holds edits for from
+`image` (a replica's `snapshot`); `pack` writes them MSZIP-compressed, each file outside any
+notebook (no `guidAncestor` or `crcName`), as OneNote's are. `read` takes MSZIP or OneNote's LZX,
+refusing a path leaving the folder or more than a byte limit unpacked, and `unpack(files, root)`
+writes a new folder as Unpack Notebook does: every file takes an identity of its own
+(`onestore::reidentify`) and is placed under its folder's TOC, whose entries follow it where
+OneNote lists each anew beside the stale one. `section_copy` and `page_section` are Save As's
+section and page: a copy under a new identity, and a new section holding the page with its
+identity, both outside any notebook (`corpus/notebook-package`).
+
 ## Snowbound's folder
 
 `sidecar` keeps Snowbound-only data in the notebook's `.snowbound` folder, which
 OneNote 2010 skips because it has the Windows hidden attribute: `Storage::hide` sets it
-through `smb::Client::hide` (SET_INFO FileBasicInformation, always, since Samba reports a
-dot name hidden without storing it), `SetFileAttributesW` on Windows, or macOS's
+on a share with SET_INFO FileBasicInformation (always, since Samba reports a dot name hidden
+without storing it), `SetFileAttributesW` on Windows, or macOS's
 `UF_HIDDEN`, which an smbfs mount passes to the share; Linux keeps no such attribute. Discovery skips dot names, and a notebook
 without the folder is whole.
 
@@ -475,8 +515,7 @@ probing the connection, so an idle watch sends nothing. `changed` hears each bat
 paths relative to the directory, `""` when the server lost count, and an error when the watch
 ends with its connection.
 
-`Client::read_asset(path, byte_limit)` reads an external payload under a read-only
-share handle that excludes writes and deletion. Empty files succeed; limits,
+An external payload on a share (`discover::Smb`) is read under a read-only share handle that excludes writes and deletion. Empty files succeed; limits,
 interrupted reads and failed close never return partial bytes. This payload read
 does not parse a OneStore header or acquire its reader-coordination bytes.
 

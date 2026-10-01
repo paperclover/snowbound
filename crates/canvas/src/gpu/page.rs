@@ -301,7 +301,7 @@ impl PageScene {
 
     /// Follows `editor` after an edit or undo brought page-level pictures the scene has not
     /// seen, as `refresh` does.
-    pub fn follow(
+    pub(crate) fn follow(
         &mut self,
         editor: &mut CanvasEditor,
         engine: &mut TextEngine,
@@ -415,7 +415,7 @@ impl PageScene {
     /// this thread; `waker` is woken when one lands and the page should be drawn again.
     /// Call before collecting each frame's primitives. True once everything in view shows
     /// its raster for this paper and scale.
-    pub fn update_pictures(
+    pub(crate) fn update_pictures(
         &mut self,
         editor: Option<&CanvasEditor>,
         view: [f32; 4],
@@ -468,37 +468,32 @@ impl PageScene {
             [x, y]: [f32; 2],
             rects: &mut Vec<(onestore::ExGuid, [f32; 4])>,
         ) {
-            rects.extend(layout.objects.iter().map(|object| {
-                let [x0, y0, x1, y1] = object.rect;
-                (object.id, [x0 + x, y0 + y, x1 + x, y1 + y])
-            }));
+            rects.extend(
+                layout
+                    .objects
+                    .iter()
+                    .map(|object| (object.id, crate::translated(object.rect, [x, y]))),
+            );
         }
         let mut rects = Vec::new();
         for content in self.objects(editor).into_iter().flatten() {
             match content {
                 Content::Image(source) => {
-                    let [x, y] = [
-                        source.layout.x.unwrap_or(0.0),
-                        source.layout.y.unwrap_or(0.0),
-                    ];
+                    let [x, y] = crate::origin(&source.layout);
                     if let Some([width, height]) = crate::outline::image_size(source) {
                         rects.push((source.id, [x, y, x + width, y + height]));
                     }
                 }
                 Content::File { source, layout } => {
-                    let [x, y] = [source.layout.x, source.layout.y].map(|v| v.unwrap_or(0.0));
-                    let [x0, y0, x1, y1] = layout.rect;
-                    rects.push((source.id, [x + x0, y + y0, x + x1, y + y1]));
+                    let origin = crate::origin(&source.layout);
+                    rects.push((source.id, crate::translated(layout.rect, origin)));
                 }
                 Content::Outline {
                     source,
                     layout,
                     below_title,
                 } => {
-                    let origin = [
-                        source.layout.x.unwrap_or(0.0),
-                        source.layout.y.unwrap_or(0.0),
-                    ];
+                    let origin = crate::origin(&source.layout);
                     if let Ok(origin) = outline_origin(origin, *below_title, editor) {
                         outline(layout, origin, &mut rects);
                     }
@@ -518,7 +513,7 @@ impl PageScene {
 
     /// Pictures, files and handwriting inside an outline whose origin is `origin`.
     /// `moving` draws one picture at a previewed rectangle, in the same coordinates as `origin`.
-    pub fn append_outline_objects<'a>(
+    pub(crate) fn append_outline_objects<'a>(
         &'a self,
         outline: &'a crate::outline::OutlineLayout,
         origin: [f32; 2],
@@ -541,15 +536,9 @@ impl PageScene {
         paper: Paper,
         primitives: &mut Vec<Primitive<'a>>,
     ) {
-        let [x0, y0, x1, y1] = object.rect;
         let rect = match moving {
             Some((id, rect)) if id == object.id => rect,
-            _ => [
-                x0 + origin[0],
-                y0 + origin[1],
-                x1 + origin[0],
-                y1 + origin[1],
-            ],
+            _ => crate::translated(object.rect, origin),
         };
         let picture = self.pictures.get(&object.id);
         if let Some(image) = picture.and_then(Picture::image) {
@@ -644,7 +633,7 @@ impl PageScene {
 
     /// Bounds of noneditable content in page coordinates, each with whether OneNote's view
     /// leaves room beyond it: a picture's corner is as far as the view reaches.
-    pub fn content_bounds<'a>(
+    pub(crate) fn content_bounds<'a>(
         &'a self,
         editor: &'a CanvasEditor,
     ) -> impl Iterator<Item = ([f32; 4], bool)> + 'a {
@@ -657,15 +646,9 @@ impl PageScene {
                     layout,
                     below_title,
                 } => {
-                    let origin = outline_origin(
-                        [
-                            source.layout.x.unwrap_or(0.0),
-                            source.layout.y.unwrap_or(0.0),
-                        ],
-                        *below_title,
-                        Some(editor),
-                    )
-                    .ok()?;
+                    let origin =
+                        outline_origin(crate::origin(&source.layout), *below_title, Some(editor))
+                            .ok()?;
                     Some((
                         [
                             origin[0],
@@ -679,10 +662,7 @@ impl PageScene {
                 Content::Date { below_title } => {
                     let date = editor.date()?;
                     let origin = outline_origin(
-                        [
-                            date.source().layout.x.unwrap_or(0.0),
-                            date.source().layout.y.unwrap_or(0.0),
-                        ],
+                        crate::origin(&date.source().layout),
                         *below_title,
                         Some(editor),
                     )
@@ -699,7 +679,7 @@ impl PageScene {
                     ))
                 }
                 Content::Image(source) => {
-                    let [x, y] = [source.layout.x, source.layout.y].map(|v| v.unwrap_or(0.0));
+                    let [x, y] = crate::origin(&source.layout);
                     let [width, height] = crate::outline::image_size(source)?;
                     Some(([x, y, x + width, y + height], false))
                 }
@@ -710,7 +690,7 @@ impl PageScene {
             })
     }
 
-    pub fn date_fields(
+    pub(crate) fn date_fields(
         &self,
         editor: &CanvasEditor,
     ) -> impl Iterator<Item = (DateField, [f32; 4])> {
@@ -721,13 +701,9 @@ impl PageScene {
                 .into_iter()
                 .flatten()
                 .find_map(|object| match object {
-                    Content::Date { below_title } => Some((
-                        [
-                            date.source().layout.x.unwrap_or(0.0),
-                            date.source().layout.y.unwrap_or(0.0),
-                        ],
-                        *below_title,
-                    )),
+                    Content::Date { below_title } => {
+                        Some((crate::origin(&date.source().layout), *below_title))
+                    }
                     _ => None,
                 })
             && let Ok(origin) = outline_origin(origin, title, Some(editor))
@@ -794,10 +770,7 @@ impl PageScene {
                     }
                 }
                 Content::Image(source) if !source.background => {
-                    let [x, y] = [
-                        source.layout.x.unwrap_or(0.0),
-                        source.layout.y.unwrap_or(0.0),
-                    ];
+                    let [x, y] = crate::origin(&source.layout);
                     if let Some([width, height]) = crate::outline::image_size(source)
                         && (x..=x + width).contains(&point[0])
                         && (y..=y + height).contains(&point[1])
@@ -846,14 +819,7 @@ impl PageScene {
                     layout,
                     below_title,
                 } => {
-                    let [x, y] = outline_origin(
-                        [
-                            source.layout.x.unwrap_or(0.0),
-                            source.layout.y.unwrap_or(0.0),
-                        ],
-                        *below_title,
-                        None,
-                    )?;
+                    let [x, y] = outline_origin(crate::origin(&source.layout), *below_title, None)?;
                     cover([x, y, x + layout.size[0], y + layout.size[1]], false);
                     for paragraph in &layout.paragraphs {
                         let [px, py] = [x + paragraph.origin[0], y + paragraph.origin[1]];
@@ -869,10 +835,7 @@ impl PageScene {
                     }
                 }
                 Content::Image(source) => {
-                    let [x, y] = [
-                        source.layout.x.unwrap_or(0.0),
-                        source.layout.y.unwrap_or(0.0),
-                    ];
+                    let [x, y] = crate::origin(&source.layout);
                     let size = match self.backgrounds.get(&source.id) {
                         Some(art) => Some(art.size),
                         None => crate::outline::image_size(source),
@@ -912,7 +875,7 @@ impl PageScene {
 
     /// `moving` draws one picture at a previewed rectangle instead of its stored layout.
     /// Outlines the editor does not hold draw their tags' symbols.
-    pub fn append_primitives_with<'a, E: From<SceneError>>(
+    pub(crate) fn append_primitives_with<'a, E: From<SceneError>>(
         &'a self,
         primitives: &mut Vec<Primitive<'a>>,
         offset: [f32; 2],
@@ -927,39 +890,16 @@ impl PageScene {
                     source,
                     below_title,
                     ..
-                } => outline_origin(
-                    [
-                        source.layout.x.unwrap_or(0.0),
-                        source.layout.y.unwrap_or(0.0),
-                    ],
-                    *below_title,
-                    editor,
-                )?,
+                } => outline_origin(crate::origin(&source.layout), *below_title, editor)?,
                 Content::Date { below_title } => {
                     let date = editor
                         .and_then(CanvasEditor::date)
                         .ok_or(SceneError::MissingOutline)?;
-                    outline_origin(
-                        [
-                            date.source().layout.x.unwrap_or(0.0),
-                            date.source().layout.y.unwrap_or(0.0),
-                        ],
-                        *below_title,
-                        editor,
-                    )?
+                    outline_origin(crate::origin(&date.source().layout), *below_title, editor)?
                 }
-                Content::Image(source) => [
-                    source.layout.x.unwrap_or(0.0),
-                    source.layout.y.unwrap_or(0.0),
-                ],
+                Content::Image(source) => crate::origin(&source.layout),
                 Content::ReadOnly(object) => {
-                    let [x0, y0, x1, y1] = object.rect();
-                    let rect = [
-                        x0 + offset[0],
-                        y0 + offset[1],
-                        x1 + offset[0],
-                        y1 + offset[1],
-                    ];
+                    let rect = crate::translated(object.rect(), offset);
                     append_placeholder(rect, paper, primitives);
                     primitives.push(Primitive::Text {
                         clip: None,
@@ -974,7 +914,7 @@ impl PageScene {
                     continue;
                 }
                 Content::Ink(ink) => {
-                    let [x, y] = crate::editor::page::ink_offset(ink);
+                    let [x, y] = crate::origin(&ink.layout);
                     let [dx, dy] = editor.map_or([0.0; 2], |editor| editor.ink_drag_offset(ink.id));
                     let offset = [offset[0] + x + dx, offset[1] + y + dy];
                     append_ink(ink, offset, paper.ink, primitives);
@@ -984,7 +924,7 @@ impl PageScene {
                     // A dragged file draws where its column would land.
                     let [x, y] = match moving {
                         Some((id, [x0, y0, ..])) if id == source.id => [x0, y0],
-                        _ => [source.layout.x, source.layout.y].map(|v| v.unwrap_or(0.0)),
+                        _ => crate::origin(&source.layout),
                     };
                     self.append_object(
                         layout,
@@ -1043,12 +983,7 @@ impl PageScene {
                         continue;
                     };
                     let rect = match moving {
-                        Some((id, [x0, y0, x1, y1])) if id == source.id => [
-                            x0 + offset[0],
-                            y0 + offset[1],
-                            x1 + offset[0],
-                            y1 + offset[1],
-                        ],
+                        Some((id, rect)) if id == source.id => crate::translated(rect, offset),
                         _ => [
                             object_origin[0],
                             object_origin[1],
@@ -1120,7 +1055,7 @@ impl PageScene {
 
 impl crate::outline::OutlineLayout {
     /// Paragraphs that may paint between outline-local `rows`, with their indices.
-    pub fn visible(
+    pub(crate) fn visible(
         &self,
         rows: [f32; 2],
     ) -> impl Iterator<Item = (usize, &crate::outline::ParagraphLayout)> {
@@ -1141,7 +1076,7 @@ impl crate::outline::OutlineLayout {
     /// Highlights behind the paragraphs `visible` finds between outline-local `rows`. A black
     /// highlight paints in the paper's ink, censoring the automatic text on it in any theme.
     /// A paragraph's band spans its outline, or its cell, tinted for the paper.
-    pub fn append_background_primitives(
+    pub(crate) fn append_background_primitives(
         &self,
         primitives: &mut Vec<Primitive<'_>>,
         origin: [f32; 2],
@@ -1200,7 +1135,7 @@ impl crate::outline::OutlineLayout {
 
     /// One paragraph of this outline, whose origin is `origin`: its text or equation, list
     /// markers and tags, those `art` maps drawn with their art.
-    pub fn append_paragraph_primitives<'a>(
+    pub(crate) fn append_paragraph_primitives<'a>(
         &'a self,
         index: usize,
         paragraph: &'a crate::outline::ParagraphLayout,
@@ -1291,7 +1226,7 @@ impl crate::outline::OutlineLayout {
 
     /// The note tags of this outline's tables, pictures and files, whose origin is `origin`,
     /// those `art` maps drawn with their art.
-    pub fn append_block_tag_primitives(
+    pub(crate) fn append_block_tag_primitives(
         &self,
         primitives: &mut Vec<Primitive<'_>>,
         origin: [f32; 2],
@@ -1316,7 +1251,7 @@ impl crate::outline::OutlineLayout {
         }
     }
 
-    pub fn append_table_primitives(
+    pub(crate) fn append_table_primitives(
         &self,
         primitives: &mut Vec<Primitive<'_>>,
         origin: [f32; 2],
@@ -1409,6 +1344,7 @@ mod tests {
             created: Some(1),
             title: "Header".into(),
             margin_origin: [36.0, 14.4],
+            rtl: false,
             color: None,
             rule_lines: None,
             definitions: BTreeMap::new(),
@@ -1858,6 +1794,7 @@ mod tests {
             created: None,
             title: "Header".into(),
             margin_origin: [36.0, 14.4],
+            rtl: false,
             color: None,
             rule_lines: None,
             definitions: BTreeMap::new(),
@@ -1934,6 +1871,7 @@ mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            rtl: false,
             color: None,
             rule_lines: None,
             definitions: BTreeMap::new(),
@@ -2020,6 +1958,7 @@ mod tests {
                 created: None,
                 title: String::new(),
                 margin_origin: [36.0, 14.0],
+                rtl: false,
                 color: None,
                 rule_lines: None,
                 objects: vec![unsupported, PageObject::Outline(editable)],
@@ -2108,6 +2047,7 @@ mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            rtl: false,
             color: None,
             rule_lines: None,
             definitions: BTreeMap::new(),
@@ -2294,6 +2234,7 @@ mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            rtl: false,
             color: None,
             rule_lines: None,
             definitions: BTreeMap::new(),
@@ -2478,6 +2419,7 @@ mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            rtl: false,
             color: None,
             rule_lines: None,
             definitions: BTreeMap::new(),
@@ -2592,6 +2534,7 @@ mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            rtl: false,
             color: None,
             rule_lines: None,
             definitions: BTreeMap::new(),
@@ -2689,6 +2632,7 @@ mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            rtl: false,
             color: None,
             rule_lines: None,
             definitions: BTreeMap::new(),
@@ -2763,6 +2707,7 @@ mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            rtl: false,
             color: None,
             rule_lines: None,
             definitions: BTreeMap::new(),

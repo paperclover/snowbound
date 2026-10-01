@@ -285,7 +285,6 @@ pub(super) fn layout_ops(id: ExGuid, old: &Layout, new: &Layout) -> Lowered {
     Ok(ops)
 }
 
-/// A page picture's stored position, size and description.
 /// The op giving `target` `tags`, with the definitions they name.
 pub(super) fn tags(
     target: ExGuid,
@@ -306,6 +305,7 @@ pub(super) fn tags(
     }]
 }
 
+/// A page picture's stored position, size and description.
 pub(super) fn picture_layout(image: &onestore::page::Image) -> Vec<PageOp> {
     vec![PageOp::Picture {
         picture: image.id,
@@ -404,25 +404,17 @@ impl CanvasEditor {
             return layout_ops(outline.id, &old, &moved(&outline.layout));
         }
         for object in &self.objects {
-            match object {
-                page::Content::Image(image) if image.id == placement.id => return picture(image),
-                page::Content::Ink(ink) if ink.id == placement.id => {
-                    return layout_ops(ink.id, &old, &moved(&ink.layout));
+            if let Some(image) = object.picture().filter(|image| image.id == placement.id) {
+                return picture(image);
+            }
+            match (object, object.layout()) {
+                (page::Content::ReadOnly(object), Some((id, _)))
+                    if id == placement.id && !matches!(object.source, PageObject::Outline(_)) =>
+                {
+                    return Err(refused("Unsupported objects cannot be moved"));
                 }
-                page::Content::File { source, .. } if source.id == placement.id => {
-                    return layout_ops(source.id, &old, &moved(&source.layout));
-                }
-                page::Content::Outline { source, .. } if source.id == placement.id => {
-                    return layout_ops(source.id, &old, &moved(&source.layout));
-                }
-                page::Content::ReadOnly(object) if object.source.id() == placement.id => {
-                    return match &object.source {
-                        PageObject::Outline(source) => {
-                            layout_ops(source.id, &old, &moved(&source.layout))
-                        }
-                        PageObject::Image(image) => picture(image),
-                        _ => Err(refused("Unsupported objects cannot be moved")),
-                    };
+                (_, Some((id, layout))) if id == placement.id => {
+                    return layout_ops(id, &old, &moved(layout));
                 }
                 _ => {}
             }
@@ -467,6 +459,7 @@ impl CanvasEditor {
             identity: None,
             created: None,
             margin_origin: [0.0; 2],
+            rtl: false,
             color: None,
             rule_lines: None,
             objects,

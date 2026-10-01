@@ -37,7 +37,7 @@ use std::{
     ffi::{CStr, CString, c_char, c_void},
     mem::ManuallyDrop,
     sync::{
-        Arc, Mutex,
+        Arc, LazyLock, Mutex, MutexGuard,
         atomic::{AtomicBool, Ordering},
     },
     task::{Wake, Waker},
@@ -125,29 +125,19 @@ impl Canvas {
     /// The page on `paper` as OneNote 2010 prints it, footers naming `section`.
     fn pdf(&self, paper: [f32; 2], section: &str) -> Option<Vec<u8>> {
         let page = self.page.editor.page().ok()?;
-        let mut engine = ENGINES
-            .lock()
-            .ok()
-            .and_then(|mut engines| engines.pop())
-            .unwrap_or_default();
+        let mut engine = pooled_engine();
         let setup = canvas::print::Setup {
             paper,
             fit_width: true,
             footer: canvas::print::Footer::SectionAndPage,
         };
         let pdf = canvas::print::pdf(vec![(section.to_owned(), vec![page])], &mut engine, &setup);
-        if let Ok(mut engines) = ENGINES.lock() {
-            engines.push(engine);
-        }
+        pool_engine(engine);
         pdf.ok()
     }
 
     fn new(space: ExGuid, page: Page, pixels: [u32; 2], scale: f32) -> Result<Self> {
-        let mut engine = ENGINES
-            .lock()
-            .ok()
-            .and_then(|mut engines| engines.pop())
-            .unwrap_or_default();
+        let mut engine = pooled_engine();
         let (scene, editor) = PageScene::from_page(page, &mut engine)?;
         let mut page = PageView::new(
             editor,
@@ -159,7 +149,7 @@ impl Canvas {
         );
         page.touch = true;
         page.host_viewport = true;
-        (page.snap_to_grid, page.editor.default_font) = options();
+        (page.snap_to_grid, page.editor.default_font) = options().clone();
         Ok(Self {
             page,
             space,
@@ -198,19 +188,7 @@ impl Canvas {
     /// What the page took since the last call as one edit, or none when it took nothing.
     fn edit(&mut self) -> Result<Option<Edit>> {
         let ops = self.page.editor.take_ops()?;
-        if ops.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(Edit {
-            at: library::filetime(),
-            ops: ops
-                .into_iter()
-                .map(|op| Op::Page {
-                    space: self.space,
-                    op,
-                })
-                .collect(),
-        }))
+        Ok((!ops.is_empty()).then(|| page_edit(self.space, ops)))
     }
 
     fn device(&self, point: [f32; 2]) -> [f32; 2] {
@@ -633,23 +611,33 @@ fn gpu() -> std::sync::MutexGuard<'static, Option<Gpu>> {
 /// rather than enumerating the system's fonts again.
 static ENGINES: Mutex<Vec<TextEngine>> = Mutex::new(Vec::new());
 
+fn pooled_engine() -> TextEngine {
+    ENGINES
+        .lock()
+        .ok()
+        .and_then(|mut engines| engines.pop())
+        .unwrap_or_default()
+}
+
+fn pool_engine(engine: TextEngine) {
+    if let Ok(mut engines) = ENGINES.lock() {
+        engines.push(engine);
+    }
+}
+
 /// The reader's Snap To Grid and Default font, which every page opened from then on takes,
 /// and new pages' titles the font's face.
-static OPTIONS: Mutex<Option<(bool, canvas::editor::DefaultFont)>> = Mutex::new(None);
+static OPTIONS: LazyLock<Mutex<(bool, canvas::editor::DefaultFont)>> =
+    LazyLock::new(|| Mutex::new((true, canvas::editor::DefaultFont::default())));
 
-fn options() -> (bool, canvas::editor::DefaultFont) {
-    OPTIONS
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .clone()
-        .unwrap_or((true, canvas::editor::DefaultFont::default()))
+fn options() -> MutexGuard<'static, (bool, canvas::editor::DefaultFont)> {
+    OPTIONS.lock().unwrap_or_else(|error| error.into_inner())
 }
 
 /// OneNote's Snap To Grid: taps, drags and shapes land on the placement grid.
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_set_snap_to_grid(on: bool) {
-    let font = options().1;
-    *OPTIONS.lock().unwrap_or_else(|error| error.into_inner()) = Some((on, font));
+    options().0 = on;
 }
 
 /// OneNote's Default font: new text in `face` at `size` points, new titles in `face`.
@@ -658,13 +646,11 @@ pub extern "C" fn sb_set_snap_to_grid(on: bool) {
 /// `face` is NUL-terminated UTF-8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sb_set_default_font(face: *const c_char, size: f32) {
-    let snap = options().0;
-    let font = canvas::editor::DefaultFont {
+    options().1 = canvas::editor::DefaultFont {
         face: string(face),
         size,
         color: None,
     };
-    *OPTIONS.lock().unwrap_or_else(|error| error.into_inner()) = Some((snap, font));
 }
 
 pub struct View {
@@ -676,6 +662,8 @@ pub struct View {
     section: Arc<Shared>,
     /// A conflict page, which shows what is stored and takes no edits.
     read_only: bool,
+    /// The column, in page points, a reading view reflows the page into; it takes no edits.
+    reading: Option<f32>,
 }
 
 impl View {
@@ -731,13 +719,7 @@ impl View {
             .unwrap_or_default();
         let restyle = onestore::op::restyle(&page, &sheet)?;
         if !read_only && !restyle.is_empty() {
-            section.shared.apply(Edit {
-                at: library::filetime(),
-                ops: restyle
-                    .into_iter()
-                    .map(|op| Op::Page { space, op })
-                    .collect(),
-            })?;
+            section.shared.apply(page_edit(space, restyle))?;
             page = section.shared.page(space)?.0;
         }
         let frame = Arc::<Frame>::default();
@@ -757,6 +739,7 @@ impl View {
             frame,
             section: Arc::clone(&section.shared),
             read_only,
+            reading: None,
         })
     }
 
@@ -795,7 +778,7 @@ impl View {
     fn stored(&mut self, result: Result<bool>) -> bool {
         let changed = report(result).unwrap_or(false);
         match report(self.canvas.edit()) {
-            Some(Some(_)) if self.read_only => {
+            Some(Some(_)) if self.read_only || self.reading.is_some() => {
                 let _ = report(self.reload());
             }
             Some(Some(edit)) => {
@@ -830,7 +813,38 @@ impl View {
         }
         let (page, read_only) = self.section.page(self.canvas.space)?;
         self.read_only = read_only;
+        if let Some(column) = self.reading {
+            return self.show(page, Some(column));
+        }
         Ok(moved(self.canvas.page.refresh(page)?))
+    }
+
+    /// Shows `page` anew, reflowed into `column` where given and the page reflows; whether
+    /// it shows reflowed.
+    fn show(&mut self, page: Page, column: Option<f32>) -> Result<bool> {
+        let mut engine = pooled_engine();
+        let reflowed = match column {
+            Some(column) => canvas::reading::read(&page, column, &mut engine)?.page,
+            None => None,
+        };
+        pool_engine(engine);
+        self.reading = column.filter(|_| reflowed.is_some());
+        let pixels = [self.config.width, self.config.height];
+        let mut canvas = Canvas::new(
+            self.canvas.space,
+            reflowed.unwrap_or(page),
+            pixels,
+            self.canvas.scale,
+        )?;
+        canvas.paper = self.canvas.paper;
+        canvas.page.spelling = self.canvas.page.spelling.take();
+        let _ = canvas.page.focus_changed(false)?;
+        canvas.page.editor.styles = std::mem::take(&mut self.canvas.page.editor.styles);
+        // SAFETY: `self.canvas` is replaced at once and not used in between.
+        let old = unsafe { ManuallyDrop::take(&mut self.canvas) };
+        self.canvas = ManuallyDrop::new(canvas);
+        pool_engine(old.page.engine);
+        Ok(self.reading.is_some())
     }
 }
 
@@ -838,9 +852,15 @@ impl Drop for View {
     fn drop(&mut self) {
         // SAFETY: `canvas` is not used again.
         let canvas = unsafe { ManuallyDrop::take(&mut self.canvas) };
-        if let Ok(mut engines) = ENGINES.lock() {
-            engines.push(canvas.page.engine);
-        }
+        pool_engine(canvas.page.engine);
+    }
+}
+
+/// What a page took as one edit of the page in `space`, made now.
+fn page_edit(space: ExGuid, ops: Vec<PageOp>) -> Edit {
+    Edit {
+        at: library::filetime(),
+        ops: ops.into_iter().map(|op| Op::Page { space, op }).collect(),
     }
 }
 
@@ -918,10 +938,39 @@ pub extern "C" fn sb_view_set_dark(view: &mut View, dark: bool) {
     view.canvas.set_dark(dark);
 }
 
-/// A conflict page: it shows what is stored, and any edit returns it there.
+/// A conflict page or a reading view: it shows what is stored, and any edit returns it there.
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_view_read_only(view: &View) -> bool {
-    view.read_only
+    view.read_only || view.reading.is_some()
+}
+
+/// Whether the page has a reading view `width` points wide, as JSON: `offered`, and the
+/// `verdict` saying how it reflows or why not.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_reading(view: &View, width: f32) -> *mut c_char {
+    let result = view.section.page(view.canvas.space).and_then(|(page, _)| {
+        let mut engine = pooled_engine();
+        let read = canvas::reading::read(&page, width / POINT, &mut engine);
+        pool_engine(engine);
+        Ok(read?.verdict)
+    });
+    report(result).map_or(std::ptr::null_mut(), |verdict| {
+        let json =
+            serde_json::json!({ "offered": verdict.offered(), "verdict": format!("{verdict:?}") });
+        owned(json.to_string())
+    })
+}
+
+/// Shows the page reflowed into a column `width` points wide, read-only, or with 0 as laid
+/// out; whether it now shows reflowed.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_view_set_reading(view: &mut View, width: f32) -> bool {
+    let column = (width > 0.0).then_some(width / POINT);
+    let shown = view
+        .section
+        .page(view.canvas.space)
+        .and_then(|(page, _)| view.show(page, column));
+    report(shown).unwrap_or(false)
 }
 
 /// Shows the page as stored after a change made elsewhere, keeping the caret; with
@@ -1234,7 +1283,7 @@ struct Choices {
     templates: Vec<&'static str>,
 }
 
-fn srgb(colorref: u32) -> [u8; 3] {
+pub(crate) fn srgb(colorref: u32) -> [u8; 3] {
     let [red, green, blue, _] = colorref.to_le_bytes();
     [red, green, blue]
 }
@@ -1399,7 +1448,7 @@ pub extern "C" fn sb_view_date_request(view: &mut View, seconds: &mut i64) -> i8
     let Some(date) = view.canvas.page.editor.date() else {
         return -1;
     };
-    *seconds = (date.timestamp() / 10_000_000) as i64 - 11_644_473_600;
+    *seconds = library::unix(date.timestamp());
     field as i8
 }
 

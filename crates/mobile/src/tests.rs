@@ -697,7 +697,31 @@ fn tapping_the_date_asks_for_it_and_a_new_date_is_stored() {
     section.shared.apply(edit).unwrap();
     let stored = section.shared.page(canvas.space).unwrap().0.date_text();
     assert_eq!(stored.unwrap()[0], "Friday, January 2, 2026");
-    assert_ne!(canvas.page.editor.date().unwrap().timestamp(), before);
+    let after = canvas.page.editor.date().unwrap().timestamp();
+    assert_ne!(after, before);
+    // `sb_view_date_request` hands the host the date in its seconds.
+    assert_eq!(library::unix(after), 1_767_349_800);
+}
+
+#[test]
+fn pages_open_with_the_snap_and_default_font_options_set() {
+    // OneNote's defaults, so pages other tests open meanwhile see no change.
+    sb_set_snap_to_grid(true);
+    unsafe { sb_set_default_font(c"Calibri".as_ptr(), 11.0) };
+    assert_eq!(*options(), (true, canvas::editor::DefaultFont::default()));
+    let (_directory, section) = features();
+    let canvas = canvas(&section, "Paragraph controls");
+    assert!(canvas.page.snap_to_grid);
+    assert_eq!(canvas.page.editor.default_font.face, "Calibri");
+}
+
+#[test]
+fn a_share_notebook_names_its_files_from_the_share_s_top() {
+    assert_eq!(library::on_share("", "Notes.one"), "Notes.one");
+    assert_eq!(
+        library::on_share("Team/Book", "Group/Notes.one"),
+        "Team/Book/Group/Notes.one"
+    );
 }
 
 /// A notebook copy with its library, and a section of it open for editing.

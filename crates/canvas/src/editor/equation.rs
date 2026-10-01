@@ -186,7 +186,7 @@ impl CanvasEditor {
     }
 
     /// Whether the caret is in an equation, which Linear and Professional act on.
-    pub fn in_equation(&self) -> bool {
+    pub(crate) fn in_equation(&self) -> bool {
         self.caret_zone().is_some()
     }
 
@@ -270,15 +270,7 @@ impl CanvasEditor {
             }
             Ok(())
         })();
-        let entries = self.undo.split_off(depth);
-        match entries.len() {
-            0 => {}
-            1 => self.undo.extend(entries),
-            _ => self.undo.push(History::Group {
-                entries,
-                page: false,
-            }),
-        }
+        self.group(depth, false);
         result
     }
 

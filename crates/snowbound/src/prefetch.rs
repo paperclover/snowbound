@@ -38,6 +38,11 @@ impl<K: PartialEq, V> Recent<K, V> {
         self.entries.iter().any(|(held, _)| held == key)
     }
 
+    /// Lets go of the entries `keep` refuses.
+    pub fn retain(&mut self, keep: impl Fn(&K) -> bool) {
+        self.entries.retain(|(key, _)| keep(key));
+    }
+
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
         self.entries.iter_mut().map(|(_, value)| value)
     }
@@ -141,6 +146,14 @@ impl Prefetch {
             );
             scenes.trim(SCENE_BYTES, weigh);
         }
+    }
+
+    /// Lets go of the scenes kept of the section `section` names, as a locked one's.
+    pub fn forget(&mut self, section: &str) {
+        if let Ok(mut scenes) = self.scenes.lock() {
+            scenes.retain(|(kept, _)| kept != section);
+        }
+        self.asked.retain(|(asked, _)| asked != section);
     }
 
     /// Whether `target` is new since it was last asked for, noting it.

@@ -26,11 +26,11 @@ pub struct TextDocument {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct DocumentEdit {
     /// Cell identity, or None for the document root.
-    pub container: Option<ExGuid>,
-    pub range: Range<usize>,
-    pub replacement: Vec<PageParagraph>,
+    pub(crate) container: Option<ExGuid>,
+    pub(crate) range: Range<usize>,
+    pub(crate) replacement: Vec<PageParagraph>,
     /// Width patches address surviving tables outside the replacement subtree.
-    pub columns: BTreeMap<ExGuid, Vec<f32>>,
+    pub(crate) columns: BTreeMap<ExGuid, Vec<f32>>,
 }
 
 pub(crate) fn node(text: Paragraph, format: Format) -> Result<PageParagraph, EditError> {
@@ -757,7 +757,7 @@ impl TextDocument {
         Err(EditError::InvalidRange)
     }
 
-    pub fn slice(&self, range: Range<TextPosition>) -> Result<Vec<Paragraph>, EditError> {
+    pub(crate) fn slice(&self, range: Range<TextPosition>) -> Result<Vec<Paragraph>, EditError> {
         if range.start > range.end {
             return Err(EditError::InvalidRange);
         }

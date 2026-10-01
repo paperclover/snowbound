@@ -3,6 +3,7 @@
 //! window keeps what was done to pages and sections between those edits, so Undo takes back
 //! whichever came last where the user is. Every step taken back is an edit of its own.
 
+use crate::library::{entry_name, folders};
 use crate::{Command, Library, Loaded, State, UserEvent};
 use canvas::editor::CanvasEditor;
 use notebook::{Replica, discover::Folder};
@@ -287,7 +288,7 @@ fn drop_newest(steps: &mut Vec<Step>, page: ExGuid, count: usize) {
 }
 
 /// Whether `page` holds nothing but its title, untitled.
-fn blank(page: &Page) -> bool {
+pub(crate) fn blank(page: &Page) -> bool {
     page.title.trim().is_empty()
         && page
             .objects
@@ -353,6 +354,46 @@ impl Site {
         Ok(())
     }
 
+    /// The page shown once `gone` leave `listed`, preferring `prefer`, and the page `ops` gain
+    /// where none stays.
+    fn after(
+        &self,
+        listed: &[(ExGuid, String, u32)],
+        gone: &[ExGuid],
+        prefer: Option<ExGuid>,
+        ops: &mut Vec<Op>,
+    ) -> (ExGuid, Option<ExGuid>) {
+        match neighbor(listed, gone, prefer) {
+            Some(show) => (show, None),
+            None => {
+                let space = self.fresh.space();
+                ops.push(Op::Section(SectionOp::Create(self.fresh.clone())));
+                (space, Some(space))
+            }
+        }
+    }
+
+    /// Takes out `added`, the page a section left without pages gained, in `ops` while
+    /// `listed` holds it and it holds nothing; the pages going.
+    fn take_added(
+        &self,
+        added: Option<ExGuid>,
+        listed: &[(ExGuid, String, u32)],
+        ops: &mut Vec<Op>,
+    ) -> Vec<ExGuid> {
+        let gone: Vec<ExGuid> = added
+            .filter(|added| {
+                listed.iter().any(|(space, ..)| space == added)
+                    && self.replica.page(*added).is_ok_and(|page| blank(&page))
+            })
+            .into_iter()
+            .collect();
+        if !gone.is_empty() {
+            ops.push(Op::Section(SectionOp::Delete(gone.clone())));
+        }
+        gone
+    }
+
     /// The catalog path of the section `identity` names.
     fn section_path(&self, identity: [u8; 16]) -> Option<String> {
         entry_of(self.library.catalog()?, identity).map(|(_, path)| path)
@@ -397,14 +438,7 @@ impl Site {
                     })
                     .collect();
                 let mut ops = vec![Op::Section(SectionOp::Delete(pages.clone()))];
-                let (show, added) = match neighbor(&listed, &pages, show) {
-                    Some(show) => (show, None),
-                    None => {
-                        let space = self.fresh.space();
-                        ops.push(Op::Section(SectionOp::Create(self.fresh.clone())));
-                        (space, Some(space))
-                    }
-                };
+                let (show, added) = self.after(&listed, &pages, show, &mut ops);
                 if !created && binned {
                     let pages: Vec<Page> = kept.iter().map(|kept| kept.page.clone()).collect();
                     self.library.reopen()?.recycle_pages(&pages, &self.author)?;
@@ -452,15 +486,7 @@ impl Site {
                     )?])));
                     spaces.push(space);
                 }
-                let gone: Vec<ExGuid> = added
-                    .filter(|added| {
-                        at(*added).is_some() && self.replica.page(*added).is_ok_and(|p| blank(&p))
-                    })
-                    .into_iter()
-                    .collect();
-                if !gone.is_empty() {
-                    ops.push(Op::Section(SectionOp::Delete(gone.clone())));
-                }
+                let gone = self.take_added(added, &listed, &mut ops);
                 self.apply(ops)?;
                 if !created && binned {
                     let identities: Vec<[u8; 16]> =
@@ -531,14 +557,7 @@ impl Site {
                 let before = listed[from + 1..].first().map(|(space, ..)| *space);
                 let level = listed[from].2;
                 let mut ops = vec![Op::Section(SectionOp::Delete(vec![page]))];
-                let (show, added) = match neighbor(&listed, &[page], None) {
-                    Some(show) => (show, None),
-                    None => {
-                        let space = self.fresh.space();
-                        ops.push(Op::Section(SectionOp::Create(self.fresh.clone())));
-                        (space, Some(space))
-                    }
-                };
+                let (show, added) = self.after(&listed, &[page], None, &mut ops);
                 let section = self.library.open(&path, || {})?;
                 section.replica().apply(
                     &self.author,
@@ -590,15 +609,7 @@ impl Site {
                         level,
                     )?])),
                 ];
-                let gone: Vec<ExGuid> = added
-                    .filter(|added| {
-                        at(*added).is_some() && self.replica.page(*added).is_ok_and(|p| blank(&p))
-                    })
-                    .into_iter()
-                    .collect();
-                if !gone.is_empty() {
-                    ops.push(Op::Section(SectionOp::Delete(gone.clone())));
-                }
+                let gone = self.take_added(added, &listed, &mut ops);
                 self.apply(ops)?;
                 section.replica().apply(
                     &self.author,
@@ -641,21 +652,10 @@ fn folder_id(folder: &Folder) -> Option<[u8; 16]> {
     (!folder.path.is_empty()).then_some(toc.file_id)
 }
 
-/// Every folder of `catalog`, the notebook's own first.
-fn folders(catalog: &Folder) -> Vec<&Folder> {
-    let mut all = vec![catalog];
-    let mut at = 0;
-    while let Some(folder) = all.get(at) {
-        all.extend(&folder.groups);
-        at += 1;
-    }
-    all
-}
-
 /// The folder `identity` names, the notebook's own without one.
 fn folder_of(catalog: &Folder, identity: Option<[u8; 16]>) -> Option<&Folder> {
     match identity {
-        Some(_) => folders(catalog)
+        Some(_) => folders(catalog, |_| true)
             .into_iter()
             .find(|folder| folder_id(folder) == identity),
         None => Some(catalog),
@@ -664,7 +664,7 @@ fn folder_of(catalog: &Folder, identity: Option<[u8; 16]>) -> Option<&Folder> {
 
 /// The section or group `identity` names: its folder and catalog path.
 fn entry_of(catalog: &Folder, identity: [u8; 16]) -> Option<(&Folder, String)> {
-    folders(catalog).into_iter().find_map(|folder| {
+    folders(catalog, |_| true).into_iter().find_map(|folder| {
         let (_, path) = entries(folder)
             .into_iter()
             .find(|(id, _)| *id == identity)?;
@@ -674,16 +674,10 @@ fn entry_of(catalog: &Folder, identity: [u8; 16]) -> Option<(&Folder, String)> {
 
 /// The identity of the section or group at catalog `path`.
 fn identity_at(catalog: &Folder, path: &str) -> Option<[u8; 16]> {
-    folders(catalog).into_iter().find_map(|folder| {
+    folders(catalog, |_| true).into_iter().find_map(|folder| {
         let (id, _) = entries(folder).into_iter().find(|(_, at)| at == path)?;
         Some(id)
     })
-}
-
-/// A section or group's name, as its catalog path ends.
-fn name_of(path: &str) -> &str {
-    let name = path.rsplit('/').next().unwrap_or(path);
-    name.strip_suffix(".one").unwrap_or(name)
 }
 
 /// The action taking back `change` to `library`'s sections and groups, which is about to be
@@ -695,7 +689,7 @@ pub fn structure_undo(library: &Library, change: &crate::manage::Structure) -> O
         Structure::Rename { path, name } => Change::Rename {
             entry: identity_at(catalog, path)?,
             from: name.clone(),
-            to: name_of(path).to_owned(),
+            to: entry_name(path).to_owned(),
         },
         Structure::Move { path, .. } => {
             let entry = identity_at(catalog, path)?;
@@ -707,7 +701,7 @@ pub fn structure_undo(library: &Library, change: &crate::manage::Structure) -> O
             }
         }
         Structure::Reorder { folder, .. } => {
-            let folder = folders(catalog)
+            let folder = folders(catalog, |_| true)
                 .into_iter()
                 .find(|listed| listed.path == *folder)?;
             Change::Place {
@@ -733,7 +727,7 @@ fn restructuring(library: &Library, change: &Change) -> Option<(crate::manage::S
     let (structure, undo) = match change {
         Change::Rename { entry, from, to } => {
             let (_, path) = entry_of(catalog, *entry)?;
-            if name_of(&path) != from {
+            if entry_name(&path) != from {
                 return None;
             }
             (
@@ -1450,7 +1444,7 @@ mod tests {
         }
         notebook.create_group("", "Group").unwrap();
         let order = |notebook: &Notebook, folder: &str| -> Vec<String> {
-            let folder = folders(notebook.catalog())
+            let folder = folders(notebook.catalog(), |_| true)
                 .into_iter()
                 .find(|listed| listed.path == folder)
                 .unwrap();

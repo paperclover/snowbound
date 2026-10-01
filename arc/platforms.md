@@ -10,7 +10,7 @@ drawn by Snowbound versus the operating system.
 shell    snowbound + ui       snowbound + ui       snowbound + ui           UIKit (apps/ios)
 glue     snowbound/src/macos  snowbound/src/linux  snowbound/src/windows    crates/mobile (C ABI)
 page     canvas ─────────────────────────────────────────────────────────────────────►
-paint    draw (wgpu: Metal)   draw (Vulkan or GL)  draw (D3D12, or GL on 7) draw (Metal)
+paint    draw (wgpu: Metal)   draw (Vulkan or GL)  draw (D3D12; D3D11 on 7) draw (Metal)
 data     notebook::session + embedded SMB client ────────────────────────────────────►
 format   onestore ───────────────────────────────────────────────────────────────────►
 ```
@@ -103,9 +103,15 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   imports, and aarch64 for Windows 11 on Arm. The few imports of Windows 8
   and later that dependencies still name are answered by
   `platform/windows/rt/shims.c`; everything newer is looked up at run time.
-- `draw` builds both backends on Windows and the surface picks one:
+- `draw` builds three backends on Windows and the surface picks one:
   Direct3D 12 through wgpu where Windows has it (10 and 11), otherwise
-  OpenGL 2.1 on a WGL context, as on Windows 7 (`surface_windows.rs`).
+  Direct3D 11, as on Windows 7, on WARP where no device reaches feature
+  level 10_0, and OpenGL 2.1 on a WGL context only where neither starts
+  (`surface_windows.rs`). Direct3D 11 presents through a blit-model DXGI
+  swap chain, as 7 has no flip model, and through DirectComposition on 10,
+  whose window has no redirection surface; OpenGL drivers such as Intel's
+  place their frames below the caption the system would draw even where the
+  row takes its place.
 - The toolbar's row is the title bar wherever the desktop composes windows.
   On Windows 7 with Aero and on 11, the system's frame keeps its sides,
   its caption gives way to the row, its material (Aero glass, Mica) lies
@@ -115,11 +121,17 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   draws them as 11 does, lit where the system reports the pointer. On 8
   and 10, whose frames are opaque, the window has no system frame and the
   row draws and runs caption buttons as 10 does, over acrylic on 10. Over
-  7's glass the sidebar stays opaque, and fields and tool buttons take white
-  faces, as Internet Explorer's do there. The theme and material follow the
-  system's colour mode as it changes. With Windows 7's basic or classic
-  theme the system draws the title bar and the row lies beneath it, as on
-  KDE.
+  7's glass, which takes any colour and whatever lies behind the window,
+  the toolbar keeps opaque faces under its icons: by default the strip is
+  opaque, as Explorer's command bar is under its glass, stopping short of the
+  caption buttons 7 draws beneath the window's pixels, and
+  `SNOWBOUND_W7_CHROME` tries the alternatives, `pills` for a face per group
+  of tools over the glass, `frost` for a strip the glass tints through, and
+  `tint` and `tint-tiles` for one panel or a tile per group in the glass's
+  colour at a lightness text keeps its contrast on, as Mica tints.
+  The theme and material follow the system's colour mode as it changes.
+  With Windows 7's basic or classic theme the system draws the title bar
+  and the row lies beneath it, as on KDE.
 - A notebook on a share opens by its UNC path through Windows' own SMB
   client, which takes OneNote's opens and locks natively: `onestore` opens a
   section as OneNote does (a reader shares it with everyone, a writer denies

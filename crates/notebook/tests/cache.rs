@@ -66,14 +66,14 @@ fn a_cache_created_meanwhile_opens() {
     let source = onestore::create_section("Raced.one", "Raced", "Fixture").unwrap();
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("raced.sqlite");
-    let replica = Replica::open_or_create(&path, || {
+    let replica = Replica::open_or_create(&path, None, || {
         drop(Replica::create(&path, &source)?);
         Ok(source.clone())
     })
     .unwrap();
     assert_eq!(replica.pages().unwrap()[0].1, "Raced");
     drop(replica);
-    let reopened = Replica::open_or_create(&path, || unreachable!()).unwrap();
+    let reopened = Replica::open_or_create(&path, None, || unreachable!()).unwrap();
     assert_eq!(reopened.pages().unwrap()[0].1, "Raced");
 }
 

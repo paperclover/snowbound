@@ -4,11 +4,7 @@ use crate::{
     write::{Commit, LiveRevision, PropertyObject, declared, differing},
 };
 #[cfg(test)]
-use crate::{
-    RevisionIndex, Store,
-    document::{Document, Space},
-    write::chain_depth,
-};
+use crate::{RevisionIndex, Store, document::Document, write::chain_depth};
 use bumpalo::Bump;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -50,7 +46,10 @@ impl<'a> ActivePage<'a> {
         let view = document
             .spaces
             .remove(&space)
-            .and_then(Space::into_active)
+            .and_then(|mut space| {
+                let active = *space.contexts.get(&ExGuid::default())?;
+                space.revisions.remove(&active)
+            })
             .ok_or(Error {
                 offset: 0,
                 message: "The active page is unavailable",

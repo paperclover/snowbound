@@ -44,9 +44,10 @@ root = Path(__file__).resolve().parents[2]
 TEAM = '9R7DPNW28H'
 BUNDLE_ID = 'net.paperclover.snowbound'
 CONTAINER = 'iCloud.net.paperclover.snowbound'
-# OneNote's sections and tables of contents, which no Mac app declares; OneNote may open them too.
+# OneNote's sections, tables of contents and packages, which no Mac app declares; OneNote may open them too.
 ONENOTE_TYPES = [('com.microsoft.onenote.section', 'OneNote Section', 'one'),
-                 ('com.microsoft.onenote.table-of-contents', 'OneNote Table of Contents', 'onetoc2')]
+                 ('com.microsoft.onenote.table-of-contents', 'OneNote Table of Contents', 'onetoc2'),
+                 ('com.microsoft.onenote.package', 'OneNote Package', 'onepkg')]
 
 
 def developer_id():

@@ -146,6 +146,14 @@ impl State {
         self.ui.open_popup(id());
     }
 
+    /// Opens Export as PDF on `scope`, as Save As's PDF does.
+    pub(crate) fn export_pdf(&mut self, scope: Scope) {
+        self.open_print(true);
+        if let Some(dialog) = &mut self.printing.dialog {
+            dialog.setup.scope = scope;
+        }
+    }
+
     /// Builds the dialog while it is open; Print or Export goes on with its choices, which
     /// the next opening starts from.
     pub(crate) fn print_dialog(&mut self) {
@@ -247,22 +255,7 @@ impl State {
                 setup.footer = FOOTERS[at];
             }
         });
-        ui.open(
-            "buttons",
-            Spec {
-                size: [fill(), children()],
-                pad: [0.0, 8.0],
-                gap: 8.0,
-                ..Spec::default()
-            },
-        );
-        ui.leaf(
-            "space",
-            Spec {
-                size: [fill(), px(1.0)],
-                ..Spec::default()
-            },
-        );
+        crate::buttons(ui);
         let cancel = ui::button(ui, "cancel", "Cancel").clicked;
         let action = if dialog.export {
             "Export…"
@@ -349,6 +342,7 @@ impl State {
             fit_width: setup.fit_width,
             footer: setup.footer,
         };
+        let whole = matches!(setup.scope, Scope::Section | Scope::Notebook);
         std::thread::spawn(move || {
             let made = (|| -> Result<Vec<u8>, Box<dyn Error>> {
                 let mut open = Some(open);
@@ -359,6 +353,7 @@ impl State {
                         None => replica.page(space).map_err(Into::into),
                     })
                     .collect::<Result<Vec<Page>, Box<dyn Error>>>()?;
+                let this = if whole { printed(this) } else { this };
                 let mut this = Some((open_tab.1.clone(), this));
                 let sections = if others.is_empty() {
                     this.into_iter().collect()
@@ -377,7 +372,7 @@ impl State {
                                 .into_iter()
                                 .map(|(space, ..)| section.page(space))
                                 .collect::<Result<Vec<_>, _>>()?;
-                            Ok((name, pages))
+                            Ok((name, printed(pages)))
                         })
                         .collect::<Result<Vec<_>, Box<dyn Error>>>()?
                 };
@@ -419,18 +414,20 @@ fn group(levels: &[u32], at: usize) -> std::ops::Range<usize> {
     start..end
 }
 
-/// Every readable section of `library`, catalog path and name, a folder's sections before
-/// its groups', as OneNote orders them.
+/// Every readable section of `library` but the recycle bin's, catalog path and name, in the
+/// order each folder's TOC lists its sections and groups, as OneNote's notebook PDF prints them.
 fn notebook_tabs(library: &Library) -> Vec<(String, String)> {
     fn walk(library: &Library, folder: &Folder, tabs: &mut Vec<(String, String)>) {
-        tabs.extend(
-            library
-                .tabs(&folder.path)
-                .into_iter()
-                .map(|tab| (tab.path, tab.name)),
-        );
-        for group in &folder.groups {
-            walk(library, group, tabs);
+        let mut sections = library.tabs(&folder.path);
+        for path in &folder.order {
+            if let Some(at) = sections.iter().position(|tab| tab.path == *path) {
+                let tab = sections.remove(at);
+                tabs.push((tab.path, tab.name));
+            } else if let Some(group) = (folder.groups.iter())
+                .find(|group| group.path == *path && !crate::library::recycle_bin(&group.path))
+            {
+                walk(library, group, tabs);
+            }
         }
     }
     let mut tabs = Vec::new();
@@ -441,8 +438,17 @@ fn notebook_tabs(library: &Library) -> Vec<(String, String)> {
     tabs
 }
 
+/// The pages of `pages` a section's or notebook's PDF prints: all but untitled ones holding
+/// only their date.
+fn printed(pages: Vec<Page>) -> Vec<Page> {
+    pages
+        .into_iter()
+        .filter(|page| !crate::undo::blank(page))
+        .collect()
+}
+
 /// `title` as a file name: without the characters Windows and macOS refuse in one.
-fn file_name(title: &str) -> String {
+pub(crate) fn file_name(title: &str) -> String {
     let name: String = title
         .chars()
         .map(|c| match c {
@@ -485,5 +491,138 @@ mod tests {
         assert_eq!(group(&levels, 0), 0..3);
         assert_eq!(group(&levels, 3), 3..4);
         assert_eq!(group(&levels, 5), 4..6);
+    }
+
+    /// A notebook whose root lists section A, group G (holding C) and section B in that order,
+    /// A holding a titled page, an untitled page with only its date and an untitled page with
+    /// text, each read through the app's sections as printing reads them.
+    fn ordered_notebook(temporary: &std::path::Path) -> Library {
+        use notebook::session::Notebook;
+        use onestore::{
+            PageCreation,
+            op::{Edit, Op, SectionOp},
+        };
+        let _ = std::fs::remove_dir_all(temporary);
+        std::fs::create_dir_all(temporary).unwrap();
+        let root = temporary.join("Ordered");
+        let cache = temporary.join("cache");
+        let page = |title: &str| {
+            PageCreation::new(None, Some(title), "Author")
+                .unwrap()
+                .dated("Thursday, October 1, 2026", "12:30 AM")
+                .unwrap()
+        };
+        let mut notebook =
+            Notebook::create(&root, &cache, Notebook::NEW_COLOR, &page("A titled")).unwrap();
+        notebook.rename("New Section 1.one", "A").unwrap();
+        notebook.create_section("", "B", &page("B titled")).unwrap();
+        notebook.create_group("", "G").unwrap();
+        notebook
+            .create_section("G", "C", &page("C titled"))
+            .unwrap();
+        notebook.reorder("", &["A.one", "G", "B.one"]).unwrap();
+        let library = Library::created(root.to_str().unwrap(), notebook, &cache);
+        let section = library.open("A.one", || {}).unwrap();
+        let (dated, written) = (page(""), page(""));
+        let space = written.space();
+        let edit = |ops| Edit {
+            at: crate::filetime(),
+            ops,
+        };
+        let create = |creation| Op::Section(SectionOp::Create(creation));
+        (section.apply("Author", edit(vec![create(dated), create(written)]))).unwrap();
+        let meeting = crate::templates::Choice::Template("Informal Meeting Notes");
+        let ops = crate::manage::template_ops(&section.page(space).unwrap(), meeting, Vec::new())
+            .unwrap()
+            .into_iter()
+            .map(|op| Op::Page { space, op })
+            .collect();
+        section.apply("Author", edit(ops)).unwrap();
+        // The template titles the page; its title goes, its text stays.
+        let untitled = crate::rename::retitled(&section.page(space).unwrap(), space, String::new());
+        section
+            .apply("Author", edit(vec![untitled.unwrap()]))
+            .unwrap();
+        library.keep("A.one", section);
+        library
+    }
+
+    /// A notebook exports in the order its tables of contents list sections and groups, as
+    /// OneNote 2010's Save As, Notebook, PDF prints A, then G's C, then B, though its own
+    /// navigation lists A, B, then G (lab, 2026-10-01).
+    #[test]
+    fn a_notebook_exports_in_the_order_it_lists_sections_and_groups() {
+        let temporary =
+            std::env::temp_dir().join(format!("snowbound-print-order-{}", std::process::id()));
+        let library = ordered_notebook(&temporary);
+        let tabs = notebook_tabs(&library);
+        library.close_kept();
+        drop(library);
+        let _ = std::fs::remove_dir_all(&temporary);
+        let paths: Vec<&str> = tabs.iter().map(|(path, _)| path.as_str()).collect();
+        assert_eq!(paths, ["A.one", "G/C.one", "B.one"]);
+    }
+
+    /// An untitled page holding only its date is left out, and one holding text is printed,
+    /// as OneNote 2010's Save As, Section and Notebook, PDF do (lab, 2026-10-01).
+    #[test]
+    fn untitled_pages_holding_only_their_date_are_left_out() {
+        let temporary =
+            std::env::temp_dir().join(format!("snowbound-print-blank-{}", std::process::id()));
+        let library = ordered_notebook(&temporary);
+        let section = library.open("A.one", || {}).unwrap();
+        let pages: Vec<Page> = (section.pages().unwrap().into_iter())
+            .map(|(space, ..)| section.page(space).unwrap())
+            .collect();
+        section.close().unwrap();
+        drop(library);
+        let _ = std::fs::remove_dir_all(&temporary);
+        assert_eq!(pages.len(), 3);
+        // A page's title as typed, which its title object holds.
+        let typed = |page: &Page| {
+            page.objects
+                .iter()
+                .find_map(|object| match object {
+                    onestore::page::PageObject::Title(title) => {
+                        let text = title.outlines.first()?.paragraphs.first()?.text()?;
+                        Some(text.text.text().to_owned())
+                    }
+                    _ => None,
+                })
+                .unwrap_or_default()
+        };
+        let printed: Vec<(String, usize)> = printed(pages)
+            .iter()
+            .map(|page| (typed(page), page.objects.len()))
+            .collect();
+        assert_eq!(printed.len(), 2, "{printed:?}");
+        assert_eq!(printed[0].0, "A titled");
+        assert!(printed[1].0.is_empty() && printed[1].1 > 1, "{printed:?}");
+    }
+
+    /// A notebook exported whole leaves out its recycle bin, as OneNote 2010's Save As,
+    /// Notebook, PDF does.
+    #[test]
+    fn a_notebook_exports_without_its_recycle_bin() {
+        use notebook::session::Notebook;
+        let temporary =
+            std::env::temp_dir().join(format!("snowbound-print-bin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temporary);
+        std::fs::create_dir_all(&temporary).unwrap();
+        let root = temporary.join("Printed");
+        let cache = temporary.join("cache");
+        let page = || onestore::PageCreation::new(None, Some(""), "Author").unwrap();
+        let mut notebook = Notebook::create(&root, &cache, Notebook::NEW_COLOR, &page()).unwrap();
+        notebook.create_group("", "Group").unwrap();
+        notebook.create_section("Group", "Inner", &page()).unwrap();
+        notebook.create_section("", "Binned", &page()).unwrap();
+        notebook.delete("Binned.one").unwrap();
+        let library = Library::created(root.to_str().unwrap(), notebook, &cache);
+        let paths: Vec<String> = notebook_tabs(&library)
+            .into_iter()
+            .map(|(path, _)| path)
+            .collect();
+        std::fs::remove_dir_all(&temporary).unwrap();
+        assert_eq!(paths, ["New Section 1.one", "Group/Inner.one"]);
     }
 }

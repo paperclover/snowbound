@@ -156,22 +156,7 @@ impl State {
             return Ok(());
         }
         self.persist()?;
-        let Some(session) = &self.session else {
-            return Ok(());
-        };
-        let space = session.space;
-        session.section.apply(
-            &self.author,
-            onestore::op::Edit {
-                at: filetime(),
-                ops: ops
-                    .into_iter()
-                    .map(|op| onestore::op::Op::Page { space, op })
-                    .collect(),
-            },
-        )?;
-        self.edited(vec![space]);
-        self.refresh()
+        self.edit_page(ops)
     }
 
     /// Opens the Themes dialog choosing a theme for `scope` of the open page.

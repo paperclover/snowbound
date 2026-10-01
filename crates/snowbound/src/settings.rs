@@ -48,6 +48,27 @@ pub struct Settings {
     pub keys: std::collections::BTreeMap<String, Vec<String>>,
     /// Pages shown lately, latest first, which the palette lists first.
     pub recent: Vec<crate::navigation::Place>,
+    pub passwords: Passwords,
+}
+
+/// Options' Passwords, as OneNote 2010's Advanced page keeps them.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Passwords {
+    /// Minutes a protected section stays unlocked without being worked in; none keeps it.
+    pub lock_after: Option<u32>,
+    /// Locks a protected section as soon as another is shown.
+    pub lock_on_leave: bool,
+}
+
+impl Default for Passwords {
+    /// OneNote 2010's: locked after 10 minutes.
+    fn default() -> Self {
+        Self {
+            lock_after: Some(10),
+            lock_on_leave: false,
+        }
+    }
 }
 
 /// What the toolbar's buttons apply from their menus' last picks.
@@ -166,6 +187,7 @@ impl crate::State {
             servers: self.servers.clone(),
             keys: crate::commands::Keymap::current().saved(),
             recent: self.trail.recent.clone(),
+            passwords: self.passwords,
         };
         if let Err(error) = settings.save(path) {
             eprintln!("Cannot save the settings in {}: {error}", path.display());
@@ -244,6 +266,10 @@ mod tests {
                     n: 1,
                 },
             }],
+            passwords: Passwords {
+                lock_after: None,
+                lock_on_leave: true,
+            },
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);

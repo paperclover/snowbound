@@ -72,12 +72,12 @@ pub fn corner_radius(window: &Window) -> f32 {
     (units * scale).round() / scale
 }
 
-/// Whether the window erases its own bottom corners to transparent pixels: under winit's
-/// Adwaita frame on GNOME's Wayland, which draws libadwaita's window edge. Mutter's X11
-/// frames stay square at the bottom, as libadwaita's own `ssd-frame` style has them.
 /// Winit's theme already holds the window to the app's appearance.
 pub fn follow_appearance(_: &Window, _: Theme) {}
 
+/// Whether the window erases its own bottom corners to transparent pixels: under winit's
+/// Adwaita frame on GNOME's Wayland, which draws libadwaita's window edge. Mutter's X11
+/// frames stay square at the bottom, as libadwaita's own `ssd-frame` style has them.
 pub fn cuts_corners() -> bool {
     sctk_adwaita::LIBADWAITA_EDGE.load(Ordering::Relaxed)
 }
@@ -617,6 +617,11 @@ pub fn resize_direction(window: &Window, pointer: [f32; 2]) -> Option<ResizeDire
     (!window.is_maximized() && window.is_resizable()).then_some(direction)
 }
 
+/// Keeps the window's client area at least `size` points.
+pub fn set_min_size(window: &Window, size: [f32; 2]) {
+    window.set_min_inner_size(Some(winit::dpi::LogicalSize::new(size[0], size[1])));
+}
+
 pub fn zoom(window: &Window) {
     window.set_maximized(!window.is_maximized());
 }
@@ -773,18 +778,19 @@ pub fn show_file(file: &std::path::Path) {
 
 /// The `file://` URI of absolute `path`, its bytes outside RFC 3986's unreserved set and `/`
 /// percent-encoded.
-fn file_uri(path: &std::path::Path) -> String {
+pub(crate) fn file_uri(path: &std::path::Path) -> String {
     use std::os::unix::ffi::OsStrExt;
-    let mut uri = "file://".to_owned();
-    for &byte in path.as_os_str().as_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
-                uri.push(byte as char)
-            }
-            _ => uri.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    uri
+    format!(
+        "file://{}",
+        crate::library::encode(path.as_os_str().as_bytes())
+    )
+}
+
+/// The function `name` in `library`, of C signature `F`.
+pub(crate) unsafe fn symbol<F: Copy>(library: *mut libc::c_void, name: &CStr) -> Option<F> {
+    let symbol = unsafe { libc::dlsym(library, name.as_ptr()) };
+    (!symbol.is_null())
+        .then(|| unsafe { std::mem::transmute_copy::<*mut libc::c_void, F>(&symbol) })
 }
 
 pub fn cache_dir() -> Option<PathBuf> {
@@ -1124,6 +1130,17 @@ fn dialog<const Z: usize, const K: usize>(
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
 }
 
+/// The path a file dialog answered; none when cancelled or when no tool could ask.
+fn picked(asked: Result<Option<String>, &str>) -> Option<PathBuf> {
+    asked
+        .unwrap_or_else(|error| {
+            eprintln!("{error}");
+            None
+        })
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+}
+
 /// Asks for a file to insert, one of `types` (extensions) unless empty, titled `title`.
 pub fn pick_file(title: &str, types: &[&str]) -> Option<PathBuf> {
     let patterns = match types {
@@ -1134,21 +1151,14 @@ pub fn pick_file(title: &str, types: &[&str]) -> Option<PathBuf> {
             .collect::<Vec<_>>()
             .join(" "),
     };
-    let asked = dialog(
+    picked(dialog(
         [
             "--file-selection",
             &format!("--title={title}"),
             &format!("--file-filter={patterns}"),
         ],
         ["--getopenfilename", ".", &patterns, "--title", title],
-    );
-    asked
-        .unwrap_or_else(|error| {
-            eprintln!("{error}");
-            None
-        })
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
+    ))
 }
 
 /// No icon theme lookup; the page draws a blank page for the file.
@@ -1210,27 +1220,20 @@ pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str) -> bool 
 /// Asks for a notebook's table of contents or a section file, titled `title`; None when
 /// cancelled or when no tool can ask.
 pub fn pick_notebook(title: &str) -> Option<PathBuf> {
-    let asked = dialog(
+    picked(dialog(
         [
             "--file-selection",
             &format!("--title={title}"),
-            "--file-filter=OneNote notebooks and sections | *.onetoc2 *.one",
+            "--file-filter=OneNote notebooks, sections and packages | *.onetoc2 *.one *.onepkg",
         ],
         [
             "--getopenfilename",
             ".",
-            "*.onetoc2 *.one",
+            "*.onetoc2 *.one *.onepkg",
             "--title",
             title,
         ],
-    );
-    asked
-        .unwrap_or_else(|error| {
-            eprintln!("{error}");
-            None
-        })
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
+    ))
 }
 
 /// Asks where to put something named `name` by default; the dialog names its own button.
@@ -1240,7 +1243,7 @@ pub fn pick_new(
     _action: &str,
     _folder: Option<&std::path::Path>,
 ) -> Option<PathBuf> {
-    let asked = dialog(
+    picked(dialog(
         [
             "--file-selection",
             "--save",
@@ -1248,14 +1251,7 @@ pub fn pick_new(
             &format!("--filename={name}"),
         ],
         ["--getsavefilename", name, "--title", title],
-    );
-    asked
-        .unwrap_or_else(|error| {
-            eprintln!("{error}");
-            None
-        })
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
+    ))
 }
 
 /// Tells the user something they asked for could not be done: `message`, then what to do.

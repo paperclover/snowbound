@@ -3,7 +3,7 @@
 //! with gst-libav), the default microphone records as PCM WAV, and the default camera with
 //! it as the Motion JPEG AVI file OneNote plays. Recording needs the Base and Good plug-ins.
 
-use crate::video;
+use crate::{platform::symbol, video};
 use std::{
     cell::Cell,
     ffi::{CStr, CString, c_char, c_int, c_void},
@@ -50,12 +50,6 @@ struct Gst {
 unsafe impl Send for Gst {}
 unsafe impl Sync for Gst {}
 
-/// The function `name` in `library`, of C signature `F`.
-unsafe fn symbol<F: Copy>(library: *mut c_void, name: &CStr) -> Option<F> {
-    let symbol = unsafe { libc::dlsym(library, name.as_ptr()) };
-    (!symbol.is_null()).then(|| unsafe { std::mem::transmute_copy::<*mut c_void, F>(&symbol) })
-}
-
 /// GStreamer, initialized; none where it is not installed.
 fn gst() -> Option<&'static Gst> {
     static GST: OnceLock<Option<Gst>> = OnceLock::new();
@@ -82,20 +76,6 @@ fn gst() -> Option<&'static Gst> {
         })
     })
     .as_ref()
-}
-
-/// `path` as a `file://` URI, every byte outside the unreserved set escaped.
-fn uri(path: &Path) -> String {
-    let mut uri = String::from("file://");
-    for byte in path.as_os_str().as_encoded_bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
-                uri.push(char::from(*byte));
-            }
-            _ => uri.push_str(&format!("%{byte:02X}")),
-        }
-    }
-    uri
 }
 
 /// A pipeline described as `gst-launch` takes one, paused.
@@ -191,7 +171,7 @@ impl Player {
         };
         let pipeline = Pipeline::launch(&format!(
             "playbin uri=\"{}\" video-sink=fakesink{silent}",
-            uri(path)
+            crate::platform::file_uri(path)
         ))?;
         // Prerolling reports a file no plugin decodes as an error.
         if pipeline.wait(PATIENCE, ASYNC_DONE | ERROR) != Some(ASYNC_DONE) {

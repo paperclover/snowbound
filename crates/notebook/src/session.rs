@@ -10,9 +10,10 @@ use onestore::{
     document::Document,
     op::{Edit, Op, SectionOp},
     page::Page,
+    protected,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     io,
     io::Write,
     path::{Path, PathBuf},
@@ -99,14 +100,9 @@ pub trait Storage: Send + Sync {
     fn place(&self, path: &str, ancestor: [u8; 16], name: &str) -> Result<()>;
     /// Publishes a transaction made on the file's current image.
     fn commit(&self, path: &str, transaction: &Transaction) -> Result<()>;
-}
-
-/// A password-protected section as `Notebook::unlock` read it.
-#[cfg(feature = "protected")]
-pub struct Unlocked {
-    pub pages: Vec<(ExGuid, Page)>,
-    /// The stored section the pages came from, which an edit must still find in place.
-    snapshot: Vec<u8>,
+    /// Puts the file `with` in the place of the section or TOC at `path` under the coordination
+    /// its writers take, provided `path` still has `base`'s stamp.
+    fn supersede(&self, path: &str, base: &Stamp, with: &str) -> Result<()>;
 }
 
 /// A mounted notebook directory.
@@ -235,6 +231,14 @@ impl Storage for Directory {
     fn commit(&self, path: &str, transaction: &Transaction) -> Result<()> {
         Ok(transaction.commit_file(self.path(path))?)
     }
+
+    fn supersede(&self, path: &str, base: &Stamp, with: &str) -> Result<()> {
+        Ok(onestore::supersede_file(
+            self.path(path),
+            base,
+            self.path(with),
+        )?)
+    }
 }
 
 /// A notebook directory on an SMB share, reached through the native-compatible client.
@@ -275,7 +279,7 @@ impl Storage for Share {
     fn exists(&self, path: &str) -> bool {
         let (folder, name) = split(path);
         self.client
-            .read_dir(&self.path(folder), 100_000)
+            .read_dir(&self.path(folder), LIMITS.entries)
             .is_ok_and(|entries| entries.iter().any(|entry| entry.name == name))
     }
 
@@ -322,9 +326,15 @@ impl Storage for Share {
             .client
             .commit_transaction(&self.path(path), transaction)?)
     }
+
+    fn supersede(&self, path: &str, base: &Stamp, with: &str) -> Result<()> {
+        Ok(self
+            .client
+            .supersede(&self.path(path), base, &self.path(with))?)
+    }
 }
 
-const LIMITS: discover::Limits = discover::Limits {
+pub(crate) const LIMITS: discover::Limits = discover::Limits {
     entries: 100_000,
     bytes_per_file: 256 * 1024 * 1024,
     depth: 64,
@@ -415,20 +425,16 @@ impl Notebook {
         let catalog = storage.discover(&mut read, LIMITS)?;
         let location = storage.location();
         let mut claims: BTreeMap<String, Vec<([u8; 16], &str)>> = BTreeMap::new();
-        let mut folders = vec![&catalog];
-        while let Some(folder) = folders.pop() {
-            for section in &folder.sections {
-                let identity = match (&root, &section.state) {
-                    (Some(_), discover::SectionState::Readable { document, .. }) => *document,
-                    (None, discover::SectionState::Readable { .. }) => section.file_id,
-                    _ => continue,
-                };
-                claims
-                    .entry(replica_location(&location, section))
-                    .or_default()
-                    .push((identity, &section.path));
-            }
-            folders.extend(&folder.groups);
+        for section in catalog.sections() {
+            let identity = match (&root, &section.state) {
+                (Some(_), discover::SectionState::Readable { document, .. }) => *document,
+                (None, discover::SectionState::Readable { .. }) => section.file_id,
+                _ => continue,
+            };
+            claims
+                .entry(replica_location(&location, section))
+                .or_default()
+                .push((identity, &section.path));
         }
         for (at, sections) in &claims {
             let identities: Vec<[u8; 16]> =
@@ -447,6 +453,7 @@ impl Notebook {
             listing,
         };
         notebook.keep_listing();
+        notebook.forget_superseded();
         Ok(notebook)
     }
 
@@ -545,30 +552,23 @@ impl Notebook {
             }
         }
         self.catalog = catalog;
+        self.forget_superseded();
         Ok(changes)
     }
 
     fn folder(&self, path: &str) -> Result<&discover::Folder> {
-        let mut folders = vec![&self.catalog];
-        while let Some(folder) = folders.pop() {
-            if folder.path == path {
-                return Ok(folder);
-            }
-            folders.extend(&folder.groups);
-        }
-        Err(io::Error::from(io::ErrorKind::NotFound).into())
+        self.catalog
+            .folders()
+            .find(|folder| folder.path == path)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound).into())
     }
 
     /// A catalog section's path, refusing paths the catalog does not list.
     fn section_path(&self, path: &str) -> Result<&discover::Section> {
-        let mut folders = vec![&self.catalog];
-        while let Some(folder) = folders.pop() {
-            if let Some(section) = folder.sections.iter().find(|section| section.path == path) {
-                return Ok(section);
-            }
-            folders.extend(&folder.groups);
-        }
-        Err(io::Error::from(io::ErrorKind::NotFound).into())
+        self.catalog
+            .sections()
+            .find(|section| section.path == path)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::NotFound).into())
     }
 
     /// A folder's TOC path and file identity, creating the TOC when the folder has none
@@ -1051,6 +1051,56 @@ impl Notebook {
         Ok(purged)
     }
 
+    /// Empties the recycle bin as OneNote 2010's Empty Recycle Bin does: every page of
+    /// Deleted Pages goes in one revision, and every binned section's file goes, its entry
+    /// left in the bin's TOC (`corpus/recycle-bin-view`).
+    pub fn empty_recycle_bin(&mut self) -> Result<()> {
+        let Ok(bin) = self.folder(RECYCLE_BIN) else {
+            return Ok(());
+        };
+        let sections: Vec<String> = (bin.sections.iter())
+            .filter(|section| !section.copy)
+            .map(|section| section.path.clone())
+            .collect();
+        for path in sections {
+            if !split(&path)
+                .1
+                .eq_ignore_ascii_case("OneNote_DeletedPages.one")
+            {
+                self.storage.delete(&path)?;
+                continue;
+            }
+            let arena = onestore::Arena::default();
+            let mut section = onestore::Section::open(&arena, self.storage.read(&path)?)?;
+            let pages: Vec<ExGuid> = section
+                .pages()?
+                .into_iter()
+                .map(|(space, ..)| space)
+                .collect();
+            if pages.is_empty() {
+                continue;
+            }
+            section.apply(
+                "",
+                &Edit {
+                    at: crate::now(),
+                    ops: vec![Op::Section(SectionOp::Delete(pages))],
+                },
+            )?;
+            if let Some(transaction) = section.seal()? {
+                self.storage.commit(&path, &transaction)?;
+            }
+        }
+        self.refresh().map(drop)
+    }
+
+    /// The table of contents of the folder at catalog path `folder` as its file stores it.
+    pub fn read_toc(&self, folder: &str) -> Result<Vec<u8>> {
+        let toc = self.folder(folder)?.toc.as_ref();
+        let toc = toc.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound))?;
+        self.storage.read(&catalog_path(folder, &toc.filename))
+    }
+
     /// Moves a section or section group into the folder at catalog path `folder`, last, as
     /// OneNote moves one dragged onto a group: the file or folder moves and each TOC's
     /// entry follows it. Returns its new catalog path.
@@ -1133,14 +1183,11 @@ impl Notebook {
         let Some(link) = onestore::page::link::parse_internal_link(url) else {
             return Ok(None);
         };
-        let mut sections = Vec::new();
-        let mut folders = vec![&self.catalog];
-        while let Some(folder) = folders.pop() {
-            sections.extend(folder.sections.iter().filter(|section| {
-                matches!(section.state, discover::SectionState::Readable { .. })
-            }));
-            folders.extend(&folder.groups);
-        }
+        let mut sections: Vec<_> = self
+            .catalog
+            .sections()
+            .filter(|section| matches!(section.state, discover::SectionState::Readable { .. }))
+            .collect();
         sections.sort_by_key(|section| section.file_id != link.section);
         let Some(page) = link.page else {
             return Ok(sections
@@ -1168,56 +1215,172 @@ impl Notebook {
         self.storage.read(&self.section_path(path)?.path)
     }
 
-    /// The pages of a password-protected section: nothing is cached, and the decoded
-    /// buffers go when the pages have been built.
-    #[cfg(feature = "protected")]
-    pub fn unlock(&self, path: &str, password: &str) -> Result<Unlocked> {
-        let path = self.section_path(path)?.path.clone();
-        let snapshot = self.storage.read(&path)?;
-        let pages = {
-            let store = Store::parse(&snapshot)?;
-            let index = RevisionIndex::parse(&store)?;
-            let unlocked = onestore::protected::UnlockedSection::open(
-                &index,
-                password,
-                onestore::protected::Limits::default(),
-            )?;
-            let document = unlocked.document()?;
-            document
-                .pages()?
-                .into_iter()
-                .map(|(space, _)| Ok((space, Page::from_space(&document, space)?)))
-                .collect::<Result<_>>()?
-        };
-        Ok(Unlocked { pages, snapshot })
+    /// The key of the password-protected section at catalog `path`, opened with `password`.
+    /// Edits this device queued before the section was protected elsewhere, held since, are
+    /// queued again under the key: each page they changed comes back as a copy, as a page
+    /// another client removed does, the section's pages having taken new identities.
+    pub fn unlock(&self, path: &str, password: &str) -> Result<protected::Key> {
+        let section = self.section_path(path)?;
+        let image = self.storage.read(&section.path)?;
+        let key = protected::Key::open(&image, password)?;
+        let held: Vec<PathBuf> = self
+            .superseded(&[section])
+            .into_iter()
+            .filter(|(.., queued)| *queued > 0)
+            .map(|(replica, ..)| replica)
+            .collect();
+        if !held.is_empty() {
+            let replica =
+                Replica::open_or_create(self.replica_path(path)?, Some(&key), || Ok(image))?;
+            for path in held {
+                // A queue sealed under an earlier password waits for that password.
+                let Ok(old) = Replica::open(&path) else {
+                    continue;
+                };
+                for (author, edit) in old.copies()? {
+                    replica.apply(&author, edit)?;
+                }
+                drop(old);
+                remove_replica(&path)?;
+            }
+        }
+        Ok(key)
     }
 
-    /// Applies `edit` to pages of `unlocked` and stores it under the section's key, straight
-    /// to the file: nothing of a protected section is cached or queued. A section written
-    /// since `unlocked` was read refuses the edit; unlock again for its pages.
-    #[cfg(feature = "protected")]
-    pub fn apply_unlocked(
+    /// The replicas of the files the protected `locked` sections superseded when their
+    /// passwords were set (`onestore::protected::rekey` keeps the placement a file's header
+    /// names), each held so that no one opens it meanwhile, with how many edits it queues. Only
+    /// replicas no readable section names are read; one in use is left.
+    fn superseded(
         &self,
+        locked: &[&discover::Section],
+    ) -> Vec<(PathBuf, rusqlite::Connection, u64)> {
+        let named: BTreeSet<PathBuf> = self
+            .catalog
+            .sections()
+            .filter(|section| matches!(section.state, discover::SectionState::Readable { .. }))
+            .filter_map(|section| self.replica_path(&section.path).ok())
+            .collect();
+        let placed: Vec<_> = locked
+            .iter()
+            .filter_map(|section| {
+                let (_, stamp) = self.read.found(&section.path)?;
+                Some((section.file_id, stamp.header, self.replica_folder(section)))
+            })
+            .collect();
+        let folders: BTreeSet<&PathBuf> = placed.iter().map(|(.., folder)| folder).collect();
+        let mut superseded = Vec::new();
+        for folder in folders {
+            let Ok(entries) = std::fs::read_dir(folder) else {
+                continue;
+            };
+            for path in entries.filter_map(|entry| Some(entry.ok()?.path())) {
+                if path
+                    .extension()
+                    .is_none_or(|extension| extension != "sqlite")
+                    || named.contains(&path)
+                {
+                    continue;
+                }
+                let Ok(held) = crate::closed(&path) else {
+                    continue;
+                };
+                let Ok((base, queued)) = crate::peek(&held) else {
+                    continue;
+                };
+                let Ok(header) = onestore::Header::parse(&base.header) else {
+                    continue;
+                };
+                if placed.iter().any(|(file, stamp, at)| {
+                    at == folder
+                        && base.header[128..148] == stamp[128..148]
+                        && header.file_id != *file
+                }) {
+                    superseded.push((path, held, queued));
+                }
+            }
+        }
+        superseded
+    }
+
+    /// Deletes the replicas holding nothing unpublished of files a protected section
+    /// superseded: their plaintext is the section's before its password.
+    fn forget_superseded(&self) {
+        let locked: Vec<_> = self
+            .catalog
+            .sections()
+            .filter(|section| matches!(section.state, discover::SectionState::Locked))
+            .collect();
+        if locked.is_empty() {
+            return;
+        }
+        for (replica, held, queued) in self.superseded(&locked) {
+            drop(held);
+            if queued == 0 {
+                let _ = remove_replica(&replica);
+            }
+        }
+    }
+
+    /// Sets, changes or removes the password of the section at catalog `path`, as OneNote
+    /// 2010 does: the section is written anew under new identities (`onestore::protected::
+    /// rekey`), the file replaces the old one and its folder's TOC follows it. `key` opens
+    /// it as it stands; `password` protects it anew, or `None` leaves it unprotected. Its
+    /// replica, a cache of the old file, goes too, so its session must be closed and its
+    /// edits published first. Returns the new key.
+    pub fn set_password(
+        &mut self,
         path: &str,
-        password: &str,
-        unlocked: &mut Unlocked,
-        author: &str,
-        edit: &Edit,
-    ) -> Result<()> {
-        let path = self.section_path(path)?.path.clone();
-        let transaction = {
-            let store = Store::parse(&unlocked.snapshot)?;
-            let index = RevisionIndex::parse(&store)?;
-            onestore::protected::UnlockedSection::open(
-                &index,
-                password,
-                onestore::protected::Limits::default(),
-            )?
-            .apply(author, edit)?
-        };
-        self.storage.commit(&path, &transaction)?;
-        transaction.apply(&mut unlocked.snapshot)?;
-        Ok(())
+        key: Option<&protected::Key>,
+        password: Option<&str>,
+    ) -> Result<Option<protected::Key>> {
+        let section = self.section_path(path)?;
+        let replica = self.replica_path(path)?;
+        // Held until the file is replaced, so that no session queues edits to the old file.
+        let held = replica
+            .exists()
+            .then(|| crate::closed(&replica))
+            .transpose()?;
+        if let Some(held) = &held
+            && crate::peek(held)?.1 > 0
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Edits to the section wait to be published",
+            )
+            .into());
+        }
+        let source = self.storage.read(&section.path)?;
+        let new = password.map(protected::Key::new).transpose()?;
+        let image = onestore::protected::rekey(&source, key, new.as_ref())?;
+        let (folder, filename) = split(&section.path);
+        // A dot file, which discovery and OneNote pass over, until it replaces the section.
+        let written = catalog_path(folder, &format!(".{filename}.snowbound"));
+        if self.storage.exists(&written) {
+            self.storage.delete(&written)?;
+        }
+        self.storage.create(&written, &image)?;
+        if let Err(error) = self
+            .storage
+            .supersede(&section.path, &Stamp::of(&source)?, &written)
+        {
+            let _ = self.storage.delete(&written);
+            return Err(error);
+        }
+        drop(held);
+        remove_replica(&replica)?;
+        let parent = self.folder(folder)?;
+        if let Some(identity) = Entry::of(parent, section).identity {
+            self.edit_toc(
+                folder,
+                &[onestore::TocEdit::Reidentify {
+                    identity,
+                    with: Store::parse(&image)?.header.file_id,
+                }],
+            )?;
+        }
+        self.refresh()?;
+        Ok(new)
     }
 
     /// Where the replica of the section at catalog `path` lives, in the notebook's
@@ -1250,22 +1413,16 @@ impl Notebook {
     /// discovery read so that each is read once.
     pub fn replicas(&mut self) -> Vec<Known> {
         let mut images = self.read.take();
-        let mut sections = Vec::new();
-        let mut folders = vec![&self.catalog];
-        while let Some(folder) = folders.pop() {
-            for section in &folder.sections {
-                if matches!(section.state, discover::SectionState::Readable { .. }) {
-                    sections.push(Known {
-                        path: section.path.clone(),
-                        replica: self.replica_path(&section.path).ok(),
-                        found: self.read.found(&section.path),
-                        image: images.remove(&section.path),
-                    });
-                }
-            }
-            folders.extend(folder.groups.iter().rev());
-        }
-        sections
+        self.catalog
+            .sections()
+            .filter(|section| matches!(section.state, discover::SectionState::Readable { .. }))
+            .map(|section| Known {
+                path: section.path.clone(),
+                replica: self.replica_path(&section.path).ok(),
+                found: self.read.found(&section.path),
+                image: images.remove(&section.path),
+            })
+            .collect()
     }
 
     /// Keeps the sections of a mounted notebook in sync while they are not open
@@ -1327,6 +1484,37 @@ impl Notebook {
         connect: impl FnMut(&Path) -> io::Result<R> + Send + 'static,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Section> {
+        self.open_section(path, None, connect, notify)
+    }
+
+    /// `section` for a password-protected section, under the `key` `unlock` gave.
+    pub fn section_unlocked(
+        &self,
+        path: &str,
+        key: &protected::Key,
+        notify: impl Fn() + Send + 'static,
+    ) -> Result<Section> {
+        self.section_unlocked_with(path, key, |file| Ok(FileRemote(file.to_owned())), notify)
+    }
+
+    /// `section_with` for a password-protected section, under its `key`.
+    pub fn section_unlocked_with<R: Remote + 'static>(
+        &self,
+        path: &str,
+        key: &protected::Key,
+        connect: impl FnMut(&Path) -> io::Result<R> + Send + 'static,
+        notify: impl Fn() + Send + 'static,
+    ) -> Result<Section> {
+        self.open_section(path, Some(key), connect, notify)
+    }
+
+    fn open_section<R: Remote + 'static>(
+        &self,
+        path: &str,
+        key: Option<&protected::Key>,
+        connect: impl FnMut(&Path) -> io::Result<R> + Send + 'static,
+        notify: impl Fn() + Send + 'static,
+    ) -> Result<Section> {
         let section = self.section_path(path)?;
         let (path, replicas) = (section.path.clone(), self.replica_folder(section));
         let Some(root) = &self.root else {
@@ -1355,7 +1543,7 @@ impl Notebook {
             std::fs::create_dir_all(&replicas)?;
             Ok(replica_file(&replicas, identity))
         };
-        Section::open_in(file, replica, connect, notify)
+        Section::open_in(file, key, replica, connect, notify)
     }
 }
 
@@ -1411,7 +1599,18 @@ pub struct StoredPage {
 pub fn stored_pages(image: &[u8]) -> Result<Vec<StoredPage>> {
     let store = Store::parse(image)?;
     let index = RevisionIndex::parse(&store)?;
-    let document = Document::parse(&index)?;
+    pages_of(&Document::parse(&index)?)
+}
+
+/// `stored_pages` of a password-protected section, under its `key`.
+pub fn stored_pages_unlocked(image: &[u8], key: &protected::Key) -> Result<Vec<StoredPage>> {
+    let store = Store::parse(image)?;
+    let index = RevisionIndex::parse(&store)?;
+    let unlocked = protected::UnlockedSection::unlock(&index, key, Default::default())?;
+    pages_of(&unlocked.document()?)
+}
+
+fn pages_of(document: &Document<'_>) -> Result<Vec<StoredPage>> {
     Ok(document
         .pages()?
         .into_iter()
@@ -1461,7 +1660,7 @@ fn component(name: &str) -> bool {
 }
 
 /// Whether the TOC `image` holds has an entry for the file identity `file`.
-fn lists(image: &[u8], file: [u8; 16]) -> Result<bool> {
+pub(crate) fn lists(image: &[u8], file: [u8; 16]) -> Result<bool> {
     let store = Store::parse(image)?;
     let index = RevisionIndex::parse(&store)?;
     let document = Document::parse(&index)?;
@@ -1506,6 +1705,19 @@ fn replica_location(notebook: &str, section: &discover::Section) -> String {
     } else {
         notebook.to_owned()
     }
+}
+
+/// Deletes the closed replica at `replica`, with the files SQLite keeps beside it.
+fn remove_replica(replica: &Path) -> io::Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut file = replica.as_os_str().to_owned();
+        file.push(suffix);
+        match std::fs::remove_file(file) {
+            Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// The replica in `cache` of the section `identity` names.
@@ -1635,13 +1847,14 @@ impl Section {
             })?;
             Ok(replica_file(&folder, identity))
         };
-        Self::open_in(file, replicas, connect, notify)
+        Self::open_in(file, None, replicas, connect, notify)
     }
 
-    /// Opens the canonical section `file` through the replica `replica` names for its document
-    /// identity and image.
+    /// Opens the canonical section `file`, a protected one under `key`, through the replica
+    /// `replica` names for its document identity and image.
     fn open_in<R: Remote + 'static>(
         file: PathBuf,
+        key: Option<&protected::Key>,
         replica: impl FnOnce(&[u8; 16], &[u8]) -> Result<PathBuf>,
         mut connect: impl FnMut(&Path) -> io::Result<R> + Send + 'static,
         notify: impl Fn() + Send + 'static,
@@ -1650,7 +1863,7 @@ impl Section {
         let store = Store::parse(&source)?;
         let identity = RevisionIndex::parse(&store)?.root;
         let cache = replica(&identity.guid, &source)?;
-        let replica = Replica::open_or_create(&cache, || Ok(source))?;
+        let replica = Replica::open_or_create(&cache, key, || Ok(source))?;
         let remote = file.clone();
         Self::start(file, replica, move || connect(&remote), notify)
     }
@@ -2015,3 +2228,6 @@ impl Drop for Section {
         drop(self.worker.take());
     }
 }
+
+#[cfg(test)]
+mod tests;

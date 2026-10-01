@@ -27,6 +27,8 @@ pub enum Structure {
     Delete {
         path: String,
     },
+    /// Deletes for good what the recycle bin holds.
+    EmptyRecycleBin,
     /// Moves a section or group into another folder.
     Move {
         path: String,
@@ -54,6 +56,12 @@ pub enum Structure {
     Properties {
         name: String,
         color: Option<u32>,
+    },
+    /// Sets, changes or removes a section's password: `key` opens it as it stands.
+    Password {
+        path: String,
+        key: Option<onestore::protected::Key>,
+        password: Option<zeroize::Zeroizing<String>>,
     },
 }
 
@@ -234,7 +242,7 @@ impl State {
     }
 
     /// Applies `ops` to the open page as one edit and shows the result.
-    fn edit_page(&mut self, ops: Vec<PageOp>) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn edit_page(&mut self, ops: Vec<PageOp>) -> Result<(), Box<dyn Error>> {
         if ops.is_empty() {
             return Ok(());
         }
@@ -247,6 +255,7 @@ impl State {
                 ops: ops.into_iter().map(|op| Op::Page { space, op }).collect(),
             },
         )?;
+        self.edited(vec![space]);
         self.refresh()
     }
 
@@ -351,22 +360,7 @@ impl State {
                 },
             );
         }
-        ui.open(
-            "buttons",
-            Spec {
-                size: [fill(), children()],
-                pad: [0.0, 8.0],
-                gap: 8.0,
-                ..Spec::default()
-            },
-        );
-        ui.leaf(
-            "space",
-            Spec {
-                size: [fill(), px(1.0)],
-                ..Spec::default()
-            },
-        );
+        crate::buttons(ui);
         let cancel = ui::button(ui, "cancel", "Cancel").clicked;
         let create = ui::button(ui, "create", "Create").clicked || entered;
         ui.close();
@@ -660,23 +654,15 @@ impl State {
             library.close_kept();
             let mut notebook = library.reopen()?;
             let names = |notebook: &Notebook, folder: &str| -> Vec<String> {
-                let mut folders = vec![notebook.catalog()];
-                while let Some(candidate) = folders.pop() {
-                    if candidate.path == folder {
-                        return candidate
-                            .sections
-                            .iter()
-                            .map(|section| section.path.clone())
-                            .chain(candidate.groups.iter().map(|group| group.path.clone()))
-                            .map(|path| {
-                                let name = path.rsplit('/').next().unwrap_or_default();
-                                name.strip_suffix(".one").unwrap_or(name).to_owned()
-                            })
-                            .collect();
-                    }
-                    folders.extend(&candidate.groups);
-                }
-                Vec::new()
+                let found = crate::library::folders(notebook.catalog(), |_| true)
+                    .into_iter()
+                    .find(|candidate| candidate.path == folder);
+                found.map_or_else(Vec::new, |folder| {
+                    (folder.sections.iter().map(|section| &section.path))
+                        .chain(folder.groups.iter().map(|group| &group.path))
+                        .map(|path| crate::library::entry_name(path).to_owned())
+                        .collect()
+                })
             };
             // A notebook not shown stays so through a change of its colours or name.
             let stays = matches!(
@@ -709,6 +695,11 @@ impl State {
                     notebook.delete(&path)?;
                     (current, None)
                 }
+                // A section of the bin open goes with it.
+                Structure::EmptyRecycleBin => {
+                    notebook.empty_recycle_bin()?;
+                    (current.filter(|path| !crate::recycle::binned(path)), None)
+                }
                 Structure::Move { path, folder } => {
                     let moved = notebook.move_entry(&path, &folder)?;
                     (current.map(|current| follow(&current, &path, &moved)), None)
@@ -731,6 +722,24 @@ impl State {
                 Structure::Color { path, color } => {
                     notebook.set_section_color(&path, color)?;
                     (current, None)
+                }
+                Structure::Password {
+                    path,
+                    key,
+                    password,
+                } => {
+                    let key = notebook.set_password(
+                        &path,
+                        key.as_ref(),
+                        password.as_deref().map(String::as_str),
+                    )?;
+                    let library = Arc::new(library.with(notebook));
+                    if let Some(key) = key {
+                        library.keep_key(&path, key);
+                    }
+                    let section = library.open(&path, notify)?;
+                    let (session, page) = read_session(section, library, path, None)?;
+                    return Ok(Loaded::Section(Box::new(session), page));
                 }
                 Structure::Properties { name, color } => {
                     if name != library.name {
@@ -1187,7 +1196,8 @@ mod tests {
         let root = temporary.join("Emptied");
         let location = root.to_str().unwrap();
         let cache = temporary.join("cache");
-        let mut notebook = Notebook::create(location, &cache, Notebook::NEW_COLOR, &dated()).unwrap();
+        let mut notebook =
+            Notebook::create(location, &cache, Notebook::NEW_COLOR, &dated()).unwrap();
         notebook.create_group("", "Group").unwrap();
         notebook.create_section("Group", "Inner", &dated()).unwrap();
 

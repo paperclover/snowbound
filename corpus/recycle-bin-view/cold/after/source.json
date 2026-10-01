@@ -1,0 +1,32 @@
+[
+  {
+    "path": "New Section 1.one",
+    "bytes": 10768,
+    "sha256": "dba689859ca9223cc7f7280b8126df9dcfa8bad9146237a2609d69cc1fc014d9",
+    "mtime_ns": 1790878542932303216
+  },
+  {
+    "path": "OneNote_RecycleBin/OneNote_DeletedPages.one",
+    "bytes": 14816,
+    "sha256": "bb80046a0205e1aac6ac1d6b04b50285921860880a3da23b26832a0582391979",
+    "mtime_ns": 1790878543094303021
+  },
+  {
+    "path": "OneNote_RecycleBin/Open Notebook.onetoc2",
+    "bytes": 6440,
+    "sha256": "b932bfa563549a224ab8f3f950d4b23c0e74fbdd56d2ba31b1296ee33495c2c3",
+    "mtime_ns": 1790878543072446775
+  },
+  {
+    "path": "Open Notebook.onetoc2",
+    "bytes": 11160,
+    "sha256": "00509e99899c98ce844e32441563d64714964d0d1f4b976a1e1e55e6558a5405",
+    "mtime_ns": 1790878543056292320
+  },
+  {
+    "path": "Restored.one",
+    "bytes": 6120,
+    "sha256": "79fbc722219346d2b4359b4bdb3efd60fed68c7953bdf76354501a0f8e614a31",
+    "mtime_ns": 1790878543039977656
+  }
+]

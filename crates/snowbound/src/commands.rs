@@ -26,7 +26,22 @@ pub enum Id {
     NewSubpage,
     PageVersions,
     CopyPageLink,
+    /// Password Protection on the section shown.
+    PasswordProtect,
+    /// Locks every password-protected section unlocked.
+    LockAll,
     ShowNotebook,
+    /// Save As: the page, section or notebook as a OneNote section, package or PDF.
+    SaveAs,
+    /// The notebook's recycle bin, shown in place of its sections, or left.
+    RecycleBin,
+    EmptyRecycleBin,
+    /// Marks the page shown read, or unread.
+    MarkRead,
+    MarkNotebookRead,
+    /// Show Unread Changes in This Notebook.
+    ShowUnread,
+    NextUnread,
     ExportPdf,
     Print,
     Undo,
@@ -239,6 +254,18 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::PageVersions, "Page Versions", NONE, NONE),
     row!(Id::CopyPageLink, "Copy Link to Page", NONE, NONE),
     row!(
+        Id::PasswordProtect,
+        "Password Protect This Section…",
+        NONE,
+        NONE
+    ),
+    row!(
+        Id::LockAll,
+        "Lock All Sections",
+        &[cmd('l').option()],
+        &[cmd('l').option()]
+    ),
+    row!(
         Id::ShowNotebook,
         if cfg!(target_os = "macos") {
             "Show in Finder"
@@ -248,6 +275,24 @@ pub const COMMANDS: &[Command] = &[
         NONE,
         NONE,
     ),
+    row!(
+        Id::SaveAs,
+        "Save As…",
+        &[cmd('s').shift()],
+        &[cmd('s').shift()]
+    ),
+    row!(Id::RecycleBin, "Notebook Recycle Bin", NONE, NONE),
+    row!(Id::EmptyRecycleBin, "Empty Recycle Bin", NONE, NONE),
+    // OneNote 2010's Ctrl+Q; macOS keeps Command-Q for Quit.
+    row!(Id::MarkRead, "Mark as Read", NONE, &[cmd('q')]),
+    row!(Id::MarkNotebookRead, "Mark Notebook as Read", NONE, NONE),
+    row!(
+        Id::ShowUnread,
+        "Show Unread Changes in This Notebook",
+        NONE,
+        NONE
+    ),
+    row!(Id::NextUnread, "Next Unread", NONE, NONE),
     row!(Id::ExportPdf, "Export as PDF…", NONE, NONE),
     // Go to takes OneNote's Ctrl+P, and Pause its Ctrl+Alt+P.
     row!(
@@ -1003,7 +1048,7 @@ impl State {
     /// ⌘K, to the open palette's actions.
     pub(crate) fn statuses(&self) -> Vec<Status> {
         // A chord Options records reaches it past the menu bar's disabled items.
-        if self.recording_chord() {
+        if (self.options.as_ref()).is_some_and(|options| options.keyboard.recording()) {
             return vec![Status::default(); choices().count()];
         }
         let format = self.format_state();
@@ -1020,6 +1065,7 @@ impl State {
         let session = self.session.as_ref();
         let welcome = session.is_none() && !self.temporary && self.sectionless.is_none();
         let modal = self.options.is_some()
+            || self.password.is_some()
             || self.themes.is_some()
             || self.printing.open()
             || self.link.is_some()
@@ -1071,6 +1117,39 @@ impl State {
             | Id::Help
             | Id::CheckForUpdates => enabled(!modal),
             Id::CloseNotebook => enabled(!modal && self.notebook().is_some()),
+            Id::PasswordProtect => enabled(!modal && self.shown_section().is_some()),
+            Id::SaveAs => enabled(!modal && self.notebook().is_some()),
+            Id::RecycleBin => Status {
+                enabled: !modal
+                    && self
+                        .notebook()
+                        .is_some_and(|library| library.catalog().is_some()),
+                checked: Some(self.in_recycle_bin()),
+            },
+            Id::EmptyRecycleBin => enabled(
+                !modal
+                    && self
+                        .notebook()
+                        .is_some_and(|library| !library.tabs(crate::recycle::BIN).is_empty()),
+            ),
+            Id::MarkRead => Status {
+                enabled: !modal && session.is_some() && !self.in_recycle_bin(),
+                checked: Some(!self.page_unread()),
+            },
+            Id::MarkNotebookRead | Id::NextUnread => enabled(
+                !modal
+                    && self
+                        .notebook()
+                        .is_some_and(|library| self.unread_notebook(library)),
+            ),
+            Id::ShowUnread => Status {
+                enabled: !modal && self.notebook().is_some(),
+                checked: Some(
+                    self.notebook()
+                        .is_some_and(|library| self.reads.shown(&library.location)),
+                ),
+            },
+            Id::LockAll => enabled(!modal),
             Id::ShowNotebook => enabled(
                 !modal
                     && self
@@ -1083,13 +1162,13 @@ impl State {
                         .notebook()
                         .is_some_and(|library| library.catalog().is_some()),
             ),
-            Id::NewPage
-            | Id::NewSubpage
-            | Id::CopyPageLink
-            | Id::Find
-            | Id::Search
-            | Id::ExportPdf
-            | Id::Print => enabled(!modal && session.is_some()),
+            // The recycle bin takes no new pages.
+            Id::NewPage | Id::NewSubpage => {
+                enabled(!modal && session.is_some() && !self.in_recycle_bin())
+            }
+            Id::CopyPageLink | Id::Find | Id::Search | Id::ExportPdf | Id::Print => {
+                enabled(!modal && session.is_some())
+            }
             Id::PageVersions => session.filter(|_| !modal).map_or(
                 Status {
                     enabled: false,
@@ -1336,6 +1415,40 @@ impl State {
             }
             Id::ShowNotebook => {
                 platform::reveal(&self.notebook().ok_or("No notebook is open")?.location);
+                return Ok(());
+            }
+            Id::PasswordProtect => {
+                let (library, path) = self.shown_section().ok_or("No section is open")?;
+                self.password_protection(library, path);
+                return Ok(());
+            }
+            Id::LockAll => return self.lock_all(),
+            Id::SaveAs => {
+                let library = Arc::clone(self.notebook().ok_or("No notebook is open")?);
+                let scope = if self.session.is_some() {
+                    crate::save_as::Scope::Page
+                } else {
+                    crate::save_as::Scope::Notebook
+                };
+                self.open_save_as(library, None, scope);
+                return Ok(());
+            }
+            Id::RecycleBin | Id::EmptyRecycleBin | Id::MarkNotebookRead | Id::ShowUnread => {
+                let library = Arc::clone(self.notebook().ok_or("No notebook is open")?);
+                match id {
+                    Id::RecycleBin => self.toggle_recycle_bin(library),
+                    Id::EmptyRecycleBin => self.empty_recycle_bin(library),
+                    Id::MarkNotebookRead => self.mark_notebook_read(&library),
+                    _ => self.toggle_unread_shown(&library),
+                }
+                return Ok(());
+            }
+            Id::MarkRead => {
+                self.toggle_read();
+                return Ok(());
+            }
+            Id::NextUnread => {
+                self.next_unread();
                 return Ok(());
             }
             Id::ExportPdf | Id::Print => {

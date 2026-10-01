@@ -39,11 +39,6 @@ impl<'a> Space<'a> {
     pub fn active(&self) -> Option<&Revision<'a>> {
         self.revisions.get(self.contexts.get(&ExGuid::default())?)
     }
-
-    pub fn into_active(mut self) -> Option<Revision<'a>> {
-        self.revisions
-            .remove(self.contexts.get(&ExGuid::default())?)
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]

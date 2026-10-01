@@ -929,7 +929,7 @@ impl State {
     /// The tagged paragraphs `scope` takes in, only those not checked off when `unchecked`.
     fn tagged(&self, scope: TagScope, unchecked: bool) -> Vec<Tagged> {
         let session = self.session.as_ref();
-        let open = session.map(|session| session.library.key(&session.tabs[session.tab].path));
+        let open = session.map(crate::Session::key);
         // The open page with its subpages, or the page it is a subpage of with its others.
         let group: Vec<_> = session
             .and_then(|session| {

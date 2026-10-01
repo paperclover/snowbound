@@ -11,14 +11,14 @@ use onestore::page::text::Paragraph;
 pub struct MathLayout {
     pub size: [f32; 2],
     /// COLORREF for rules and strokes, or `None` for the paper's ink.
-    pub color: Option<u32>,
+    pub(crate) color: Option<u32>,
     /// Distance from the top to the baseline of the equation's main row.
     pub baseline: f32,
-    pub items: Vec<MathItem>,
+    pub(crate) items: Vec<MathItem>,
 }
 
 #[derive(Clone)]
-pub enum MathItem {
+pub(crate) enum MathItem {
     Text {
         layout: TextLayout,
         origin: [f32; 2],
@@ -79,7 +79,7 @@ fn offset(item: MathItem, [dx, dy]: [f32; 2]) -> MathItem {
             layout,
             origin: [origin[0] + dx, origin[1] + dy],
         },
-        MathItem::Rule([x0, y0, x1, y1]) => MathItem::Rule([x0 + dx, y0 + dy, x1 + dx, y1 + dy]),
+        MathItem::Rule(rect) => MathItem::Rule(crate::translated(rect, [dx, dy])),
         MathItem::Stroke { from, to, width } => MathItem::Stroke {
             from: [from[0] + dx, from[1] + dy],
             to: [to[0] + dx, to[1] + dy],

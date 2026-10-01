@@ -25,9 +25,13 @@ pub fn section(
     notebook: &Notebook,
     _: &Path,
     path: &str,
+    key: Option<&onestore::protected::Key>,
     notify: impl Fn() + Send + 'static,
 ) -> Result<Section, notebook::Error> {
-    notebook.section(path, notify)
+    match key {
+        Some(key) => notebook.section_unlocked(path, key, notify),
+        None => notebook.section(path, notify),
+    }
 }
 
 pub fn lone_section(

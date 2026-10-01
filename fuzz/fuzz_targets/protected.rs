@@ -1,12 +1,14 @@
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use onestore::{
-    Reference, RevisionIndex, Store,
-    protected::{Limits, UnlockedSection},
+    Arena, Reference, RevisionIndex, Section, Store,
+    protected::{Key, Limits, UnlockedSection},
 };
 use std::{ops::Range, sync::LazyLock};
 
-static SOURCES: LazyLock<Vec<(Vec<u8>, String, Vec<Range<usize>>)>> = LazyLock::new(|| {
+type Source = (Vec<u8>, String, Vec<Range<usize>>, Key);
+
+static SOURCES: LazyLock<Vec<Source>> = LazyLock::new(|| {
     [
         (&include_bytes!("../../corpus/native-encrypted/encrypted-01/notebook/synthetic.one")[..], include_str!("../../corpus/native-encrypted/manifest.json")),
         (&include_bytes!("../../corpus/native-protected-boundaries/notebook/synthetic.one")[..], include_str!("../../corpus/native-protected-boundaries/manifest.json")),
@@ -21,7 +23,9 @@ static SOURCES: LazyLock<Vec<(Vec<u8>, String, Vec<Range<usize>>)>> = LazyLock::
         }).collect();
         ranges.sort_by_key(|range| (range.start, range.end));
         ranges.dedup();
-        (bytes.to_vec(), manifest["password"].as_str().unwrap().to_owned(), ranges)
+        let password = manifest["password"].as_str().unwrap().to_owned();
+        let key = Key::open(bytes, &password).unwrap();
+        (bytes.to_vec(), password, ranges, key)
     }).collect()
 });
 
@@ -29,7 +33,7 @@ fuzz_target!(|data: &[u8]| {
     if data.len() < 8 {
         return;
     }
-    let (source, password, ranges) = &SOURCES[usize::from(data[0]) % SOURCES.len()];
+    let (source, password, ranges, key) = &SOURCES[usize::from(data[0]) % SOURCES.len()];
     let mut bytes = source.clone();
     let mut password = password.clone();
     let mode = data[1] % 3;
@@ -45,6 +49,12 @@ fuzz_target!(|data: &[u8]| {
         let count = (range.len() - offset).min(data.len() - 8);
         bytes[range.start + offset..range.start + offset + count]
             .copy_from_slice(&data[8..8 + count]);
+    }
+    // The kept-open section decodes the same bytes under the section's key.
+    if let Ok(mut section) = Section::unlock(&Arena::default(), bytes.clone(), key) {
+        for (space, ..) in section.pages().unwrap_or_default() {
+            let _ = section.page(space);
+        }
     }
     let Ok(store) = Store::parse(&bytes) else {
         return;

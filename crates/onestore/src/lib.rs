@@ -10,6 +10,7 @@ mod edit;
 mod files;
 mod flush;
 mod formatting;
+mod identity;
 mod insertion;
 mod objects;
 pub mod op;
@@ -18,7 +19,6 @@ pub mod page;
 mod pages;
 mod paragraph;
 mod properties;
-#[cfg(feature = "protected")]
 pub mod protected;
 mod revisions;
 mod section;
@@ -33,10 +33,11 @@ mod write;
 
 pub use commit::{CommitError, CommitIo, CommitState, Stamp, Transaction, confirm, place};
 #[cfg(any(unix, windows))]
-pub use commit::{confirm_file, place_file, read_file, read_file_limited};
+pub use commit::{confirm_file, place_file, read_file, read_file_limited, supersede_file};
 pub use create::{create_empty_section, create_section, create_table_of_contents};
 pub use files::FileDataReference;
 pub use formatting::{FONT_SIZES, TextAttribute};
+pub use identity::{place_image, reidentify};
 pub(crate) use insertion::Insertion;
 pub use objects::{Object, ObjectData, ObjectReferences, ResolvedRevision};
 pub use outline::OutlineEdit;

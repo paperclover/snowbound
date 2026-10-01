@@ -34,12 +34,12 @@ const EDGE: f32 = 20.0;
 /// The row is as wide as the tabs, and gives up all of that where its own row lacks room.
 /// Then the tabs scroll sideways under the wheel, either way it turns, fading out at the
 /// ends they are cut at into the row's `fill`, and the open tab scrolls into view as it
-/// opens.
+/// opens. A tab given `true` after its colour reads bold, as an unread section's does.
 #[allow(clippy::too_many_arguments)]
 pub fn section_tabs(
     ui: &mut Ui,
     row: Id,
-    tabs: &[(&str, [f32; 4])],
+    tabs: &[(&str, [f32; 4], bool)],
     active: usize,
     lit: Option<usize>,
     dragged: Option<Dragged>,
@@ -52,8 +52,11 @@ pub fn section_tabs(
     let mut left = crate::SHADOW[0];
     let placed: Vec<_> = tabs
         .iter()
-        .map(|(name, _)| {
-            let width = TAB_PAD + ui.measure(name)[0] + 4.0 + lean(height);
+        .map(|&(name, _, bold)| {
+            let label = ui
+                .texts
+                .styled(name, ui.theme.font_size, bold, false, None, ui.frame);
+            let width = TAB_PAD + label.size[0] + 4.0 + lean(height);
             left += width;
             (left - width, width)
         })
@@ -129,7 +132,7 @@ pub fn section_tabs(
         .chain((active < tabs.len() && Some(active) != lifted).then_some(active))
         .chain(lifted);
     for index in order {
-        let (name, color) = tabs[index];
+        let (name, color, bold) = tabs[index];
         let (x, width) = placed[index];
         // Keyed by name, so a tab eases from where it stood when the tabs are reordered.
         let key = ui.id(("x", name));
@@ -164,6 +167,7 @@ pub fn section_tabs(
                 size: [px(width), px(tall)],
                 position: [x - offset, height - tall],
                 text: Some(name),
+                bold,
                 color: Some(mix(mix(theme.ink, fill, 0.2), theme.ink, open)),
                 fill: Some(if lit == Some(index) {
                     mix(colors.frame[0], [1.0; 4], 0.08)
@@ -306,6 +310,11 @@ fn opens(ui: &mut Ui, id: Id, menu: Id) {
     }
 }
 
+/// `color` as a control that does not apply now shows it.
+fn faded([red, green, blue, alpha]: [f32; 4]) -> [f32; 4] {
+    [red, green, blue, alpha * 0.35]
+}
+
 /// A tool button, with a menu arrow where `menu`, whose command does not apply now: `icon`
 /// tinted by `tint` shows faded, and it takes no clicks.
 pub fn unavailable(
@@ -315,7 +324,6 @@ pub fn unavailable(
     tint: [f32; 4],
     menu: bool,
 ) {
-    let faded = |[red, green, blue, alpha]: [f32; 4]| [red, green, blue, alpha * 0.35];
     let arrow = faded(ui.theme.text_dim);
     let id = ui.open(
         part,
@@ -530,9 +538,7 @@ pub fn combo(
     enabled: bool,
 ) {
     let theme = ui.theme.clone();
-    let faded = |[red, green, blue, alpha]: [f32; 4]| {
-        [red, green, blue, if enabled { alpha } else { alpha * 0.35 }]
-    };
+    let faded = |color| if enabled { color } else { faded(color) };
     let id = ui.open(
         part,
         Spec {

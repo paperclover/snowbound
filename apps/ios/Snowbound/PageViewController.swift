@@ -21,6 +21,8 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
     private let titleFocus: Bool
     private lazy var canvas = CanvasView(section: section, page: page)
     private let bar = ConflictBar()
+    /// Reading View, beside the page menu where the page has one.
+    private var reader: UIBarButtonItem?
     /// Opens another page or conflict page of the section.
     var onOpen: ((String) -> Void)?
     private lazy var done = UIBarButtonItem(
@@ -96,6 +98,12 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
         if revealed || titleFocus && canvas.focusTitle() {
             _ = canvas.becomeFirstResponder()
         }
+        if Prototype.reading, canvas.reading?.offered == true {
+            reader = UIBarButtonItem(
+                title: "Reading View", image: UIImage(systemName: "text.justify.left"),
+                primaryAction: UIAction { [weak self] _ in self?.toggleReading() })
+            editingChanged()
+        }
     }
 
     private func showTitle(_ title: String) {
@@ -121,8 +129,10 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
         undo.isEnabled = canvas.canUndo(redo: false)
         redo.isEnabled = canvas.canUndo(redo: true)
         // Drawing keeps undo at hand, as typing does.
+        reader?.isSelected = canvas.readingShown
         guard canvas.isFirstResponder || canvas.pickerShown else {
-            if navigationItem.rightBarButtonItems?.first !== more { navigationItem.rightBarButtonItems = [more, draw] }
+            let resting = [more, draw] + (reader.map { [$0] } ?? [])
+            if navigationItem.rightBarButtonItems != resting { navigationItem.rightBarButtonItems = resting }
             return
         }
         let items = canvas.isFirstResponder ? [done, more, draw, redo, undo] : [more, draw, redo, undo]
@@ -164,7 +174,7 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
                     title: "Space", image: UIImage(systemName: "arrow.up.and.down.text.horizontal"), attributes: editable
                 ) { [weak self] _ in self?.canvas.insertSpace() },
             ])
-        return [
+        return (Prototype.reading ? [readingAction()] : []) + [
             insert,
             UIAction(title: "Page Background…", image: UIImage(systemName: "paintpalette"), attributes: editable) {
                 [weak self] _ in self?.showPaper()
@@ -189,10 +199,25 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
                 UIAction(title: "Delete Page", image: UIImage(systemName: "trash"), attributes: .destructive) {
                     [weak self] _ in
                     guard let self else { return }
-                    section.delete(page) { _ in }
+                    section.delete(page)
                 },
             ]),
         ]
+    }
+
+    /// Reading View: the page reflowed into the screen's width, read-only, where it reflows.
+    private func readingAction() -> UIAction {
+        let reading = canvas.reading
+        return UIAction(
+            title: "Reading View", subtitle: reading.flatMap { Prototype.readingNote($0.verdict) },
+            image: UIImage(systemName: "text.justify.left"),
+            attributes: reading?.offered == true || canvas.readingShown ? [] : .disabled,
+            state: canvas.readingShown ? .on : .off
+        ) { [weak self] _ in self?.toggleReading() }
+    }
+
+    private func toggleReading() {
+        canvas.showReading(!canvas.readingShown)
     }
 
     /// The page's theme, its section's and its notebook's, each pickable; the page wears a
@@ -228,12 +253,8 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
         let paper = letter ? CGSize(width: 612, height: 792) : CGSize(width: 595.276, height: 841.89)
         let title = canvas.pageTitle ?? section.row(of: page)?.row.title ?? ""
         guard let pdf = canvas.pdf(paper: paper, section: section.tab.name) else {
-            let alert = UIAlertController(
-                title: export ? "Couldn't Export the PDF" : "Couldn't Print",
-                message: "The page could not be laid out on paper.", preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default))
-            present(alert, animated: true)
-            return
+            return alert(
+                export ? "Couldn't Export the PDF" : "Couldn't Print", "The page could not be laid out on paper.")
         }
         if export {
             let name = title.components(separatedBy: CharacterSet(charactersIn: "/\\:")).joined(separator: "-")
@@ -274,12 +295,7 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
             // Nothing typed is lost unannounced: the page's text goes on the clipboard.
             UIPasteboard.general.string = canvas.pageText
             canvas.reload(discard: true)
-            let alert = UIAlertController(
-                title: "Change Not Saved",
-                message: "The page shows what was last saved. Your text is on the clipboard to paste back.",
-                preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default))
-            present(alert, animated: true)
+            alert("Change Not Saved", "The page shows what was last saved. Your text is on the clipboard to paste back.")
         } else if flags & Section.remote != 0 {
             canvas.reload(discard: false)
         }
@@ -332,7 +348,7 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
     private func conflictAction() {
         guard let (row, version) = section.row(of: page) else { return }
         if version != nil {
-            section.delete(page) { [weak self] _ in self?.onOpen?(row.id) }
+            section.delete(page) { [weak self] in self?.onOpen?(row.id) }
         } else if let newest = row.versions.max(by: { ($0.created ?? 0) < ($1.created ?? 0) }) {
             onOpen?(newest.id)
         }

@@ -162,11 +162,11 @@ pub fn scrollbar(
     if signal.pressed
         && let Some(pointer) = pointer
     {
-        *ui.grab(id) = pointer - start;
+        ui.state(id).grab = pointer - start;
     }
     let chosen = signal.dragging.then_some(pointer).flatten().map(|pointer| {
         let travel = (track - size).max(f32::EPSILON);
-        let fraction = ((pointer - *ui.grab(id) - 4.0) / travel).clamp(0.0, 1.0);
+        let fraction = ((pointer - ui.state(id).grab - 4.0) / travel).clamp(0.0, 1.0);
         range[0] + fraction * span
     });
     let mut position = [0.0; 2];
@@ -212,7 +212,7 @@ fn system_scrollbar(
     let pointer = ui.pointer().map(|pointer| pointer[along] - rect[along]);
     let now = ui.now;
     if !signal.pressed && !signal.dragging {
-        *ui.held(id) = None;
+        ui.state(id).held = None;
     }
     let request = Scroller {
         axis,
@@ -220,7 +220,7 @@ fn system_scrollbar(
         scale: ui.scale,
         value: ((offset - range[0]) / span).clamp(0.0, 1.0),
         proportion: (view / (view + span)).clamp(0.0, 1.0),
-        held: ui.held(id).map(|(part, _)| part),
+        held: ui.state(id).held.map(|(part, _)| part),
         active: ui.window_focused,
     };
     let painted = (ui.scrollers.as_mut()?.paint)(&request);
@@ -239,15 +239,15 @@ fn system_scrollbar(
             ]
             .into_iter()
             .find(|(_, extent)| within(*extent, at));
-            *ui.held(id) = hit.map(|(part, _)| (part, now));
-            *ui.grab(id) = at - painted.knob[0];
+            ui.state(id).held = hit.map(|(part, _)| (part, now));
+            ui.state(id).grab = at - painted.knob[0];
         }
-        match *ui.held(id) {
+        match ui.state(id).held {
             Some((ScrollerPart::Knob, _)) => {
                 let travel =
                     (painted.slot[1] - painted.slot[0]) - (painted.knob[1] - painted.knob[0]);
-                let fraction = ((at - *ui.grab(id) - painted.slot[0]) / travel.max(f32::EPSILON))
-                    .clamp(0.0, 1.0);
+                let from = at - ui.state(id).grab - painted.slot[0];
+                let fraction = (from / travel.max(f32::EPSILON)).clamp(0.0, 1.0);
                 chosen = Some(range[0] + fraction * span);
             }
             Some((part, due)) if now >= due => {
@@ -260,7 +260,7 @@ fn system_scrollbar(
                     _ => view - line,
                 };
                 let delay = if signal.pressed { REPEAT_DELAY } else { REPEAT };
-                *ui.held(id) = Some((part, now + delay));
+                ui.state(id).held = Some((part, now + delay));
                 chosen = Some((offset + step).clamp(range[0], range[1]));
             }
             _ => {}
@@ -360,13 +360,11 @@ fn field(
         .zip(ui.rect(id))
         .map(|(pointer, rect)| pointer[0] - rect[0] - pad)
         .filter(|_| signal.pressed || signal.dragging);
-    let (mut selection, mut press, select) = {
-        let (selection, press, select) = ui.field(id);
-        (*selection, *press, select.take())
-    };
+    let state = ui.state(id);
+    let (mut selection, mut press, select) = (state.selection, state.press, state.select.take());
     let before = [selection.anchor(), selection.focus()];
-    let (texts, frame) = ui.texts();
-    let mut label = texts.label(&shown_text, size, false, None, frame);
+    let (texts, frame) = (&mut ui.texts, ui.frame);
+    let mut label = texts.label(&shown_text, size, frame);
     if let Some(x) = pointer {
         let layout = &label.layout;
         let unit = if signal.pressed { signal.unit } else { press.1 };
@@ -470,7 +468,7 @@ fn field(
         let range = to_text(text, range.start)..to_text(text, range.end);
         text.replace_range(range.clone(), inserted);
         shown_text = masked(text);
-        label = texts.label(&shown_text, size, false, None, frame);
+        label = texts.label(&shown_text, size, frame);
         selection = Selection::from_byte_index(
             &label.layout,
             to_shown(text, range.start + inserted.len()),
@@ -478,11 +476,9 @@ fn field(
         );
     }
     let moved = signal.pressed || before != [selection.anchor(), selection.focus()];
-    {
-        let (stored, stored_press, _) = ui.field(id);
-        *stored = selection;
-        *stored_press = press;
-    }
+    let state = ui.state(id);
+    state.selection = selection;
+    state.press = press;
     let theme = ui.theme.clone();
     let shown = if text.is_empty() {
         placeholder

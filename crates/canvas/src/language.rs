@@ -135,7 +135,7 @@ pub fn lcid(tag: &str) -> u32 {
 
 /// The BCP-47 tag of a Windows LCID; a bare language stands for the locale Windows picks
 /// for it. None for LCIDs outside the table, such as math's.
-pub fn tag(lcid: u32) -> Option<&'static str> {
+pub(crate) fn tag(lcid: u32) -> Option<&'static str> {
     LCIDS
         .iter()
         .find(|(_, known)| *known == lcid)

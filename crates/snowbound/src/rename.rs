@@ -81,8 +81,7 @@ impl State {
         let name = match &target {
             Target::Entry { path, in_tab, .. } => {
                 self.sidebar |= !in_tab;
-                let name = path.rsplit('/').next().unwrap_or_default();
-                name.strip_suffix(".one").unwrap_or(name).to_owned()
+                crate::library::entry_name(path).to_owned()
             }
             Target::Page(space) => self
                 .session
@@ -107,8 +106,7 @@ impl State {
         }
         match target {
             Target::Entry { library, path, .. } => {
-                let old = path.rsplit('/').next().unwrap_or_default();
-                if name != old.strip_suffix(".one").unwrap_or(old) {
+                if name != crate::library::entry_name(&path) {
                     self.commands.push(Command::Structure(
                         library,
                         Structure::Rename { path, name },

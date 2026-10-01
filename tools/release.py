@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -21,16 +22,14 @@ PLATFORMS = ['macos-aarch64', 'macos-x86_64', 'macos-10.6', 'linux-x86_64', 'lin
              'windows-x86_64', 'windows-aarch64']
 # Windows 7 to 11 on x86_64 (nightly's tier-3 win7 target), and Windows 11 on Arm.
 WINDOWS = {'x86_64': 'x86_64-win7-windows-gnu', 'aarch64': 'aarch64-pc-windows-gnullvm'}
-CHECKS = [
-    ['cargo', 'clippy', '--workspace', '--all-targets', '--all-features', '--', '-D', 'warnings'],
-    ['cargo', 'clippy', '-p', 'snowbound', '--no-default-features', '--', '-D', 'warnings'],
-    ['cargo', 'test', '--workspace', '--all-features'],
-]
 # Clover's Developer ID Application certificate, by its SHA-1 hash: its name is the account
 # holder's legal name, which nothing here prints or stores.
 IDENTITY = 'BA308AA3591299E053E8824CEF1651F686F8908E'
 # The App Store Connect API key that notarizes it: {"key": P8 PATH, "key_id": ID, "issuer": ID}.
 NOTARY = Path('~/.config/snowbound/notary.json').expanduser()
+# The first published build's commit: no client runs anything older, so changes start after it.
+FIRST = '354f001dec3d731a4d1a6fac0a25d9e28550d781'
+KINDS = {'feat': 'feature', 'fix': 'fix'}
 
 
 def derive(release, commits):
@@ -79,9 +78,60 @@ def run(command, **kwargs):
     subprocess.run(command, cwd=ROOT, check=True, **kwargs)
 
 
-def commit_times(revset):
-    template = 'committer.timestamp().utc().format("%Y-%m-%dT%H:%M:%S+00:00") ++ "\\n"'
-    return [datetime.fromisoformat(line) for line in jj('log', '--no-graph', '-r', revset, '-T', template).split()]
+def history():
+    """Every commit on `main` by id: its parents' ids, when it was made, and its message."""
+    template = ('commit_id ++ "\\x1f" ++ parents.map(|parent| parent.commit_id()).join(" ") ++ "\\x1f" ++ '
+                'committer.timestamp().utc().format("%Y-%m-%dT%H:%M:%S+00:00") ++ "\\x1f" ++ description ++ "\\x1e"')
+    commits = {}
+    for record in jj('log', '--no-graph', '-r', '::main', '-T', template).split('\x1e')[:-1]:
+        commit, parents, made, description = record.split('\x1f')
+        commits[commit] = (parents.split(), datetime.fromisoformat(made), description)
+    return commits
+
+
+def ancestors(commits, commit):
+    """`commit` and every commit before it."""
+    found, stack = set(), [commit]
+    while stack:
+        commit = stack.pop()
+        if commit not in found:
+            found.add(commit)
+            stack.extend(commits[commit][0])
+    return found
+
+
+def version_of(commits, commit):
+    return derive(commits[commit][1], [commits[each][1] for each in ancestors(commits, commit)])
+
+
+def entries(description):
+    """What a commit brings, as (kind, title): one entry of its prefix's kind, or one per item where
+    its body has a top-level bulleted list, each of the prefix's kind."""
+    subject, _, body = description.strip().partition('\n')
+    prefix = re.match(r'(\w+)(\([^)]*\))?!?:\s*', subject)
+    kind = KINDS.get(prefix[1].lower(), 'other') if prefix else 'other'
+    items, open_item = [], False
+    for line in body.splitlines():
+        if line.startswith(('- ', '* ')):
+            items.append(line[2:].strip())
+            open_item = True
+        elif open_item and line[:1].isspace() and line.strip():
+            items[-1] += ' ' + line.strip()
+        else:
+            open_item = False
+    titles = [title.rstrip('.') for title in items or [subject[prefix.end():] if prefix else subject]]
+    # Capitalized as a sentence, except a word like macOS or iCloud.
+    return [(kind, title if re.match(r'\S+[A-Z]', title) else title[:1].upper() + title[1:])
+            for title in titles if title]
+
+
+def changes(commits, commit):
+    """Every entry the commits after FIRST up to `commit` bring, oldest first, each with the version
+    of the commit that brought it."""
+    versions = {each: version_of(commits, each)
+                for each in ancestors(commits, commit) - ancestors(commits, FIRST)}
+    return [{'version': name(versions[each]), 'kind': kind, 'title': title}
+            for each in sorted(versions, key=versions.get) for kind, title in entries(commits[each][2])]
 
 
 def sign(files):
@@ -164,7 +214,8 @@ def main():
 
     commit = jj('log', '--no-graph', '-r', 'main', '-T', 'commit_id').strip()
     clean(args.dry_run, 'to release it')
-    version = derive(commit_times('main')[0], commit_times('::main'))
+    commits = history()
+    version = version_of(commits, commit)
     print(f'Snowbound build {version[0]} revision {version[1]}, commit {commit}', flush=True)
 
     published = Path(tempfile.mkdtemp(prefix='snowbound-release-')) if args.dry_run else PUBLISHED
@@ -177,8 +228,7 @@ def main():
             sys.exit(f'{target} holds commit {build["commit"]}, not {commit}.')
         print(f'{target} is already published.')
     else:
-        for check in CHECKS:
-            run(check)
+        run([sys.executable, ROOT / 'tools/ci.py', '--rev', commit])
         clean(args.dry_run, 'after the checks')
         stage = ROOT / 'target/release-stage' / name(version)
         shutil.rmtree(stage, ignore_errors=True)
@@ -208,6 +258,7 @@ def main():
             'version': name(version),
             'commit': commit,
             'published': datetime.now(ZONE).isoformat(timespec='seconds'),
+            'changes': changes(commits, commit),
             'archives': {platform: {
                 'file': file.name,
                 'size': file.stat().st_size,

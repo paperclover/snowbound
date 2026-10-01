@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-onestore = { path = "../crates/onestore", features = ["protected"] }
+onestore = { path = "../crates/onestore" }
 notebook = { path = "../crates/notebook" }
 canvas = { path = "../crates/canvas" }
 draw = { path = "../crates/draw", default-features = false }

@@ -30,7 +30,11 @@ enum Author {
 
     static var name: String? {
         get { UserDefaults.standard.string(forKey: key) }
-        set { UserDefaults.standard.set(newValue, forKey: key) }
+        set {
+            UserDefaults.standard.set(newValue, forKey: key)
+            // Open sections name it in their edits from now on.
+            for section in Section.all { sb_section_set_author(section.handle, newValue ?? "") }
+        }
     }
 
     /// Asks for the user name OneNote shows beside changes, then runs `then`.
@@ -126,13 +130,22 @@ struct Tab: Decodable, Equatable {
     let group: String
     let color: [UInt8]
     let readable: Bool
+    /// Password protected and not unlocked: `Notebook.unlock` opens it.
+    let locked: Bool
     /// Not on this device yet; `Notebook` asks iCloud Drive for it.
     let downloading: Bool
     /// Why the file could not be read, where retrying or repair may help.
     let problem: String?
 
-    var uiColor: UIColor {
-        UIColor(red: CGFloat(color[0]) / 255, green: CGFloat(color[1]) / 255, blue: CGFloat(color[2]) / 255, alpha: 1)
+    var uiColor: UIColor { UIColor(rgb: color) }
+}
+
+extension UIViewController {
+    /// Tells the reader `title` and `message` in an alert they dismiss with OK.
+    func alert(_ title: String, _ message: String) {
+        let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
     }
 }
 
@@ -205,13 +218,8 @@ final class Notebook {
                 }
                 let accessed = url.startAccessingSecurityScopedResource() ? url : nil
                 let local = onThisDevice(url)
-                var library: OpaquePointer?
-                // A coordinated read brings a cloud folder's files down before they are read.
-                var coordination: NSError?
-                NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordination) { url in
-                    library = sb_library_open(url.path, cacheDirectory.path, local, &error)
-                }
-                return (library, accessed, take(error) ?? coordination?.localizedDescription, local ? url : nil)
+                let (library, problem) = coordinatedOpen(url, local: local)
+                return (library, accessed, problem, local ? url : nil)
             case .documents(let path):
                 let url = documentsDirectory.appendingPathComponent(path)
                 let library = sb_library_open(url.path, cacheDirectory.path, true, &error)
@@ -220,12 +228,8 @@ final class Notebook {
                 guard let url = ICloud.documents?.appendingPathComponent(path) else {
                     return (nil, nil, "Turn on iCloud Drive in Settings to open this notebook.", nil)
                 }
-                var library: OpaquePointer?
-                var coordination: NSError?
-                NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordination) { url in
-                    library = sb_library_open(url.path, cacheDirectory.path, false, &error)
-                }
-                return (library, nil, take(error) ?? coordination?.localizedDescription, url)
+                let (library, problem) = coordinatedOpen(url, local: false)
+                return (library, nil, problem, url)
             case .path(let path):
                 let url = URL(fileURLWithPath: path)
                 let local = onThisDevice(url)
@@ -260,6 +264,21 @@ final class Notebook {
             "smb://\(server.host)/\([server.share, server.root].filter { !$0.isEmpty }.joined(separator: "/"))"
         case .path(let path): path
         }
+    }
+
+    /// Unlocks the protected section at `path` with `password` off the main thread, then lists
+    /// the sections again; `done` learns whether the password matched.
+    func unlock(_ path: String, password: String, done: @escaping (Bool) -> Void) {
+        guard let handle else { return done(false) }
+        let pointer = Int(bitPattern: handle)
+        background({ sb_library_unlock(OpaquePointer(bitPattern: pointer), path, password) }) { [self] unlocked in
+            reload { done(unlocked) }
+        }
+    }
+
+    /// Locks every protected section, as OneNote's Lock All does.
+    func lockAll() {
+        if let handle { sb_library_lock_all(handle) }
     }
 
     /// Lists the sections again, off the main thread.
@@ -321,6 +340,18 @@ final class Notebook {
         presenter?.resume()
         reload { NotificationCenter.default.post(name: Self.listed, object: self) }
     }
+}
+
+/// Opens the library at `url` within a coordinated read, which brings a cloud folder's files
+/// down before they are read; nil with why where it cannot.
+private func coordinatedOpen(_ url: URL, local: Bool) -> (OpaquePointer?, String?) {
+    var library: OpaquePointer?
+    var error: UnsafeMutablePointer<CChar>?
+    var coordination: NSError?
+    NSFileCoordinator().coordinate(readingItemAt: url, options: [], error: &coordination) { url in
+        library = sb_library_open(url.path, cacheDirectory.path, local, &error)
+    }
+    return (library, take(error) ?? coordination?.localizedDescription)
 }
 
 /// Whether `url` is kept on this device, rather than by a file provider that keeps it elsewhere
@@ -414,7 +445,7 @@ enum Notebooks {
         set { UserDefaults.standard.set(!newValue, forKey: hidden) }
     }
 
-    /// The kept notebooks and those in Documents, where the bundled sample goes on first launch.
+    /// The kept notebooks and those in Documents.
     static func load() {
         if let scripted {
             elsewhere = [
@@ -435,12 +466,6 @@ enum Notebooks {
                 return Notebook(id: entry.id, name: entry.name, source: entry.source)
             }
         } else {
-            let sample = documentsDirectory.appendingPathComponent("Sample")
-            if !FileManager.default.fileExists(atPath: sample.path),
-                let bundled = Bundle.main.url(forResource: "notebook", withExtension: nil)
-            {
-                try? FileManager.default.copyItem(at: bundled, to: sample)
-            }
             // The notebook the first version remembered from Files.
             if let bookmark = UserDefaults.standard.data(forKey: "notebook") {
                 var stale = false
@@ -456,34 +481,31 @@ enum Notebooks {
     /// Lists Documents again, keeping the notebooks still there; returns those new to the list.
     @discardableResult
     static func scan() -> [Notebook] {
-        guard showsOnDevice else {
-            onDevice = []
-            return []
-        }
-        var added: [Notebook] = []
-        onDevice = notebooks(in: documentsDirectory).map { name in
-            if let kept = onDevice.first(where: { $0.id == "Documents/" + name }) { return kept }
-            let notebook = Notebook(
-                id: "Documents/" + name, name: (name as NSString).deletingPathExtension, source: .documents(path: name))
-            added.append(notebook)
-            return notebook
-        }
-        return added
+        let folder = showsOnDevice ? documentsDirectory : nil
+        return rescan(folder, "Documents/", &onDevice) { .documents(path: $0) }
     }
 
     /// Lists Snowbound's folder in iCloud Drive again, as `scan` lists Documents; none while
     /// iCloud Drive is off.
     @discardableResult
     static func scanICloud() -> [Notebook] {
-        guard let folder = ICloud.documents, scripted == nil else {
-            inCloud = []
+        rescan(scripted == nil ? ICloud.documents : nil, "iCloud/", &inCloud) { .icloud(path: $0) }
+    }
+
+    /// Lists `folder`'s notebooks into `list`, keeping those still there and naming new ones by
+    /// `prefix` and their `source`; returns the new ones.
+    private static func rescan(
+        _ folder: URL?, _ prefix: String, _ list: inout [Notebook], source: (String) -> Source
+    ) -> [Notebook] {
+        guard let folder else {
+            list = []
             return []
         }
         var added: [Notebook] = []
-        inCloud = notebooks(in: folder).map { name in
-            if let kept = inCloud.first(where: { $0.id == "iCloud/" + name }) { return kept }
+        list = notebooks(in: folder).map { [list] name in
+            if let kept = list.first(where: { $0.id == prefix + name }) { return kept }
             let notebook = Notebook(
-                id: "iCloud/" + name, name: (name as NSString).deletingPathExtension, source: .icloud(path: name))
+                id: prefix + name, name: (name as NSString).deletingPathExtension, source: source(name))
             added.append(notebook)
             return notebook
         }
@@ -650,13 +672,13 @@ final class Section {
         return id
     }
 
-    func delete(_ id: String, done: @escaping (Bool) -> Void) {
+    func delete(_ id: String, done: @escaping () -> Void = {}) {
         let (date, time) = titleDate()
         let pointer = Int(bitPattern: handle)
-        background({ sb_section_delete_page(OpaquePointer(bitPattern: pointer), id, date, time) }) { [self] deleted in
+        background({ sb_section_delete_page(OpaquePointer(bitPattern: pointer), id, date, time) }) { [self] _ in
             reloadRows()
             NotificationCenter.default.post(name: Self.changed, object: self, userInfo: ["flags": Self.listed])
-            done(deleted)
+            done()
         }
     }
 

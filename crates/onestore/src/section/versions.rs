@@ -6,7 +6,7 @@
 
 use super::{Frozen, Open, Section, SpaceState, changed, one_page};
 use crate::{
-    Error, ExGuid, FileType, Object, ObjectData, ResolvedRevision, RevisionIndex, Store,
+    Error, ExGuid, FileType, Object, ResolvedRevision, RevisionIndex, Store,
     active::{ActivePage, manifest_pages},
     create::{author_properties, current_timestamps, properties},
     document::{Element, Kind, Revision},
@@ -144,8 +144,13 @@ impl<'a> Section<'a> {
         let image = self.image();
         let store = Store::parse(&image)?;
         let resolved = RevisionIndex::parse(&store)?.resolve(space, revision)?;
+        let resolved = self.resident(&image, resolved)?;
         let (view, _) = Revision::parse(space, &resolved, FileType::Section, &mut |guid| {
-            store.file_data(guid)
+            let stored = store.file_data(guid)?;
+            match &self.unlocked {
+                Some(unlocked) => unlocked.file(&self.arena.0, stored),
+                None => Ok(stored),
+            }
         })?;
         one_page(&view, &manifest_pages(&view))
     }
@@ -258,8 +263,17 @@ impl<'a> Section<'a> {
         let store = Store::parse(&image)?;
         let index = RevisionIndex::parse(&store)?;
         let rid = self.version_revision(&index, space, context)?;
-        let resolved = index.resolve(space, rid)?;
-        // Object bytes lie in the section's segments, which outlive this image.
+        let revision = self.resident(&image, index.resolve(space, rid)?)?;
+        Ok((rid, revision, chain_depth(&index, space, rid)))
+    }
+
+    /// `resolved`, read from `image`, the section's sealed image, with its bytes in the
+    /// section's segments, which outlive the image; a protected section's decoded.
+    fn resident(
+        &self,
+        image: &[u8],
+        resolved: ResolvedRevision<'_>,
+    ) -> Result<ResolvedRevision<'a>> {
         let resident = |part: &[u8]| -> Result<&'a [u8]> {
             let offset = (part.as_ptr().addr() - image.as_ptr().addr()) as u64;
             self.segments
@@ -275,34 +289,7 @@ impl<'a> Section<'a> {
                     message: "A version's bytes lie outside the section",
                 })
         };
-        let mut objects = BTreeMap::new();
-        for (id, object) in resolved.objects {
-            let data = match object.data {
-                ObjectData::Properties(data) => ObjectData::Properties(resident(data)?),
-                ObjectData::Encrypted(data) => ObjectData::Encrypted(resident(data)?),
-                ObjectData::File {
-                    reference,
-                    extension,
-                } => ObjectData::File {
-                    reference: resident(reference)?,
-                    extension: resident(extension)?,
-                },
-            };
-            objects.insert(
-                id,
-                Object {
-                    jcid: object.jcid,
-                    reference_count: object.reference_count,
-                    data,
-                    global_ids: object.global_ids,
-                },
-            );
-        }
-        let revision = ResolvedRevision {
-            roots: resolved.roots,
-            objects,
-        };
-        Ok((rid, revision, chain_depth(&index, space, rid)))
+        super::bind(self.arena, self.unlocked.as_ref(), resolved, resident)
     }
 
     /// Restores version `context` of page `space` as OneNote 2010's Restore Version does: the

@@ -615,6 +615,30 @@ fn create(file_name: &str, file_type: FileType, spaces: Vec<NewSpace>) -> Result
     } else {
         None
     };
+    finish(
+        &mut output,
+        file_type,
+        log,
+        hashed_chunk,
+        root_chunk,
+        placement([0; 16], file_name),
+    )?;
+    let store = Store::parse(&output)?;
+    RevisionIndex::parse(&store)?.validate_current()?;
+    Ok(output)
+}
+
+/// Ends an image whose lists `output` holds: the transaction log committing `log`'s
+/// entries, then the header naming it, the root list and the hashed-chunk list.
+fn finish(
+    output: &mut Vec<u8>,
+    file_type: FileType,
+    mut log: Vec<u8>,
+    hashed: Option<Chunk>,
+    root: Chunk,
+    placement: [u8; 20],
+) -> Result<()> {
+    let is_section = file_type == FileType::Section;
     let checksum = if is_section {
         !crc(u32::MAX, &log, file_type)
     } else {
@@ -624,7 +648,7 @@ fn create(file_name: &str, file_type: FileType, spaces: Vec<NewSpace>) -> Result
     log.extend_from_slice(&checksum.to_le_bytes());
     log.extend_from_slice(&u64::MAX.to_le_bytes());
     log.extend_from_slice(&0_u32.to_le_bytes());
-    let log_chunk = append(&mut output, &log)?;
+    let log_chunk = append(output, &log)?;
     output[..16].copy_from_slice(&[
         0xe4, 0x52, 0x5c, 0x7b, 0x8c, 0xd8, 0xa7, 0x4d, 0xae, 0xb1, 0x53, 0x78, 0xd0, 0x29, 0x96,
         0xd3,
@@ -648,11 +672,11 @@ fn create(file_name: &str, file_type: FileType, spaces: Vec<NewSpace>) -> Result
         output[at..at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
     }
     output[96..100].copy_from_slice(&1_u32.to_le_bytes());
-    output[128..148].copy_from_slice(&placement([0; 16], file_name));
-    for (at, chunk) in hashed_chunk
+    output[128..148].copy_from_slice(&placement);
+    for (at, chunk) in hashed
         .map(|chunk| (148, chunk))
         .into_iter()
-        .chain([(160, log_chunk), (172, root_chunk)])
+        .chain([(160, log_chunk), (172, root)])
     {
         output[at..at + 8].copy_from_slice(&chunk.offset.to_le_bytes());
         output[at + 8..at + 12].copy_from_slice(&(chunk.length as u32).to_le_bytes());
@@ -662,8 +686,34 @@ fn create(file_name: &str, file_type: FileType, spaces: Vec<NewSpace>) -> Result
     output[212..228].copy_from_slice(&fresh_guid()?);
     output[228..236].copy_from_slice(&1_u64.to_le_bytes());
     output[236..252].copy_from_slice(&fresh_guid()?);
-    let store = Store::parse(&output)?;
-    RevisionIndex::parse(&store)?.validate_current()?;
+    Ok(())
+}
+
+/// A new section file declaring only its root object space `root`, which has no revision
+/// yet, placed as `placement`: what a whole section's revisions are appended to.
+pub(crate) fn skeleton(root: ExGuid, placement: [u8; 20]) -> Result<Vec<u8>> {
+    let mut output = vec![0; 1024];
+    let mut payload = Vec::new();
+    root.encode(&mut payload);
+    let mut start = payload.clone();
+    start.extend_from_slice(&0_u32.to_le_bytes());
+    let manifest = append_list(&mut output, 16, &[node(0x14, None, &start)?])?;
+    let space = [
+        node(0xc, None, &payload)?,
+        node(0x10, Some(Reference::NodeList(manifest)), &[])?,
+    ];
+    let space = append_list(&mut output, 17, &space)?;
+    let roots = [
+        node(8, Some(Reference::NodeList(space)), &payload)?,
+        node(4, None, &payload)?,
+    ];
+    let roots = append_list(&mut output, 18, &roots)?;
+    let mut log = Vec::new();
+    for (id, count) in [(16_u32, 1_u32), (17, 2), (18, 2)] {
+        log.extend_from_slice(&id.to_le_bytes());
+        log.extend_from_slice(&count.to_le_bytes());
+    }
+    finish(&mut output, FileType::Section, log, None, roots, placement)?;
     Ok(output)
 }
 

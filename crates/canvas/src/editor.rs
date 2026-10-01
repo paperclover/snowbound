@@ -100,10 +100,7 @@ pub struct Awaited {
 }
 
 /// A new picture of encoded `bytes`, `size` points large.
-pub(crate) fn picture(
-    bytes: Vec<u8>,
-    size: [f32; 2],
-) -> Result<onestore::page::Image, EditError> {
+pub fn picture(bytes: Vec<u8>, size: [f32; 2]) -> Result<onestore::page::Image, EditError> {
     Ok(onestore::page::Image {
         id: onestore::page::text::new_id()?,
         layout: onestore::document::Layout {
@@ -187,6 +184,7 @@ struct PageHeader {
     identity: Option<[u8; 16]>,
     created: Option<u64>,
     margin_origin: [f32; 2],
+    rtl: bool,
     color: Option<u32>,
     rule_lines: Option<onestore::page::RuleLines>,
     areas: Vec<page::TitleArea>,
@@ -378,7 +376,7 @@ impl TextOutline {
     }
 
     pub fn origin(&self) -> [f32; 2] {
-        [self.layout.x.unwrap_or(0.0), self.layout.y.unwrap_or(0.0)]
+        crate::origin(&self.layout)
     }
 
     pub fn wrap_width(&self) -> f32 {
@@ -509,7 +507,7 @@ impl TextOutline {
     }
 
     /// All the outline's shown text.
-    pub fn whole(&self) -> Selection {
+    pub(crate) fn whole(&self) -> Selection {
         let paragraph = self.source_index(self.shaped.paragraphs.len() - 1);
         let last = self.document.paragraph(paragraph).unwrap();
         [
@@ -587,7 +585,11 @@ impl TextOutline {
 
     /// Where a mark under UTF-16 `range` of paragraph `index` runs, outline-local: each
     /// line's left, right and baseline.
-    pub fn underlines(&self, index: usize, range: Range<u32>) -> Result<Vec<[f32; 3]>, EditError> {
+    pub(crate) fn underlines(
+        &self,
+        index: usize,
+        range: Range<u32>,
+    ) -> Result<Vec<[f32; 3]>, EditError> {
         let paragraph = self.paragraph_layout(index)?;
         let selection = ParagraphSelection::new(
             paragraph.cursor(range.start, Affinity::Downstream)?,
@@ -935,39 +937,15 @@ impl CanvasEditor {
         width: f32,
     ) -> Result<Self, EditorError> {
         let outline = TextOutline::new(engine, document, width, [0.0; 2])?;
-        let (outlines, active) = if outline.is_empty() {
-            (
-                Vec::new(),
-                Focus::Caret {
-                    outline: Box::new(outline),
-                    index: 0,
-                },
-            )
-        } else {
-            (vec![outline], Focus::Outline(0))
-        };
-        Ok(Self {
-            outlines,
-            definitions: BTreeMap::new(),
-            objects: Vec::new(),
-            date: None,
-            header: PageHeader::default(),
-            active,
-            undo: Vec::new(),
-            redo: Vec::new(),
-            composition: None,
-            preferred_x: None,
-            pending: None,
-            ops: Ok(Vec::new()),
-            stored: None,
-            whole: None,
-            typing: None,
-            recording: None,
-            ink_drag: None,
-            provisional: BTreeMap::new(),
-            default_font: DefaultFont::default(),
-            styles: BTreeMap::new(),
-        })
+        let empty = outline.is_empty();
+        let mut editor = Self::from_text_outlines(vec![outline], BTreeMap::new(), None)?;
+        if empty {
+            editor.active = Focus::Caret {
+                outline: Box::new(editor.outlines.pop().unwrap()),
+                index: 0,
+            };
+        }
+        Ok(editor)
     }
 
     pub fn from_page(mut page: Page, engine: &mut TextEngine) -> Result<Self, EditorError> {
@@ -1014,6 +992,7 @@ impl CanvasEditor {
             identity: page.identity,
             created: page.created,
             margin_origin: page.margin_origin,
+            rtl: page.rtl,
             color: page.color,
             rule_lines: page.rule_lines,
             areas,
@@ -1317,6 +1296,7 @@ impl CanvasEditor {
                 .map(PageDate::timestamp)
                 .or(self.header.created),
             margin_origin: self.header.margin_origin,
+            rtl: self.header.rtl,
             color: self.header.color,
             rule_lines: self.header.rule_lines,
             objects,
@@ -1516,7 +1496,8 @@ impl CanvasEditor {
             .collect()
     }
 
-    pub fn from_outlines(
+    #[cfg(test)]
+    pub(crate) fn from_outlines(
         engine: &mut TextEngine,
         outlines: Vec<Outline>,
         definitions: BTreeMap<ExGuid, Definition>,
@@ -1631,14 +1612,15 @@ impl CanvasEditor {
             return false;
         }
         self.finish_composition();
-        let mut entries = Vec::new();
+        let depth = self.undo.len();
         if paper {
-            entries.push(self.paper(color, rule_lines));
+            let entry = self.paper(color, rule_lines);
+            self.undo.push(entry);
         }
         if let Some(art) = art {
             for index in backgrounds.into_iter().rev() {
                 let image = self.remove_picture(index);
-                entries.push(History::Picture {
+                self.undo.push(History::Picture {
                     index,
                     image: Some(Box::new(image)),
                 });
@@ -1646,19 +1628,13 @@ impl CanvasEditor {
             // Art lies under everything else on the page.
             for image in art.into_iter().rev() {
                 self.add_picture(0, image);
-                entries.push(History::Picture {
+                self.undo.push(History::Picture {
                     index: 0,
                     image: None,
                 });
             }
         }
-        self.undo.push(match entries.len() {
-            1 => entries.pop().unwrap(),
-            _ => History::Group {
-                entries,
-                page: false,
-            },
-        });
+        self.group(depth, false);
         self.redo.clear();
         true
     }
@@ -1748,7 +1724,6 @@ impl CanvasEditor {
         }
     }
 
-    /// Provisional input geometry outside the document's outline collection.
     /// The caret a run of typing left while typing there still joins the run: the word
     /// before it is still being written.
     pub fn typing(&self) -> Option<(ExGuid, TextPosition)> {
@@ -1759,6 +1734,7 @@ impl CanvasEditor {
         .then_some((outline, at))
     }
 
+    /// Provisional input geometry outside the document's outline collection.
     pub fn caret_outline(&self) -> Option<&TextOutline> {
         match &self.active {
             Focus::Caret { outline, .. } => Some(outline),
@@ -2020,9 +1996,8 @@ impl CanvasEditor {
             return Some(([x0, y0], [x1 - x0, y1 - y0]));
         }
         if let Some(image) = self.image(id) {
-            let layout = &image.layout;
             return Some((
-                [layout.x.unwrap_or(0.0), layout.y.unwrap_or(0.0)],
+                crate::origin(&image.layout),
                 crate::outline::image_size(image)?,
             ));
         }
@@ -2034,7 +2009,7 @@ impl CanvasEditor {
     }
 
     /// Whether the picture sits in an outline's flow, where only its size can change.
-    pub fn image_in_outline(&self, id: ExGuid) -> bool {
+    pub(crate) fn image_in_outline(&self, id: ExGuid) -> bool {
         self.outline_picture(id).is_some()
     }
 
@@ -2052,7 +2027,7 @@ impl CanvasEditor {
     }
 
     /// The address picture `id` links to, in an outline or on the page.
-    pub fn picture_link(&self, id: ExGuid) -> Option<&str> {
+    pub(crate) fn picture_link(&self, id: ExGuid) -> Option<&str> {
         let image = match self.image(id) {
             Some(image) => image,
             None => match &self.outline_picture(id)?.3.content {
@@ -2064,7 +2039,7 @@ impl CanvasEditor {
     }
 
     /// The file a paragraph holds or the page shows, which the host opens and saves.
-    pub fn attachment(&self, id: ExGuid) -> Option<&onestore::page::Attachment> {
+    pub(crate) fn attachment(&self, id: ExGuid) -> Option<&onestore::page::Attachment> {
         if let Some((file, _)) = self.page_file(id) {
             return Some(file);
         }
@@ -2083,15 +2058,14 @@ impl CanvasEditor {
     }
 
     /// Where a file draws with its name, in page coordinates.
-    pub fn attachment_rect(&self, id: ExGuid) -> Option<[f32; 4]> {
+    pub(crate) fn attachment_rect(&self, id: ExGuid) -> Option<[f32; 4]> {
         if let Some((_, rect)) = self.page_file(id) {
             return Some(rect);
         }
         let (outline, ..) = self.outline_picture(id)?;
         let outline = self.outlines.iter().find(|item| item.id == outline)?;
-        let [x0, y0, x1, y1] = outline.shaped.objects.iter().find(|o| o.id == id)?.bounds();
-        let [x, y] = outline.origin();
-        Some([x + x0, y + y0, x + x1, y + y1])
+        let bounds = outline.shaped.objects.iter().find(|o| o.id == id)?.bounds();
+        Some(crate::translated(bounds, outline.origin()))
     }
 
     /// Replaces a picture paragraph through the outline's text history.
@@ -2231,7 +2205,7 @@ impl CanvasEditor {
     /// Leaves a picture as OneNote's Left and Right arrows do: the caret goes to the end of the
     /// text outline before it in page order, or to the start of the one after. False when there
     /// is none.
-    pub fn step_from_image(
+    pub(crate) fn step_from_image(
         &mut self,
         engine: &mut TextEngine,
         id: ExGuid,
@@ -2394,15 +2368,7 @@ impl CanvasEditor {
                 break;
             }
         }
-        let entries = self.undo.split_off(depth);
-        if entries.len() > 1 {
-            self.undo.push(History::Group {
-                entries,
-                page: false,
-            });
-        } else {
-            self.undo.extend(entries);
-        }
+        self.group(depth, false);
         result.map(|()| awaited)
     }
 
@@ -2414,7 +2380,11 @@ impl CanvasEditor {
         at: Awaited,
         image: onestore::page::Image,
     ) -> Result<bool, EditorError> {
-        let Some(outline) = self.outlines.iter().find(|outline| outline.id == at.outline) else {
+        let Some(outline) = self
+            .outlines
+            .iter()
+            .find(|outline| outline.id == at.outline)
+        else {
             return Ok(false);
         };
         let Some((container, index, node)) = descendants(outline.document.nodes(), None)
@@ -2605,6 +2575,12 @@ impl CanvasEditor {
         self.header.margin_origin
     }
 
+    /// Whether the page runs right to left, which OneNote 2010 opens scrolled to its right
+    /// end.
+    pub fn rtl(&self) -> bool {
+        self.header.rtl
+    }
+
     pub fn resize(&mut self, engine: &mut TextEngine, width: f32) -> Result<(), EditorError> {
         let outline = self.active_outline();
         if outline.layout.reserved_width.or(outline.layout.max_width) == Some(width)
@@ -2760,7 +2736,7 @@ impl CanvasEditor {
     }
 
     /// Selects outline `id` as an object, as a click on its handle does.
-    pub fn select_outline(&mut self, id: ExGuid) -> Result<(), EditError> {
+    pub(crate) fn select_outline(&mut self, id: ExGuid) -> Result<(), EditError> {
         self.focus_outline(id)?;
         let whole = self.active_outline().whole();
         self.select(whole)?;
@@ -2793,20 +2769,38 @@ impl CanvasEditor {
         Ok(())
     }
 
-    /// Runs `edit` as one undo step.
+    /// Makes the history entries past `depth` one undo step, `page` when they edited OneNote's
+    /// page selection; false when there are none. Groups among them are flattened into it.
+    fn group(&mut self, depth: usize, mut page: bool) -> bool {
+        let mut entries = Vec::new();
+        for entry in self.undo.split_off(depth) {
+            match entry {
+                History::Group {
+                    entries: inner,
+                    page: selected,
+                } => {
+                    page |= selected;
+                    entries.extend(inner);
+                }
+                entry => entries.push(entry),
+            }
+        }
+        match entries.len() {
+            0 => return false,
+            1 if !page => self.undo.extend(entries),
+            _ => self.undo.push(History::Group { entries, page }),
+        }
+        true
+    }
+
+    /// Runs `edit`, an edit of OneNote's page selection, as one undo step.
     fn grouped<T>(
         &mut self,
         edit: impl FnOnce(&mut Self) -> Result<T, EditorError>,
     ) -> Result<T, EditorError> {
         let depth = self.undo.len();
         let result = edit(self);
-        let entries = self.undo.split_off(depth);
-        if !entries.is_empty() {
-            self.undo.push(History::Group {
-                entries,
-                page: true,
-            });
-        }
+        self.group(depth, true);
         result
     }
 
@@ -2828,13 +2822,7 @@ impl CanvasEditor {
         }
         let depth = self.undo.len();
         let result = self.delete(engine, false).and_then(|_| edit(self, engine));
-        let entries = self.undo.split_off(depth);
-        if !entries.is_empty() {
-            self.undo.push(History::Group {
-                entries,
-                page: false,
-            });
-        }
+        self.group(depth, false);
         result.map(Some)
     }
 
@@ -2858,27 +2846,8 @@ impl CanvasEditor {
         });
         let depth = self.undo.len() - usize::from(joins);
         let result = edit(self);
-        let (mut run, mut page) = (Vec::new(), false);
-        for entry in self.undo.split_off(depth) {
-            match entry {
-                History::Group {
-                    entries,
-                    page: selected,
-                } => {
-                    page |= selected;
-                    if run.is_empty() {
-                        run = entries;
-                    } else {
-                        run.extend(entries);
-                    }
-                }
-                entry => run.push(entry),
-            }
-        }
-        match run.len() {
-            0 => return result,
-            1 if !page => self.undo.extend(run),
-            _ => self.undo.push(History::Group { entries: run, page }),
+        if !self.group(depth, false) {
+            return result;
         }
         if result.is_ok() {
             let caret = self.selection().positions[1];
@@ -2957,7 +2926,7 @@ impl CanvasEditor {
         })
     }
 
-    pub fn select_at(&mut self, x: f32, y: f32, extend: bool) -> Result<(), EditError> {
+    pub(crate) fn select_at(&mut self, x: f32, y: f32, extend: bool) -> Result<(), EditError> {
         let mut selection = self.selection_at(x, y, SelectionUnit::Grapheme)?;
         if extend {
             selection.positions[0] = self.selection().positions[0];
@@ -3448,12 +3417,12 @@ impl CanvasEditor {
         Ok(())
     }
 
-    pub fn selection_rects(&self) -> Result<Vec<BoundingBox>, EditError> {
+    pub(crate) fn selection_rects(&self) -> Result<Vec<BoundingBox>, EditError> {
         self.active_outline()
             .range_rects(self.active_outline().selection)
     }
 
-    pub fn marked_rects(&self) -> Result<Vec<BoundingBox>, EditError> {
+    pub(crate) fn marked_rects(&self) -> Result<Vec<BoundingBox>, EditError> {
         match &self.composition {
             Some(composition) => self.active_outline().range_rects(Selection {
                 positions: [composition.range.start, composition.range.end],
@@ -3506,7 +3475,11 @@ impl CanvasEditor {
 
     /// Replaces the selection with `text` in the formatting of the text it replaces, as a
     /// spelling correction does.
-    pub fn correct(&mut self, engine: &mut TextEngine, text: &str) -> Result<(), EditorError> {
+    pub(crate) fn correct(
+        &mut self,
+        engine: &mut TextEngine,
+        text: &str,
+    ) -> Result<(), EditorError> {
         let [anchor, focus] = self.selection().positions;
         let end = anchor.max(focus);
         let format = self
@@ -3752,7 +3725,7 @@ impl CanvasEditor {
 
     /// Alt+Shift+Up or Down: swaps the selected paragraphs, with their children, and the
     /// sibling above or below with its children. Does nothing past the first or last sibling.
-    pub fn move_paragraphs(
+    pub(crate) fn move_paragraphs(
         &mut self,
         engine: &mut TextEngine,
         up: bool,
@@ -3994,7 +3967,7 @@ impl CanvasEditor {
 
     /// Takes up `parked`, the editor this page had when it was last left, history and all,
     /// in place of this one: what storage changed since reaches it as `refresh` would.
-    pub fn resume(
+    pub(crate) fn resume(
         &mut self,
         mut parked: CanvasEditor,
         engine: &mut TextEngine,
@@ -4928,9 +4901,6 @@ impl CanvasEditor {
     }
 }
 
-/// Where `position` in `old` lies in `new`, the same outline changed elsewhere: in the same
-/// paragraph, past what changed in its text when it lies after it; at the start of the
-/// paragraph now at its place when that one is gone.
 /// Whether `content` is picture or file `id`.
 fn holds(content: &ParagraphContent, id: ExGuid) -> bool {
     match content {
@@ -4940,6 +4910,9 @@ fn holds(content: &ParagraphContent, id: ExGuid) -> bool {
     }
 }
 
+/// Where `position` in `old` lies in `new`, the same outline changed elsewhere: in the same
+/// paragraph, past what changed in its text when it lies after it; at the start of the
+/// paragraph now at its place when that one is gone.
 fn follow(old: &TextDocument, new: &TextDocument, position: TextPosition) -> TextPosition {
     let found = old.leaf(position.paragraph).and_then(|(_, _, node)| {
         let paragraph = new
@@ -6447,6 +6420,7 @@ mod tests {
                 identity: None,
                 created: None,
                 margin_origin: [36.0, 14.4],
+                rtl: false,
                 color: None,
                 rule_lines: None,
                 definitions: BTreeMap::new(),
@@ -6558,6 +6532,7 @@ mod tests {
                 identity: None,
                 created: None,
                 margin_origin: [36.0, 14.4],
+                rtl: false,
                 color: None,
                 rule_lines: None,
                 definitions: BTreeMap::new(),
@@ -6656,6 +6631,7 @@ mod tests {
                 identity: None,
                 created: None,
                 margin_origin: [36.0, 14.4],
+                rtl: false,
                 color: None,
                 rule_lines: None,
                 definitions: BTreeMap::new(),
@@ -6720,6 +6696,7 @@ mod tests {
                 identity: None,
                 created: None,
                 margin_origin: [36.0, 14.4],
+                rtl: false,
                 color: None,
                 rule_lines: None,
                 definitions: BTreeMap::new(),
@@ -6840,6 +6817,7 @@ mod tests {
                 identity: None,
                 created: None,
                 margin_origin: [36.0, 14.4],
+                rtl: false,
                 color: None,
                 rule_lines: None,
                 definitions: BTreeMap::new(),
@@ -6959,6 +6937,7 @@ mod tests {
                 identity: None,
                 created: None,
                 margin_origin: [36.0, 14.4],
+                rtl: false,
                 color: None,
                 rule_lines: None,
                 definitions: BTreeMap::new(),
@@ -7060,6 +7039,7 @@ mod tests {
                 identity: None,
                 created: None,
                 margin_origin: [36.0, 14.4],
+                rtl: false,
                 color: None,
                 rule_lines: None,
                 definitions: BTreeMap::new(),
@@ -10622,5 +10602,35 @@ mod tests {
             widenings(&mut editor, (0, 5), (0, 5)),
             [[(0, 0), (0, 5)]; 6]
         );
+    }
+
+    #[test]
+    fn pasting_over_the_page_selection_is_one_step_that_undo_selects_again() {
+        let mut engine = TextEngine::default();
+        let lines = ["One", "Two"].map(|line| Paragraph::new(line.into(), Format::default()));
+        let mut editor = CanvasEditor::new(
+            &mut engine,
+            TextDocument::new(lines.to_vec()).unwrap(),
+            400.0,
+        )
+        .unwrap();
+        editor.select_page().unwrap();
+        editor
+            .paste_pieces(
+                &mut engine,
+                vec![
+                    Piece::Text("Pasted".into()),
+                    Piece::Picture(vec![0; 8], [10.0; 2]),
+                ],
+                0x409,
+            )
+            .unwrap();
+        assert_eq!(editor.history_depth(), [1, 0]);
+        let _ = editor.take_ops();
+        let mut remote = editor.page().unwrap();
+        remote.color = Some(0x00ff_ffff);
+        editor.refresh(remote, &mut engine).unwrap();
+        assert!(editor.undo(&mut engine).unwrap());
+        assert_eq!(editor.whole(), Some(Whole::Page));
     }
 }

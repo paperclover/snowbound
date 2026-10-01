@@ -39,7 +39,7 @@ fn describe(
     quiet: bool,
 ) -> (&'static str, &'static [&'static str]) {
     if offline {
-        return ("Working offline", art::SYNC_OFFLINE);
+        return ("Offline", art::SYNC_OFFLINE);
     }
     match sync.state() {
         SyncState::ReadOnly => ("Can’t save changes", art::SYNC_ERROR),
@@ -78,14 +78,6 @@ fn brief(sync: &SyncStatus, offline: bool) -> String {
 /// out the recycle bin, unless something is wrong there.
 fn sections(library: &Library, session: &Session) -> Vec<(String, SyncStatus)> {
     let open = &session.tabs[session.tab].path;
-    let copy = |sync: &SyncStatus| SyncStatus {
-        synced: sync.synced,
-        error: sync
-            .error
-            .as_ref()
-            .map(|error| std::io::Error::new(error.kind(), error.to_string())),
-        queued: sync.queued,
-    };
     let mut sections = library
         .background
         .as_ref()
@@ -120,10 +112,18 @@ fn overall(sections: &[(String, SyncStatus)]) -> SyncStatus {
             .map(|(_, sync)| sync.synced)
             .collect::<Option<Vec<_>>>()
             .and_then(|times| times.into_iter().min()),
-        error: worst
-            .and_then(|sync| sync.error.as_ref())
-            .map(|error| std::io::Error::new(error.kind(), error.to_string())),
+        error: worst.and_then(|sync| copy(sync).error),
         queued: sections.iter().map(|(_, sync)| sync.queued).sum(),
+    }
+}
+
+/// `sync` again; its error, which can't be cloned, as one of the same kind and message.
+fn copy(sync: &SyncStatus) -> SyncStatus {
+    SyncStatus {
+        synced: sync.synced,
+        error: (sync.error.as_ref())
+            .map(|error| std::io::Error::new(error.kind(), error.to_string())),
+        queued: sync.queued,
     }
 }
 
@@ -175,8 +175,8 @@ const TITLE: &str = "Notebook Sync Status";
 fn update_note(update: &update::Status) -> Option<String> {
     match update {
         update::Status::Downloading(version) => Some(format!("Downloading {version}…")),
-        update::Status::Ready(version, _) => Some(format!("{version} is ready")),
-        update::Status::Available(version) => Some(format!("{version} is available")),
+        update::Status::Ready(version, ..) => Some(format!("{version} is ready")),
+        update::Status::Available(version, ..) => Some(format!("{version} is available")),
         _ => None,
     }
 }
@@ -209,7 +209,7 @@ pub(crate) fn control(ui: &mut Ui, session: &Session, update: &update::Status, t
     );
     let waiting = matches!(
         update,
-        update::Status::Ready(..) | update::Status::Available(_)
+        update::Status::Ready(..) | update::Status::Available(..)
     );
     if waiting {
         ui.leaf(
@@ -259,6 +259,8 @@ struct Facts<'a> {
     conflicts: Vec<(ExGuid, &'a str)>,
     offline: bool,
     update: &'a update::Status,
+    /// Whether the update's changes are listed.
+    changes_listed: bool,
     /// Whether the open section's file can be shown in the file manager.
     local: bool,
 }
@@ -273,6 +275,126 @@ struct Picked {
     conflict: Option<ExGuid>,
     build_folder: bool,
     restart: bool,
+    list_changes: bool,
+}
+
+/// What a newer build changes: `summary`, which unfolds the titles under their kinds when
+/// `listed`. Returns whether the summary was clicked.
+fn changes_list(ui: &mut Ui, summary: &str, changes: &[update::Change], listed: bool) -> bool {
+    let theme = ui.theme.clone();
+    let line = theme.font_size * 1.6;
+    let toggle = ui.open(
+        "summary",
+        Spec {
+            flags: Flags::CLICKABLE,
+            size: [fill(), px(line)],
+            gap: 4.0,
+            role: Some(accesskit::Role::Button),
+            ..Spec::default()
+        },
+    );
+    if let Some(node) = ui.access(toggle) {
+        node.set_label(summary);
+        node.set_expanded(listed);
+    }
+    ui.leaf(
+        "label",
+        Spec {
+            size: [fit(), px(line)],
+            text: Some(summary),
+            overflow: Overflow::Ellipsis,
+            ..Spec::default()
+        },
+    );
+    ui.leaf(
+        "chevron",
+        Spec {
+            size: [fit(), px(line)],
+            icon: Some(if listed {
+                art::CHEVRON_UP
+            } else {
+                ui::shell::CHEVRON
+            }),
+            color: Some(theme.text_dim),
+            ..Spec::default()
+        },
+    );
+    ui.close();
+    // Unfolds to the titles' height, scrolling past a few dozen lines.
+    let list = ui.id("changes");
+    let rows = ui
+        .rect(list.child("rows"))
+        .map_or(0.0, |rect| rect[3] - rect[1]);
+    let height = ui.animate(list, if listed { rows.min(line * 9.0) } else { 0.0 });
+    if listed || height > 0.0 {
+        ui.open_as(
+            list,
+            Spec {
+                flags: Flags::SCROLL | Flags::CLIP,
+                axis: Axis::Y,
+                size: [fill(), px(height)],
+                role: Some(accesskit::Role::List),
+                ..Spec::default()
+            },
+        );
+        ui.open(
+            "rows",
+            Spec {
+                axis: Axis::Y,
+                size: [fill(), children()],
+                pad: [0.0, 2.0],
+                gap: 2.0,
+                ..Spec::default()
+            },
+        );
+        let mut kind = None;
+        for (index, change) in changes.iter().enumerate() {
+            if kind != Some(change.kind) {
+                kind = Some(change.kind);
+                ui.leaf(
+                    ("heading", index),
+                    Spec {
+                        size: [fill(), px(line)],
+                        text: Some(change.kind.heading()),
+                        color: Some(theme.text_dim),
+                        bold: true,
+                        ..Spec::default()
+                    },
+                );
+            }
+            ui.open(
+                ("change", index),
+                Spec {
+                    size: [fill(), children()],
+                    gap: 6.0,
+                    role: Some(accesskit::Role::ListItem),
+                    ..Spec::default()
+                },
+            );
+            ui.leaf(
+                "bullet",
+                Spec {
+                    size: [fit(), fit()],
+                    text: Some("•"),
+                    color: Some(theme.text_dim),
+                    ..Spec::default()
+                },
+            );
+            ui.leaf(
+                "title",
+                Spec {
+                    size: [fill(), fit()],
+                    text: Some(&change.title),
+                    overflow: Overflow::Wrap,
+                    ..Spec::default()
+                },
+            );
+            ui.close();
+        }
+        ui.close();
+        ui.close();
+    }
+    ui.signal(toggle).clicked
 }
 
 /// Lays out the open popup's contents.
@@ -320,10 +442,7 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
     let waiting = changes(sync.queued);
     let conflict;
     let advice = if facts.offline {
-        Some(match sync.queued {
-            0 => "Turn off Work offline to sync.".to_owned(),
-            _ => format!("{waiting} will sync when you go back online."),
-        })
+        None
     } else {
         match state {
             SyncState::NotConnected => Some(match sync.queued {
@@ -354,7 +473,9 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
         icon = art::SYNC_WARNING;
     }
 
-    // The status: headline, when it last synced or what to do, and a running sync's bar.
+    // The status: headline and Work offline's switch, what to do, then one line of when it
+    // last synced or how a sync runs, over a running sync's bar. Its height holds as Work
+    // offline turns on and off.
     ui.open(
         "status",
         Spec {
@@ -367,10 +488,19 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
     if let Some(node) = ui.access(ui.current()) {
         node.set_live(accesskit::Live::Polite);
     }
+    let height = theme.font_size * 2.0;
+    ui.open(
+        "header",
+        Spec {
+            size: [fill(), px(height)],
+            gap: 8.0,
+            ..Spec::default()
+        },
+    );
     ui.leaf(
         "headline",
         Spec {
-            size: [fill(), px(theme.font_size * 2.0)],
+            size: [fill(), px(height)],
             text: Some(headline),
             icon: Some(icon),
             font_size: Some(theme.font_size * 1.2),
@@ -379,12 +509,118 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
             ..Spec::default()
         },
     );
-    if showing {
-        let fraction = match total {
-            0 => 1.0,
-            _ if state == SyncState::UpToDate => 1.0,
-            _ => done as f32 / total as f32,
+    let switch = ui.open(
+        "offline",
+        Spec {
+            flags: Flags::CLICKABLE,
+            size: [children(), px(height)],
+            gap: 8.0,
+            role: Some(accesskit::Role::Switch),
+            ..Spec::default()
+        },
+    );
+    if let Some(node) = ui.access(switch) {
+        node.set_label("Work offline");
+        node.set_toggled(facts.offline.into());
+    }
+    let signal = ui.signal(switch);
+    picked.offline = signal.clicked;
+    ui.leaf(
+        "label",
+        Spec {
+            size: [fit(), px(height)],
+            text: Some("Work offline"),
+            color: Some(theme.text_dim),
+            ..Spec::default()
+        },
+    );
+    let [width, side] = [30.0, 18.0];
+    let on = ui.animate(switch.child("on"), f32::from(u8::from(facts.offline)));
+    let mix = |from: [f32; 4], to: [f32; 4]| {
+        std::array::from_fn(|at| from[at] + (to[at] - from[at]) * on)
+    };
+    ui.open(
+        "track",
+        Spec {
+            size: [px(width), px(height)],
+            inset: [0.0, (height - side) / 2.0, 0.0, (height - side) / 2.0],
+            fill: Some(mix(theme.chip, theme.accent)),
+            border: signal.hovered.then_some(theme.accent),
+            radius: side / 2.0,
+            ..Spec::default()
+        },
+    );
+    let knob = side - 4.0;
+    let left = 2.0 + (width - side) * on;
+    let top = (height - side) / 2.0 + 2.0;
+    ui.mark([left, top, left + knob, top + knob], [1.0; 4], knob / 2.0);
+    ui.close();
+    ui.close();
+    ui.close();
+    if let Some(advice) = &advice {
+        text(ui, "advice", advice, theme.text);
+    } else if !facts.conflicts.is_empty() && !showing {
+        text(
+            ui,
+            "advice",
+            "Both versions are kept. Open the page to compare them.",
+            theme.text,
+        );
+    }
+    let fraction = match total {
+        0 => 1.0,
+        _ if state == SyncState::UpToDate => 1.0,
+        _ => done as f32 / total as f32,
+    };
+    let subtitle = if showing {
+        let mut caption = match total {
+            0 | 1 => String::new(),
+            _ => format!("{done} of {total} sections synced"),
         };
+        if sync.queued > 0 {
+            if !caption.is_empty() {
+                caption += " · ";
+            }
+            caption += &format!("{waiting} to send");
+        }
+        caption
+    } else if facts.offline && sync.queued > 0 {
+        format!("{waiting} waiting")
+    } else if let Some(synced) = sync.synced {
+        ui.wake_after(Duration::from_secs(30));
+        let prefix = match advice.is_some() || facts.offline {
+            true => "Last synced",
+            false => "Synced",
+        };
+        format!("{prefix} {}", ago(synced))
+    } else {
+        String::new()
+    };
+    let subtitle = match subtitle.is_empty() {
+        true => "Checking for changes…",
+        false => &subtitle,
+    };
+    ui.leaf(
+        "subtitle",
+        Spec {
+            size: [fill(), px(theme.font_size * 1.5)],
+            text: Some(subtitle),
+            color: Some(theme.text_dim),
+            overflow: Overflow::Ellipsis,
+            ..Spec::default()
+        },
+    );
+    ui.close();
+
+    // A running sync's bar takes the rule's place, which keeps the bar's height.
+    ui.open(
+        "progress",
+        Spec {
+            size: [fill(), px(6.0)],
+            ..Spec::default()
+        },
+    );
+    if showing {
         let fraction = ui.animate(bar.child("fraction"), fraction);
         let running = ui.lasted(bar.child("running"), true).as_secs_f32();
         ui.open_as(
@@ -419,48 +655,18 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
             node.set_numeric_value(f64::from((fraction * 100.0).round()));
         }
         ui.close();
-        let mut caption = match total {
-            0 | 1 => String::new(),
-            _ => format!("{done} of {total} sections synced"),
-        };
-        if sync.queued > 0 {
-            if !caption.is_empty() {
-                caption += " · ";
-            }
-            caption += &format!("{waiting} to send");
-        }
-        if caption.is_empty() {
-            caption = "Checking for changes…".to_owned();
-        }
-        text(ui, "caption", &caption, theme.text_dim);
     } else {
-        if let Some(advice) = &advice {
-            text(ui, "advice", advice, theme.text);
-        } else if !facts.conflicts.is_empty() && headline != "Syncing…" {
-            text(
-                ui,
-                "advice",
-                "Both versions are kept. Open the page to compare them.",
-                theme.text,
-            );
-        }
-        if let Some(synced) = sync.synced {
-            let prefix = match advice {
-                Some(_) => "Last synced",
-                None => "Synced",
-            };
-            text(
-                ui,
-                "synced",
-                &format!("{prefix} {}", ago(synced)),
-                theme.text_dim,
-            );
-            ui.wake_after(Duration::from_secs(30));
-        }
+        ui.leaf(
+            "rule",
+            Spec {
+                size: [fill(), px(6.0)],
+                inset: [0.0, 2.5, 0.0, 2.5],
+                fill: Some(theme.chip),
+                ..Spec::default()
+            },
+        );
     }
     ui.close();
-
-    rule(ui, "identity-rule");
     // Which notebook, and where it lives; the full location in the tooltip.
     ui.open(
         "identity",
@@ -528,9 +734,7 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
     );
     // Where the whole notebook can't be reached, the headline says so for each section
     // without changes waiting.
-    let unreached = |sync: &SyncStatus| {
-        !facts.offline && sync.state() == SyncState::NotConnected && sync.queued == 0
-    };
+    let unreached = |sync: &SyncStatus| sync.state() == SyncState::NotConnected && sync.queued == 0;
     let behind: Vec<_> = facts
         .sections
         .iter()
@@ -650,17 +854,32 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
         ui.open(
             "update",
             Spec {
+                axis: Axis::Y,
                 size: [fill(), children()],
+                gap: 4.0,
+                ..Spec::default()
+            },
+        );
+        text(ui, "note", &format!("Snowbound {note}"), theme.text);
+        if let update::Status::Ready(_, _, changes) | update::Status::Available(_, changes) =
+            facts.update
+            && let Some(summary) = update::summary(changes)
+        {
+            picked.list_changes = changes_list(ui, &summary, changes, facts.changes_listed);
+        }
+        ui.open(
+            "actions",
+            Spec {
+                size: [fill(), children()],
+                pad: [0.0, 4.0],
                 gap: 8.0,
                 ..Spec::default()
             },
         );
         ui.leaf(
-            "note",
+            "space",
             Spec {
-                size: [fill(), px(theme.font_size * 2.0)],
-                text: Some(&format!("Snowbound {note}")),
-                overflow: Overflow::Ellipsis,
+                size: [fill(), px(1.0)],
                 ..Spec::default()
             },
         );
@@ -668,6 +887,7 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
         if matches!(facts.update, update::Status::Ready(..)) {
             picked.restart = ui::button(ui, "restart", "Restart to Update").clicked;
         }
+        ui.close();
         ui.close();
     }
 
@@ -680,7 +900,6 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
             ..Spec::default()
         },
     );
-    picked.offline = ui::check_box(ui, "offline", "Work offline", facts.offline).clicked;
     ui.leaf(
         "space",
         Spec {
@@ -688,30 +907,32 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
             ..Spec::default()
         },
     );
-    picked.show_file = match facts.local {
-        true => ui::button(ui, "show-file", platform::SHOW_FILE).clicked,
-        false => {
-            ui.leaf(
-                "show-file",
-                Spec {
-                    size: [fit(), px(theme.font_size * 2.0)],
-                    text: Some(platform::SHOW_FILE),
-                    color: Some(theme.text_dim),
-                    fill: Some(theme.chip),
-                    radius: 4.0,
-                    pad: [theme.font_size * 0.75, 0.0],
-                    center: true,
-                    role: Some(accesskit::Role::Button),
-                    ..Spec::default()
-                },
-            );
-            if let Some(node) = ui.access(ui.id("show-file")) {
-                node.set_disabled();
-            }
-            false
+    // A button that can't act now, dimmed.
+    let button = |ui: &mut Ui, part: &str, label: &str, enabled: bool| {
+        if enabled {
+            return ui::button(ui, part, label).clicked;
         }
+        ui.leaf(
+            part,
+            Spec {
+                size: [fit(), px(theme.font_size * 2.0)],
+                text: Some(label),
+                color: Some(theme.text_dim),
+                fill: Some(theme.chip),
+                radius: 4.0,
+                pad: [theme.font_size * 0.75, 0.0],
+                center: true,
+                role: Some(accesskit::Role::Button),
+                ..Spec::default()
+            },
+        );
+        if let Some(node) = ui.access(ui.id(part)) {
+            node.set_disabled();
+        }
+        false
     };
-    picked.sync_now = ui::button(ui, "sync-now", "Sync Now").clicked;
+    picked.show_file = button(ui, "show-file", platform::SHOW_FILE, facts.local);
+    picked.sync_now = button(ui, "sync-now", "Sync Now", !facts.offline);
     ui.close();
     picked
 }
@@ -817,6 +1038,7 @@ impl State {
                 .collect(),
             offline,
             update: &update,
+            changes_listed: self.updates.changes_listed,
             local: file.is_some(),
         };
         open(ui, anchor);
@@ -852,13 +1074,14 @@ impl State {
         }
         match update {
             update::Status::Downloading(version)
-            | update::Status::Ready(version, _)
-            | update::Status::Available(version)
+            | update::Status::Ready(version, ..)
+            | update::Status::Available(version, ..)
                 if picked.build_folder =>
             {
                 update::show_build(&version)
             }
             _ if picked.restart => self.restart_to_update(),
+            _ if picked.list_changes => self.updates.changes_listed ^= true,
             _ => {}
         }
         Ok(())
@@ -915,6 +1138,7 @@ mod tests {
             conflicts: Vec::new(),
             offline: false,
             update: &IDLE,
+            changes_listed: false,
             local: true,
         }
     }
@@ -1110,16 +1334,11 @@ mod tests {
         assert!(!bar(&ui));
     }
 
-    #[cfg(all(feature = "wgpu", not(windows)))]
-    #[test]
-    fn popup_renders_each_state() {
-        let output = std::env::var_os("SNOWBOUND_SYNC_RENDER").map(std::path::PathBuf::from);
-        let mut gpu = output.as_ref().map(|output| {
-            std::fs::create_dir_all(output).unwrap();
-            Gpu::new()
-        });
-        type Made = fn() -> Facts<'static>;
-        let states: Vec<(&str, Made)> = vec![
+    type Made = fn() -> Facts<'static>;
+
+    /// Each state the popup shows, by name.
+    fn states() -> Vec<(&'static str, Made)> {
+        vec![
             ("up-to-date", || facts(sections(|_| status(true, 0, None)))),
             ("syncing", || {
                 facts(sections(|index| match index {
@@ -1178,7 +1397,71 @@ mod tests {
                 place: vec!["iCloud Drive".into(), "Notes".into()],
                 ..facts(sections(|_| status(true, 0, None)))
             }),
-        ];
+            ("update", || Facts {
+                update: ready(),
+                ..facts(sections(|_| status(true, 0, None)))
+            }),
+            ("update-listed", || Facts {
+                update: ready(),
+                changes_listed: true,
+                ..facts(sections(|_| status(true, 0, None)))
+            }),
+        ]
+    }
+
+    /// A staged build that brings a little of each kind.
+    fn ready() -> &'static update::Status {
+        let changes = serde_json::from_value(serde_json::json!([
+            {"version": "2026-10-01-r3", "kind": "feature", "title": "Styles and themes"},
+            {"version": "2026-10-01-r3", "kind": "feature", "title": "Settings redesign with search"},
+            {"version": "2026-10-01-r3", "kind": "feature", "title": "Undo across pages"},
+            {"version": "2026-10-01-r4", "kind": "fix", "title": "Section copies keep their own TOC entries"},
+            {"version": "2026-10-01-r4", "kind": "fix", "title": "Pasted pictures keep the size OneNote 2010 gives them"},
+            {"version": "2026-10-01-r5", "kind": "other", "title": "Drop leftover debug output"},
+        ]))
+        .unwrap();
+        Box::leak(Box::new(update::Status::Ready(
+            update::Version::parse("2026-10-01-r5").unwrap(),
+            std::path::PathBuf::new(),
+            changes,
+        )))
+    }
+
+    /// Work offline's switch stays put as it turns on and off, and so do the buttons below
+    /// but where a problem's advice, which offline leaves out, goes and comes back.
+    #[test]
+    fn toggling_offline_moves_nothing() {
+        let switch = id().child("status").child("header").child("offline");
+        let controls = id().child("controls");
+        for (name, made) in states() {
+            let advised = !matches!(
+                overall(&made().sections).state(),
+                SyncState::UpToDate | SyncState::Syncing
+            );
+            let mut places = Vec::new();
+            for offline in [false, true, false] {
+                let mut ui = ui(Appearance::Light);
+                let mut now = Instant::now();
+                let facts = Facts { offline, ..made() };
+                settle(&mut ui, &mut now, &facts);
+                places.push((ui.rect(switch).unwrap(), ui.rect(controls).unwrap()));
+            }
+            for pair in places.windows(2) {
+                assert_eq!(pair[0].0, pair[1].0, "{name}");
+                assert!(advised || pair[0].1 == pair[1].1, "{name}: {places:?}");
+            }
+        }
+    }
+
+    #[cfg(all(feature = "wgpu", not(windows)))]
+    #[test]
+    fn popup_renders_each_state() {
+        let output = std::env::var_os("SNOWBOUND_SYNC_RENDER").map(std::path::PathBuf::from);
+        let mut gpu = output.as_ref().map(|output| {
+            std::fs::create_dir_all(output).unwrap();
+            Gpu::new()
+        });
+        let states = states();
         for (appearance, theme) in [(Appearance::Light, "light"), (Appearance::Dark, "dark")] {
             for (name, facts) in &states {
                 let mut ui = ui(appearance);
@@ -1224,6 +1507,32 @@ mod tests {
                 if tick % 2 == 0 {
                     gpu.save(&ui, &frames.join(format!("{shot:03}.png")), Some(360.0));
                     shot += 1;
+                }
+            }
+            // Work offline on, an edit waiting, then off: the edit sends and nothing moves.
+            let frames = output.join(format!("toggle-{theme}"));
+            std::fs::create_dir_all(&frames).unwrap();
+            let mut ui = self::ui(appearance);
+            let mut now = Instant::now();
+            settle(
+                &mut ui,
+                &mut now,
+                &facts(sections(|_| status(true, 0, None))),
+            );
+            for tick in 0..360 {
+                let seconds = tick as f32 / 60.0;
+                let queued = u64::from((2.0..4.6).contains(&seconds)) * 2;
+                let facts = Facts {
+                    offline: (1.0..3.2).contains(&seconds),
+                    ..facts(sections(|index| {
+                        status(true, u64::from(index == 1) * queued, None)
+                    }))
+                };
+                now += Duration::from_micros(16_667);
+                frame(&mut ui, now, &facts);
+                if tick % 2 == 0 {
+                    let path = frames.join(format!("{:03}.png", tick / 2));
+                    gpu.save(&ui, &path, Some(360.0));
                 }
             }
         }

@@ -2,7 +2,7 @@
 //! case and diacritics; a page matches when all its words appear in its title or text, and
 //! pages whose titles hold every word come first, then the most recently modified.
 
-use crate::document::TextPosition;
+use crate::document::{TextPosition, descendants};
 use crate::editor::{CanvasEditor, Selection};
 use icu_normalizer::DecomposingNormalizerBorrowed;
 use onestore::ExGuid;
@@ -67,7 +67,7 @@ impl Query {
     }
 
     /// Where the query's words start words of `text`, as byte ranges of it.
-    pub fn find(&self, text: &str) -> Vec<Range<usize>> {
+    pub(crate) fn find(&self, text: &str) -> Vec<Range<usize>> {
         let (folded, source) = fold_mapped(text);
         self.hits(&folded)
             .into_iter()
@@ -180,25 +180,13 @@ pub fn shown(paragraph: &Paragraph) -> String {
 /// Calls `visit` with each text paragraph of the page's outlines, in page order, tables
 /// cell by cell.
 fn text_paragraphs<'a>(page: &'a Page, mut visit: impl FnMut(&'a PageParagraph, &'a Paragraph)) {
-    fn walk<'a>(
-        paragraphs: &'a [PageParagraph],
-        visit: &mut impl FnMut(&'a PageParagraph, &'a Paragraph),
-    ) {
-        for paragraph in paragraphs {
-            match &paragraph.content {
-                ParagraphContent::Text(text) => visit(paragraph, &text.text),
-                ParagraphContent::Table(table) => {
-                    for cell in table.rows.iter().flat_map(|row| &row.cells) {
-                        walk(&cell.paragraphs, visit);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
     for object in &page.objects {
         if let PageObject::Outline(outline) = object {
-            walk(&outline.paragraphs, &mut visit);
+            for (_, _, node) in descendants(&outline.paragraphs, None) {
+                if let ParagraphContent::Text(text) = &node.content {
+                    visit(node, &text.text);
+                }
+            }
         }
     }
 }
@@ -206,32 +194,19 @@ fn text_paragraphs<'a>(page: &'a Page, mut visit: impl FnMut(&'a PageParagraph, 
 /// The text OneNote recognised in each of the page's pictures, or printed on a printout's
 /// pages, in page order.
 fn picture_text(page: &Page) -> Vec<&str> {
-    fn walk<'a>(paragraphs: &'a [PageParagraph], out: &mut Vec<&'a str>) {
-        for paragraph in paragraphs {
-            match &paragraph.content {
-                ParagraphContent::Image(image) => {
-                    out.extend(image.text.as_ref().map(|text| text.text.as_str()))
-                }
-                ParagraphContent::Table(table) => {
-                    for cell in table.rows.iter().flat_map(|row| &row.cells) {
-                        walk(&cell.paragraphs, out);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    let mut out = Vec::new();
-    for object in &page.objects {
-        match object {
-            PageObject::Outline(outline) => walk(&outline.paragraphs, &mut out),
-            PageObject::Image(image) => {
-                out.extend(image.text.as_ref().map(|text| text.text.as_str()))
-            }
-            _ => {}
-        }
-    }
-    out
+    let pictures = page.objects.iter().flat_map(|object| match object {
+        PageObject::Outline(outline) => descendants(&outline.paragraphs, None)
+            .filter_map(|(_, _, node)| match &node.content {
+                ParagraphContent::Image(image) => Some(image),
+                _ => None,
+            })
+            .collect(),
+        PageObject::Image(image) => vec![image],
+        _ => Vec::new(),
+    });
+    pictures
+        .filter_map(|image| Some(image.text.as_ref()?.text.as_str()))
+        .collect()
 }
 
 /// A page's text outside its title, a paragraph to a line, then the text in its pictures,

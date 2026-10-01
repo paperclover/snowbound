@@ -73,7 +73,7 @@ pub struct Version {
 }
 
 impl Version {
-    fn parse(name: &str) -> Option<Self> {
+    pub(crate) fn parse(name: &str) -> Option<Self> {
         let (date, revision) = name.split_once("-r")?;
         let digits = |range: std::ops::Range<usize>| {
             date.get(range)
@@ -120,6 +120,64 @@ pub fn describe_running() -> String {
 struct Build {
     version: String,
     archives: HashMap<String, Archive>,
+    /// Every change since the first published build, oldest first; builds before these
+    /// were listed have none.
+    #[serde(default)]
+    changes: Vec<Change>,
+}
+
+/// One feature, bug fix or other change a build brings, as `tools/release.py` lists them.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct Change {
+    /// The version of the commit that made it.
+    version: String,
+    pub kind: Kind,
+    pub title: String,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Feature,
+    Fix,
+    #[serde(other)]
+    Other,
+}
+
+impl Kind {
+    /// The kind's heading in a list of changes.
+    pub fn heading(self) -> &'static str {
+        match self {
+            Kind::Feature => "Features",
+            Kind::Fix => "Bug fixes",
+            Kind::Other => "Other changes",
+        }
+    }
+}
+
+/// What `changes` amount to, as "3 features, 5 bug fixes, and 2 other changes"; none when
+/// there are none.
+pub fn summary(changes: &[Change]) -> Option<String> {
+    let parts: Vec<String> = [
+        (Kind::Feature, "feature", "features"),
+        (Kind::Fix, "bug fix", "bug fixes"),
+        (Kind::Other, "other change", "other changes"),
+    ]
+    .into_iter()
+    .filter_map(|(kind, one, many)| {
+        match changes.iter().filter(|change| change.kind == kind).count() {
+            0 => None,
+            1 => Some(format!("1 {one}")),
+            count => Some(format!("{count} {many}")),
+        }
+    })
+    .collect();
+    match parts.as_slice() {
+        [] => None,
+        [one] => Some(one.clone()),
+        [first, second] => Some(format!("{first} and {second}")),
+        [rest @ .., last] => Some(format!("{}, and {last}", rest.join(", "))),
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -169,25 +227,35 @@ fn newer(
 }
 
 /// `platform`'s archive in the build `build.json` describes, once its signature holds and
-/// it describes `version`.
+/// it describes `version`, and its changes since `running`, features first.
 fn archive(
     key: &[u8],
     build: &[u8],
     signature: &[u8],
     version: &Version,
     platform: &str,
-) -> Result<Archive, String> {
+    running: Option<&Version>,
+) -> Result<(Archive, Vec<Change>), String> {
     verify(key, build, &String::from_utf8_lossy(signature))?;
-    let build: Build =
+    let mut build: Build =
         serde_json::from_slice(build).map_err(|error| format!("build.json: {error}"))?;
     if Version::parse(&build.version).as_ref() != Some(version) {
         return Err(format!("build.json describes {}", build.version));
     }
-    build
+    let archive = build
         .archives
-        .get(platform)
-        .cloned()
-        .ok_or_else(|| format!("{} has no {platform} archive", version.name()))
+        .remove(platform)
+        .ok_or_else(|| format!("{} has no {platform} archive", version.name()))?;
+    let mut changes: Vec<Change> = build
+        .changes
+        .into_iter()
+        .filter(|change| {
+            Version::parse(&change.version)
+                .is_some_and(|made| running.is_none_or(|running| made > *running))
+        })
+        .collect();
+    changes.sort_by_key(|change| change.kind);
+    Ok((archive, changes))
 }
 
 fn check_archive(key: &[u8], archive: &Archive, bytes: &[u8]) -> Result<(), String> {
@@ -302,10 +370,11 @@ pub enum Status {
     Idle,
     UpToDate,
     Downloading(Version),
-    /// Verified and unpacked beside the install, waiting for Restart to Update.
-    Ready(Version, PathBuf),
+    /// Verified and unpacked beside the install, waiting for Restart to Update, with what it
+    /// changes.
+    Ready(Version, PathBuf, Vec<Change>),
     /// Newer than this build, which can't install it itself: its folder has the download.
-    Available(Version),
+    Available(Version, Vec<Change>),
     Failed(&'static str),
 }
 
@@ -326,6 +395,7 @@ fn check(
     progress: &dyn Fn(Status),
 ) -> Status {
     let platform = platform();
+    let since = running;
     // Under Rosetta the native build of the same version is still the update.
     let running = running.filter(|_| !translated());
     let fetch = |path: &str, limit| {
@@ -346,15 +416,16 @@ fn check(
         };
         let build = fetch(&format!("{}build.json", version.folder()), 1 << 20)?;
         let signature = fetch(&format!("{}build.json.sig", version.folder()), 1 << 10)?;
-        let archive = archive(key, &build, &signature, &version, &platform).map_err(unverified)?;
+        let (archive, changes) =
+            archive(key, &build, &signature, &version, &platform, since).map_err(unverified)?;
         let Some(folder) = install.and_then(staging) else {
-            return Ok(Status::Available(version));
+            return Ok(Status::Available(version, changes));
         };
         let item = staged(&folder);
         if std::fs::read_to_string(folder.join("version")).is_ok_and(|name| name == version.name())
             && item.exists()
         {
-            return Ok(Status::Ready(version, item));
+            return Ok(Status::Ready(version, item, changes));
         }
         progress(Status::Downloading(version.clone()));
         let bytes = fetch(
@@ -363,10 +434,10 @@ fn check(
         )?;
         check_archive(key, &archive, &bytes).map_err(unverified)?;
         Ok(match stage(&bytes, &folder, &version) {
-            Ok(item) => Status::Ready(version, item),
+            Ok(item) => Status::Ready(version, item, changes),
             Err(error) => {
                 eprintln!("Cannot stage the update in {}: {error}", folder.display());
-                Status::Available(version)
+                Status::Available(version, changes)
             }
         })
     })();
@@ -410,6 +481,8 @@ pub struct Updates {
     thread: std::thread::Thread,
     /// Restart to Update was chosen: swap the staged build in once the app quits.
     restart: bool,
+    /// The sync popup lists what the update changes.
+    pub(crate) changes_listed: bool,
 }
 
 impl Updates {
@@ -474,6 +547,7 @@ impl Updates {
             shared,
             thread,
             restart: false,
+            changes_listed: false,
         }
     }
 
@@ -499,7 +573,7 @@ impl Updates {
     /// The staged build to swap in, once Restart to Update has quit the app.
     pub fn restarting(&self) -> Option<PathBuf> {
         match self.status() {
-            Status::Ready(_, staged) if self.restart => Some(staged),
+            Status::Ready(_, staged, _) if self.restart => Some(staged),
             _ => None,
         }
     }
@@ -518,20 +592,26 @@ impl State {
             return;
         };
         match status {
-            Status::Ready(version, _) => {
+            Status::Ready(version, _, changes) => {
                 if platform::confirm(
                     "Update ready",
-                    &format!("Snowbound {version} is ready to install."),
+                    &described(
+                        format!("Snowbound {version} is ready to install."),
+                        &changes,
+                    ),
                     "Later",
                     "Restart to Update",
                 ) {
                     self.restart_to_update();
                 }
             }
-            Status::Available(version) => {
+            Status::Available(version, changes) => {
                 if platform::confirm(
                     "Update available",
-                    &format!("Download Snowbound {version} from its build folder."),
+                    &described(
+                        format!("Download Snowbound {version} from its build folder."),
+                        &changes,
+                    ),
                     "Later",
                     "Open Build Folder",
                 ) {
@@ -546,6 +626,28 @@ impl State {
             Status::Idle | Status::Downloading(_) => {}
         }
     }
+}
+
+/// `lead`, then what `changes` amount to and the first dozen of their titles under their
+/// kinds, as a dialog's detail.
+fn described(lead: String, changes: &[Change]) -> String {
+    const LISTED: usize = 12;
+    let Some(summary) = summary(changes) else {
+        return lead;
+    };
+    let mut detail = format!("{lead} It brings {summary}.\n");
+    let mut kind = None;
+    for change in changes.iter().take(LISTED) {
+        if kind != Some(change.kind) {
+            kind = Some(change.kind);
+            detail += &format!("\n{}\n", change.kind.heading());
+        }
+        detail += &format!("• {}\n", change.title);
+    }
+    if changes.len() > LISTED {
+        detail += &format!("and {} more\n", changes.len() - LISTED);
+    }
+    detail.trim_end().to_owned()
 }
 
 /// Opens the folder a build is published in.
@@ -696,6 +798,18 @@ mod tests {
         assert!(newer(b"<html>", "macos-aarch64", None).is_err());
     }
 
+    /// What each build `publish` describes lists: r9 and r10 published, r7 and r8 skipped.
+    fn changes() -> serde_json::Value {
+        serde_json::json!([
+            {"version": "2026-09-29-r7", "kind": "fix", "title": "Old fix"},
+            {"version": "2026-09-29-r8", "kind": "fix", "title": "Pasted pictures keep their size"},
+            {"version": "2026-09-29-r8", "kind": "feature", "title": "Pinch zoom"},
+            {"version": "2026-09-29-r9", "kind": "release", "title": "Stable download names"},
+            {"version": "2026-09-29-r10", "kind": "feature", "title": "Styles and themes"},
+            {"version": "someday", "kind": "feature", "title": "Unversioned"},
+        ])
+    }
+
     /// A build.json for `archive`'s bytes under `platform`, with its signature.
     fn publish(
         pair: &Ed25519KeyPair,
@@ -708,6 +822,7 @@ mod tests {
         let build = serde_json::to_vec_pretty(&serde_json::json!({
             "version": name,
             "commit": "0123456789abcdef",
+            "changes": changes(),
             "archives": {platform: {
                 "file": file,
                 "size": bytes.len(),
@@ -728,35 +843,37 @@ mod tests {
         let bytes = b"an archive".to_vec();
         let (build, signature) =
             publish(&pair, "2026-09-29-r10", "linux-x86_64", "a.tar.gz", &bytes);
-        let found = archive(key, &build, &signature, &tenth, "linux-x86_64").unwrap();
+        let (found, _) = archive(key, &build, &signature, &tenth, "linux-x86_64", None).unwrap();
         check_archive(key, &found, &bytes).unwrap();
 
         let mut tampered = build.clone();
         let at = tampered.iter().position(|&byte| byte == b'a').unwrap();
         tampered[at] = b'b';
-        assert!(archive(key, &tampered, &signature, &tenth, "linux-x86_64").is_err());
+        assert!(archive(key, &tampered, &signature, &tenth, "linux-x86_64", None).is_err());
         assert!(
             archive(
                 generate().public_key().as_ref(),
                 &build,
                 &signature,
                 &tenth,
-                "linux-x86_64"
+                "linux-x86_64",
+                None
             )
             .is_err()
         );
-        assert!(archive(key, &build, b"zz", &tenth, "linux-x86_64").is_err());
+        assert!(archive(key, &build, b"zz", &tenth, "linux-x86_64", None).is_err());
         assert!(
             archive(
                 key,
                 &build,
                 &signature,
                 &version("2026-09-29-r11"),
-                "linux-x86_64"
+                "linux-x86_64",
+                None
             )
             .is_err()
         );
-        assert!(archive(key, &build, &signature, &tenth, "macos-aarch64").is_err());
+        assert!(archive(key, &build, &signature, &tenth, "macos-aarch64", None).is_err());
 
         assert!(
             check_archive(key, &found, b"an archivf")
@@ -778,6 +895,98 @@ mod tests {
                 .unwrap_err()
                 .contains("signature")
         );
+    }
+
+    fn change(kind: Kind, title: &str) -> Change {
+        Change {
+            version: "2026-09-29-r10".to_owned(),
+            kind,
+            title: title.to_owned(),
+        }
+    }
+
+    #[test]
+    fn summaries_name_each_kind_with_plurals_and_list_grammar() {
+        let fix = || change(Kind::Fix, "A fix");
+        let feature = || change(Kind::Feature, "A feature");
+        let other = || change(Kind::Other, "Another change");
+        assert_eq!(summary(&[]), None);
+        assert_eq!(summary(&[fix()]).unwrap(), "1 bug fix");
+        assert_eq!(summary(&[other(), other()]).unwrap(), "2 other changes");
+        assert_eq!(
+            summary(&[fix(), feature(), fix()]).unwrap(),
+            "1 feature and 2 bug fixes"
+        );
+        let mut all = vec![feature(), feature(), feature(), other(), other()];
+        all.extend(std::iter::repeat_with(fix).take(5));
+        assert_eq!(
+            summary(&all).unwrap(),
+            "3 features, 5 bug fixes, and 2 other changes"
+        );
+        assert_eq!(
+            described("Ready.".to_owned(), &[feature(), fix(), fix()]),
+            "Ready. It brings 1 feature and 2 bug fixes.\n\nFeatures\n• A feature\n\nBug fixes\n• A fix\n• A fix"
+        );
+        assert_eq!(described("Ready.".to_owned(), &[]), "Ready.");
+    }
+
+    /// A build lists what every build since the first brought; a check sums those newer than
+    /// the running build, skipped releases included, features first, and an unknown kind is
+    /// another change.
+    #[test]
+    fn changes_sum_across_skipped_releases() {
+        let pair = generate();
+        let key = pair.public_key().as_ref();
+        let tenth = version("2026-09-29-r10");
+        let (build, signature) = publish(&pair, "2026-09-29-r10", "linux-x86_64", "a", b"a");
+        let since = |running: Option<&str>| {
+            let running = running.map(version);
+            let (_, changes) = archive(
+                key,
+                &build,
+                &signature,
+                &tenth,
+                "linux-x86_64",
+                running.as_ref(),
+            )
+            .unwrap();
+            changes
+                .into_iter()
+                .map(|change| (change.kind, change.title))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            since(Some("2026-09-29-r9")),
+            [(Kind::Feature, "Styles and themes".to_owned())]
+        );
+        assert_eq!(
+            since(Some("2026-09-29-r7")),
+            [
+                (Kind::Feature, "Pinch zoom".to_owned()),
+                (Kind::Feature, "Styles and themes".to_owned()),
+                (Kind::Fix, "Pasted pictures keep their size".to_owned()),
+                (Kind::Other, "Stable download names".to_owned()),
+            ]
+        );
+        assert_eq!(since(Some("2026-09-29-r10")), []);
+        assert_eq!(since(None).len(), 5);
+
+        // Builds published before changes were listed still read, as builds listing them do
+        // for clients that predate them.
+        let old = serde_json::json!({"version": "2026-09-29-r10", "archives": {"linux-x86_64": {
+            "file": "a", "size": 1, "sha256": "", "signature": "",
+        }}});
+        let old = serde_json::to_vec(&old).unwrap();
+        let signature = hex(pair.sign(&old).as_ref()).into_bytes();
+        let (_, changes) = archive(key, &old, &signature, &tenth, "linux-x86_64", None).unwrap();
+        assert_eq!(changes, []);
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct Earlier {
+            version: String,
+            archives: HashMap<String, Archive>,
+        }
+        assert!(serde_json::from_slice::<Earlier>(&build).is_ok());
     }
 
     /// An archive as `tools/release.py` packs this platform's, holding `marker`.
@@ -856,10 +1065,14 @@ mod tests {
         let status = check(&fetch, &key, Some(&running), Some(&install), &|status| {
             progress.lock().unwrap().push(status)
         });
-        let Status::Ready(found, item) = status else {
+        let Status::Ready(found, item, listed) = status else {
             panic!("{status:?}");
         };
         assert_eq!(found, version("2026-09-29-r10"));
+        assert_eq!(
+            summary(&listed).unwrap(),
+            "2 features, 2 bug fixes, and 1 other change"
+        );
         assert_eq!(
             *progress.lock().unwrap(),
             [Status::Downloading(found.clone())]
@@ -869,7 +1082,10 @@ mod tests {
 
         fetched.lock().unwrap().clear();
         let again = check(&fetch, &key, Some(&running), Some(&install), &|_| {});
-        assert_eq!(again, Status::Ready(found.clone(), item.clone()));
+        assert_eq!(
+            again,
+            Status::Ready(found.clone(), item.clone(), listed.clone())
+        );
         assert!(
             !fetched
                 .lock()
@@ -884,7 +1100,7 @@ mod tests {
         );
         assert_eq!(
             check(&fetch, &key, Some(&running), None, &|_| {}),
-            Status::Available(found.clone())
+            Status::Available(found.clone(), listed.clone())
         );
         assert_eq!(
             check(
@@ -955,6 +1171,13 @@ mod tests {
     fn the_published_build_installs() {
         let folder = scratch("published");
         let install = staged(&folder);
+        let placeholder = pack(&folder, "old");
+        let unpacked = stage(
+            &placeholder,
+            &folder.join("unpacked"),
+            &version("2000-01-01-r1"),
+        );
+        std::fs::rename(unpacked.unwrap(), &install).unwrap();
         let old = version("2000-01-01-r1");
         let status = check(
             &download,
@@ -963,7 +1186,7 @@ mod tests {
             Some(&install),
             &|_| {},
         );
-        let Status::Ready(found, staged) = status else {
+        let Status::Ready(found, staged, _) = status else {
             panic!("{status:?}");
         };
         apply(&staged, &install).unwrap();

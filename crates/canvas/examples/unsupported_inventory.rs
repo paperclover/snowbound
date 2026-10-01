@@ -544,7 +544,38 @@ fn page(engine: &mut TextEngine, page: Page, place: &str, inventory: &mut Invent
     probe(&mut editor, engine, inventory, place);
 }
 
-fn section(engine: &mut TextEngine, path: &Path, root: &Path, inventory: &mut Inventory) {
+/// The passwords the roots' `manifest.json` files record for their protected sections.
+fn passwords(directory: &Path, out: &mut Vec<String>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for path in entries.flatten().map(|entry| entry.path()) {
+        if path.is_dir() {
+            passwords(&path, out);
+        } else if path.file_name().is_some_and(|name| name == "manifest.json")
+            && let Ok(bytes) = std::fs::read(&path)
+            && let Ok(manifest) = serde_json::from_slice::<serde_json::Value>(&bytes)
+        {
+            let named = manifest["native"]
+                .as_object()
+                .into_iter()
+                .flat_map(|map| map.values());
+            out.extend(
+                std::iter::once(&manifest["password"])
+                    .chain(named)
+                    .filter_map(|password| password.as_str().map(str::to_owned)),
+            );
+        }
+    }
+}
+
+fn section(
+    engine: &mut TextEngine,
+    path: &Path,
+    root: &Path,
+    passwords: &[String],
+    inventory: &mut Inventory,
+) {
     let Ok(image) = std::fs::read(path) else {
         return;
     };
@@ -554,7 +585,15 @@ fn section(engine: &mut TextEngine, path: &Path, root: &Path, inventory: &mut In
         .display()
         .to_string();
     let arena = Arena::default();
-    let mut section = match Section::open(&arena, image) {
+    // A protected section opens under the password its fixture records.
+    let key = passwords
+        .iter()
+        .find_map(|password| onestore::protected::Key::open(&image, password).ok());
+    let opened = match &key {
+        Some(key) => Section::unlock(&arena, image, key).map_err(onestore::Error::from),
+        None => Section::open(&arena, image),
+    };
+    let mut section = match opened {
         Ok(section) => section,
         Err(error) => {
             inventory.add(
@@ -612,6 +651,10 @@ fn main() {
     let mut inventory = Inventory::default();
     let mut seen = BTreeSet::new();
     let mut duplicates = 0;
+    let mut known = Vec::new();
+    for root in &roots {
+        passwords(root, &mut known);
+    }
     for root in &roots {
         let mut paths = Vec::new();
         sections(root, &mut paths);
@@ -625,7 +668,7 @@ fn main() {
                 duplicates += 1;
                 continue;
             }
-            section(&mut engine, &path, root, &mut inventory);
+            section(&mut engine, &path, root, &known, &mut inventory);
         }
     }
     println!("# Unsupported content inventory\n");

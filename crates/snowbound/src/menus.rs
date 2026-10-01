@@ -6,6 +6,7 @@ use crate::{
     commands::{self, Choice},
     manage::Structure,
     platform,
+    recycle::Request,
 };
 use onestore::{ExGuid, PageEdit};
 use std::sync::Arc;
@@ -87,6 +88,15 @@ pub enum Action {
     Move,
     /// Moves it to a section, or into a folder, by catalog path.
     MoveTo(String),
+    /// Opens the submenu of the sections `CopyTo` copies a page of the recycle bin to.
+    Copy,
+    CopyTo(String),
+    /// Save As on a section or notebook.
+    SaveAs,
+    /// Shows the notebook's recycle bin.
+    RecycleBin,
+    EmptyRecycleBin,
+    MarkNotebookRead,
     CopyLink,
     NewPage,
     NewSubpage,
@@ -110,6 +120,8 @@ pub enum Action {
     /// Moves a notebook up the notebook list, or down.
     Raise(bool),
     Properties,
+    /// Opens Password Protection on a section.
+    Password,
 }
 
 /// OneNote 2010's section and notebook colours, COLORREF, with their names in its Section
@@ -259,7 +271,7 @@ impl State {
     pub(crate) fn actions(&self, target: &Target) -> Vec<(Action, Item<'static>)> {
         // An action, its label, whether it is disabled, and whether a rule starts its group.
         let item = |action: Action, text, disabled, separated| {
-            let submenu = matches!(action, Action::Move | Action::Colors);
+            let submenu = matches!(action, Action::Move | Action::Copy | Action::Colors);
             let item = Item {
                 text,
                 disabled,
@@ -271,6 +283,18 @@ impl State {
         };
         let nowhere = || self.destinations(target).is_empty();
         match target {
+            // OneNote's Move or Copy takes a page out of the bin; nothing else changes it.
+            Target::Page { path, .. } if crate::recycle::binned(path) => vec![
+                item(Action::Delete, "Delete", false, false),
+                item(Action::Move, "Restore To", nowhere(), true),
+                item(Action::Copy, "Copy To", nowhere(), false),
+            ],
+            Target::Section { path, .. } if crate::recycle::binned(path) => vec![
+                item(Action::SaveAs, "Save As…", false, false),
+                item(Action::Move, "Restore To", nowhere(), false),
+                item(Action::EmptyRecycleBin, "Empty Recycle Bin", false, true),
+                item(Action::Colors, "Section Color", false, true),
+            ],
             Target::Page {
                 library,
                 path,
@@ -321,16 +345,26 @@ impl State {
                 actions
             }
             Target::Section { library, path } | Target::Group { library, path } => {
-                let mut actions = vec![
-                    item(Action::Rename, "Rename", false, false),
+                let section = matches!(target, Target::Section { .. });
+                let mut actions = vec![item(Action::Rename, "Rename", false, false)];
+                if section {
+                    actions.push(item(Action::SaveAs, "Save As…", false, false));
+                }
+                actions.extend([
                     item(Action::Delete, "Delete", false, false),
                     item(Action::Move, "Move", nowhere(), false),
                     item(Action::NewSection, "New Section", false, true),
                     item(Action::NewGroup, "New Section Group", false, false),
-                ];
-                if matches!(target, Target::Section { .. }) {
+                ]);
+                if section {
                     actions.extend([
-                        item(Action::Colors, "Section Color", false, true),
+                        item(
+                            Action::Password,
+                            "Password Protect This Section…",
+                            library.catalog().is_none(),
+                            true,
+                        ),
+                        item(Action::Colors, "Section Color", false, false),
                         item(
                             Action::Reveal,
                             platform::SHOW_FILE,
@@ -345,8 +379,15 @@ impl State {
             Target::Notebook(library) => {
                 let listed = (self.notebooks.iter()).position(|open| Arc::ptr_eq(open, library));
                 let last = self.notebooks.len().saturating_sub(1);
+                let unread = self.unread_notebook(library);
                 vec![
                     item(Action::Rename, "Rename…", false, false),
+                    item(
+                        Action::SaveAs,
+                        "Save As…",
+                        library.catalog().is_none(),
+                        false,
+                    ),
                     item(
                         Action::Sync,
                         "Sync This Notebook Now",
@@ -370,6 +411,12 @@ impl State {
                         false,
                     ),
                     item(
+                        Action::MarkNotebookRead,
+                        "Mark Notebook as Read",
+                        !unread,
+                        true,
+                    ),
+                    item(
                         Action::Raise(true),
                         "Move Up",
                         listed.is_none_or(|at| at == 0),
@@ -388,6 +435,12 @@ impl State {
                         true,
                     ),
                     item(Action::Theme, "Theme…", false, false),
+                    item(
+                        Action::RecycleBin,
+                        "Notebook Recycle Bin",
+                        library.catalog().is_none(),
+                        true,
+                    ),
                     item(
                         Action::Properties,
                         "Properties…",
@@ -416,13 +469,22 @@ impl State {
         let items: Vec<Item> = actions.iter().map(|(_, item)| *item).collect();
         let chosen = ui::popup::menu(&mut self.ui, id, anchor, &items, filter);
         let places = id.child("move");
+        let copies = id.child("copy");
         let colors = id.child("colors");
         ui::popup::submenus(&mut self.ui, id, &items, |index| match actions[index].0 {
             Action::Move => Some(places),
+            Action::Copy => Some(copies),
             Action::Colors => Some(colors),
             _ => None,
         });
-        let moved = if self.ui.popup_open(places) {
+        let mut moved = None;
+        for (submenu, chosen) in [
+            (places, Action::MoveTo as fn(String) -> Action),
+            (copies, Action::CopyTo),
+        ] {
+            if !self.ui.popup_open(submenu) {
+                continue;
+            }
             let destinations = self.destinations(target);
             let items: Vec<Item> = (destinations.iter())
                 .map(|place| Item {
@@ -432,11 +494,9 @@ impl State {
                     ..Item::default()
                 })
                 .collect();
-            ui::popup::menu(&mut self.ui, places, anchor, &items, None)
-                .map(|index| Action::MoveTo(destinations[index].path.clone()))
-        } else {
-            None
-        };
+            moved = moved.or(ui::popup::menu(&mut self.ui, submenu, anchor, &items, None)
+                .map(|index| chosen(destinations[index].path.clone())));
+        }
         let colored = match target {
             Target::Section { library, path } if self.ui.popup_open(colors) => {
                 let current = (library.tabs(&folder(path)).into_iter())
@@ -474,6 +534,17 @@ impl State {
     fn destinations(&self, target: &Target) -> Vec<Destination> {
         let theme = &self.ui.theme;
         match target {
+            Target::Page { library, path, .. } if crate::recycle::binned(path) => {
+                (folders(library).into_iter())
+                    .flat_map(|place| library.tabs(&place.path))
+                    .map(|tab| Destination {
+                        tint: Some(theme.section(crate::section_color(tab.color)).accent),
+                        name: tab.name,
+                        path: tab.path,
+                        icon: crate::art::SECTION,
+                    })
+                    .collect()
+            }
             Target::Page { library, path, .. } => (library.tabs(&folder(path)).into_iter())
                 .filter(|tab| tab.path != *path)
                 .map(|tab| Destination {
@@ -535,6 +606,33 @@ impl State {
             (Target::Page { space, .. }, action) => self.page_command(space, action),
             (Target::Section { library, path }, Action::Open) => {
                 Some(Command::OpenSection(library, path))
+            }
+            (Target::Section { library, path }, Action::SaveAs) => {
+                self.open_save_as(library, Some(path), crate::save_as::Scope::Section);
+                None
+            }
+            (Target::Notebook(library), Action::SaveAs) => {
+                self.open_save_as(library, None, crate::save_as::Scope::Notebook);
+                None
+            }
+            (
+                Target::Section { library, .. } | Target::Notebook(library),
+                Action::EmptyRecycleBin,
+            ) => {
+                self.empty_recycle_bin(library);
+                None
+            }
+            (Target::Notebook(library), Action::RecycleBin) => {
+                self.toggle_recycle_bin(library);
+                None
+            }
+            (Target::Notebook(library), Action::MarkNotebookRead) => {
+                self.mark_notebook_read(&library);
+                None
+            }
+            (Target::Section { library, path }, Action::Password) => {
+                self.password_protection(library, path);
+                None
             }
             (Target::Notebook(library), Action::Open) => {
                 self.open_notebook(library.location.clone(), None);
@@ -665,7 +763,22 @@ impl State {
                 self.rename(crate::rename::Target::Page(space));
                 None
             }
+            Action::Delete if self.in_recycle_bin() => {
+                Some(Command::Recycle(Request::Purge(vec![space])))
+            }
             Action::Delete => Some(Command::DeletePages(vec![space])),
+            Action::MoveTo(path) if self.in_recycle_bin() => {
+                Some(Command::Recycle(Request::Restore {
+                    space,
+                    path,
+                    copy: false,
+                }))
+            }
+            Action::CopyTo(path) => Some(Command::Recycle(Request::Restore {
+                space,
+                path,
+                copy: true,
+            })),
             Action::MoveTo(path) => Some(Command::MovePage { space, path }),
             Action::CopyLink => {
                 let copied = self
@@ -915,15 +1028,9 @@ fn new(action: &Action, folder: String) -> Option<Structure> {
 /// `library`'s folders of sections, the notebook's first, then its section groups breadth
 /// first, but for the recycle bin; none for a section opened on its own.
 pub(crate) fn folders(library: &Library) -> Vec<&notebook::discover::Folder> {
-    let mut folders: Vec<_> = library.catalog().into_iter().collect();
-    let mut at = 0;
-    while let Some(&folder) = folders.get(at) {
-        folders.extend(
-            (folder.groups.iter()).filter(|group| !crate::library::recycle_bin(&group.path)),
-        );
-        at += 1;
-    }
-    folders
+    library.catalog().map_or_else(Vec::new, |catalog| {
+        crate::library::folders(catalog, |group| !crate::library::recycle_bin(&group.path))
+    })
 }
 
 #[cfg(test)]

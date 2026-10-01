@@ -65,9 +65,17 @@ impl FileIo {
             }
         })?);
         #[cfg(unix)]
-        let file = options.open(path)?;
+        let file = options.open(path.as_ref())?;
         #[cfg(all(unix, not(target_os = "macos")))]
-        file.try_lock()?;
+        {
+            use std::os::unix::fs::MetadataExt;
+            file.try_lock()?;
+            // Locked after it was opened, the file may since have been superseded.
+            let (open, named) = (file.metadata()?, std::fs::metadata(path)?);
+            if (open.dev(), open.ino()) != (named.dev(), named.ino()) {
+                return Err(ErrorKind::ResourceBusy.into());
+            }
+        }
         Ok(Self {
             #[cfg(windows)]
             locks: onenote_locks(&file, write)?,
@@ -255,6 +263,45 @@ pub fn confirm_file(path: impl AsRef<Path>, base: &Stamp) -> Result<(), CommitEr
     io.finish(result)
 }
 
+/// Puts the file at `with` in the place of the file at `path`, provided `path` still has
+/// `base`'s stamp, under the exclusion `commit_file` takes: the whole-image write OneNote 2010
+/// makes when it writes a section anew.
+#[cfg(any(unix, windows))]
+pub fn supersede_file(
+    path: impl AsRef<Path>,
+    base: &Stamp,
+    with: impl AsRef<Path>,
+) -> Result<(), CommitError> {
+    let (path, with) = (path.as_ref(), with.as_ref());
+    let failed = |state| move |error| CommitError { state, error };
+    // Windows renames nothing over an open file, so there the old file goes aside first and is
+    // deleted once released, as OneNote's maintenance does.
+    let mut aside = path.as_os_str().to_owned();
+    if cfg!(windows) {
+        aside.push(".old");
+    }
+    let aside = std::path::PathBuf::from(aside);
+    let mut io = FileIo::open(path, true).map_err(failed(CommitState::NotCommitted))?;
+    let result = base
+        .check(&mut io)
+        .and_then(|()| std::fs::rename(path, &aside))
+        .map_err(failed(CommitState::NotCommitted))
+        .and_then(|()| {
+            std::fs::rename(with, path).map_err(|error| CommitError {
+                state: match std::fs::rename(&aside, path) {
+                    Ok(()) => CommitState::NotCommitted,
+                    Err(_) => CommitState::Unknown,
+                },
+                error,
+            })
+        });
+    io.finish(result)?;
+    if aside != path {
+        std::fs::remove_file(aside).map_err(failed(CommitState::Committed))?;
+    }
+    Ok(())
+}
+
 /// Checks that the file still has `base`'s stamp and flushes it, then refreshes its header
 /// version metadata. No revision is added; reread before committing on `base` again.
 /// The caller must hold OneNote-compatible exclusion and independently establish which
@@ -357,8 +404,10 @@ impl Stamp {
         })
     }
 
-    /// Reads the header and probes the length, without reading the body.
-    fn check(&self, io: &mut impl CommitIo) -> io::Result<()> {
+    /// Checks that the file `io` reads still has this stamp, reading its header and probing its
+    /// length without reading the body; `ResourceBusy` when it moved on. The caller holds
+    /// OneNote-compatible exclusion for whatever the check guards.
+    pub fn check(&self, io: &mut impl CommitIo) -> io::Result<()> {
         let mut header = [0; 1024];
         crate::snapshot::read_exact(
             &mut |offset, output| io.read_at(offset, output),

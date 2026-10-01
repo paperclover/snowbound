@@ -194,6 +194,10 @@ impl Source for Smb<'_> {
             return None;
         }
         let stamp = self.client.stamp(&self.path(path).ok()?).ok()?;
-        crate::copied(&replica, &stamp).ok().flatten()
+        let connection = crate::closed(&replica).ok()?;
+        let base = crate::base::Image::Base;
+        (crate::base::stamp(&connection, base).ok()?? == stamp)
+            .then(|| crate::base::read(&connection, base).ok()?)
+            .flatten()
     }
 }

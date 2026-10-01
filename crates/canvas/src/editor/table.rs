@@ -65,13 +65,56 @@ fn empty_cell(source: &TableCell) -> Result<TableCell, EditError> {
             Default::default(),
         )?,
     };
+    new_cell(source.indents.clone(), source.shading, vec![node])
+}
+
+/// A new cell of `paragraphs`.
+fn new_cell(
+    indents: Vec<f32>,
+    shading: Option<u32>,
+    paragraphs: Vec<PageParagraph>,
+) -> Result<TableCell, EditError> {
     Ok(TableCell {
         id: new_id()?,
         layout: Default::default(),
-        indents: source.indents.clone(),
-        shading: source.shading,
-        paragraphs: vec![node],
+        indents,
+        shading,
+        paragraphs,
         unsupported: Vec::new(),
+    })
+}
+
+/// A new bordered table of `rows` and `columns` new columns, in `source`'s place in the
+/// outline's tree.
+fn table_paragraph(
+    source: &PageParagraph,
+    columns: usize,
+    rows: Vec<TableRow>,
+) -> Result<PageParagraph, EditError> {
+    Ok(PageParagraph {
+        id: new_id()?,
+        parent: source.parent,
+        level: source.level,
+        style: None,
+        format: source.format.clone(),
+        lists: Vec::new(),
+        tags: Vec::new(),
+        media: Default::default(),
+        collapsed: false,
+        content: ParagraphContent::Table(Table {
+            id: new_id()?,
+            columns: vec![
+                TableColumn {
+                    width: COLUMN_WIDTH,
+                    locked: false
+                };
+                columns
+            ],
+            rows,
+            borders: Some(true),
+            layout: Default::default(),
+            tags: Vec::new(),
+        }),
     })
 }
 
@@ -250,7 +293,11 @@ impl CanvasEditor {
 impl TextOutline {
     /// The table column whose right border lies within `reach` of outline-local `point`, as
     /// `(table, column, width)`.
-    pub fn column_border(&self, point: [f32; 2], reach: f32) -> Option<(ExGuid, usize, f32)> {
+    pub(crate) fn column_border(
+        &self,
+        point: [f32; 2],
+        reach: f32,
+    ) -> Option<(ExGuid, usize, f32)> {
         let columns = descendants(self.document.nodes(), None)
             .filter_map(|(_, _, node)| match &node.content {
                 ParagraphContent::Table(table) => Some((table.id, table.columns.len())),
@@ -276,7 +323,7 @@ impl TextOutline {
 impl CanvasEditor {
     /// The active outline with column `column` of `table` `width` wide, as a border drag
     /// shows it before release.
-    pub fn preview_column(
+    pub(crate) fn preview_column(
         &self,
         engine: &mut TextEngine,
         table: ExGuid,
@@ -383,53 +430,23 @@ impl CanvasEditor {
         let text = &node.text().unwrap().text;
         let end = text.utf16_offset(text.text().len())?;
         let format = text.format_at(caret.offset)?;
-        let cell = || -> Result<TableCell, EditError> {
+        let empty = || -> Result<TableCell, EditError> {
             let mut paragraph = crate::document::node(
                 Paragraph::new(String::new(), format.clone()),
                 node.format.clone(),
             )?;
             paragraph.style = node.style;
-            Ok(TableCell {
-                id: new_id()?,
-                layout: Default::default(),
-                indents: outline.indents.clone(),
-                shading: None,
-                paragraphs: vec![paragraph],
-                unsupported: Vec::new(),
+            new_cell(outline.indents.clone(), None, vec![paragraph])
+        };
+        let rows = (0..rows)
+            .map(|_| {
+                Ok(TableRow {
+                    id: new_id()?,
+                    cells: (0..columns).map(|_| empty()).collect::<Result<_, _>>()?,
+                })
             })
-        };
-        let table = PageParagraph {
-            id: new_id()?,
-            parent: node.parent,
-            level: node.level,
-            style: None,
-            format: node.format.clone(),
-            lists: Vec::new(),
-            tags: Vec::new(),
-            media: Default::default(),
-            collapsed: false,
-            content: ParagraphContent::Table(onestore::page::Table {
-                id: new_id()?,
-                columns: vec![
-                    TableColumn {
-                        width: COLUMN_WIDTH,
-                        locked: false
-                    };
-                    columns
-                ],
-                rows: (0..rows)
-                    .map(|_| {
-                        Ok(TableRow {
-                            id: new_id()?,
-                            cells: (0..columns).map(|_| cell()).collect::<Result<_, _>>()?,
-                        })
-                    })
-                    .collect::<Result<_, EditError>>()?,
-                borders: Some(true),
-                layout: Default::default(),
-                tags: Vec::new(),
-            }),
-        };
+            .collect::<Result<_, EditError>>()?;
+        let table = table_paragraph(node, columns, rows)?;
         let parent = |candidate: &PageParagraph| candidate.parent == Some(node.id);
         let childless = !outline.document.container(container)?.iter().any(parent);
         let (edit, first) = if end == 0 && childless {
@@ -489,12 +506,8 @@ impl CanvasEditor {
             let format = source.text().unwrap().text.format_at(focus.offset)?;
             let mut split = outline.document.replace(
                 focus..focus,
-                vec![
-                    Paragraph::new(String::new(), format.clone()),
-                    Paragraph::new(String::new(), format.clone()),
-                ],
+                vec![Paragraph::new(String::new(), format.clone()); 2],
             )?;
-            let id = new_id()?;
             // The table's paragraph holds the list, tags and children (`evidence/structural-edits/
             // xml/c6-*-midtab.xml`, `c10-tab-parent-1.xml`).
             let children = split.replacement.split_off(2);
@@ -511,44 +524,20 @@ impl CanvasEditor {
                     paragraph.level = 1;
                     paragraph.parent = None;
                     paragraph.lists.clear();
-                    Ok(TableCell {
-                        id: new_id()?,
-                        layout: Default::default(),
-                        indents: outline.indents.clone(),
-                        shading: None,
-                        paragraphs: vec![paragraph],
-                        unsupported: Vec::new(),
-                    })
+                    new_cell(outline.indents.clone(), None, vec![paragraph])
                 })
                 .collect::<Result<Vec<_>, EditError>>()?;
+            let row = TableRow {
+                id: new_id()?,
+                cells,
+            };
             let wrapper = PageParagraph {
-                id,
-                parent: source.parent,
-                level: source.level,
-                style: None,
-                format: source.format.clone(),
                 lists,
                 tags,
-                media: Default::default(),
                 collapsed,
-                content: ParagraphContent::Table(onestore::page::Table {
-                    id: new_id()?,
-                    columns: vec![
-                        TableColumn {
-                            width: COLUMN_WIDTH,
-                            locked: false
-                        };
-                        2
-                    ],
-                    rows: vec![TableRow {
-                        id: new_id()?,
-                        cells,
-                    }],
-                    borders: Some(true),
-                    layout: Default::default(),
-                    tags: Vec::new(),
-                }),
+                ..table_paragraph(source, 2, vec![row])?
             };
+            let id = wrapper.id;
             split.replacement.push(wrapper);
             split
                 .replacement
@@ -598,22 +587,12 @@ impl CanvasEditor {
             let format = source.text().unwrap().text.format_at(focus.offset)?;
             let split = outline.document.replace(
                 focus..focus,
-                vec![
-                    Paragraph::new(String::new(), format.clone()),
-                    Paragraph::new(String::new(), format.clone()),
-                ],
+                vec![Paragraph::new(String::new(), format.clone()); 2],
             )?;
-            let cell = &mut table.rows[0].cells[location.column];
-            cell.paragraphs.splice(split.range, split.replacement);
-            let paragraphs = cell.paragraphs.split_off(local + 1);
-            let target = TableCell {
-                id: new_id()?,
-                layout: Default::default(),
-                indents: cell.indents.clone(),
-                shading: cell.shading,
-                paragraphs,
-                unsupported: Vec::new(),
-            };
+            let source = &mut table.rows[0].cells[location.column];
+            source.paragraphs.splice(split.range, split.replacement);
+            let paragraphs = source.paragraphs.split_off(local + 1);
+            let target = new_cell(source.indents.clone(), source.shading, paragraphs)?;
             table.rows[0].cells.push(target);
             table.columns.push(TableColumn {
                 width: COLUMN_WIDTH,
@@ -722,7 +701,7 @@ impl CanvasEditor {
         let ParagraphContent::Table(table) = &mut wrapper.content else {
             unreachable!()
         };
-        let (replacement, next) = if exit {
+        let replacement = if exit {
             table.rows.pop();
             let blank = || {
                 Ok::<_, EditError>(PageParagraph {
@@ -732,14 +711,7 @@ impl CanvasEditor {
                     ..self.blank_paragraph(source)?
                 })
             };
-            let (first, second) = (blank()?, blank()?);
-            (
-                vec![wrapper, first, second],
-                TextPosition {
-                    paragraph: focus.paragraph + 1,
-                    offset: 0,
-                },
-            )
+            vec![wrapper, blank()?, blank()?]
         } else {
             let cells = row
                 .cells
@@ -750,13 +722,11 @@ impl CanvasEditor {
                 id: new_id()?,
                 cells,
             });
-            (
-                vec![wrapper],
-                TextPosition {
-                    paragraph: focus.paragraph + 1,
-                    offset: 0,
-                },
-            )
+            vec![wrapper]
+        };
+        let next = TextPosition {
+            paragraph: focus.paragraph + 1,
+            offset: 0,
         };
         self.commit(
             engine,

@@ -1,0 +1,44 @@
+[
+  {
+    "path": "Changed.one",
+    "bytes": 26248,
+    "sha256": "c6dfb825da16bd399d9c08e59b9fce17ce6d31000ac9dcb35fb88348abcc25f6",
+    "mtime_ns": 1790841675948190811
+  },
+  {
+    "path": "Conflicted.one",
+    "bytes": 44384,
+    "sha256": "53bf55828c7d7b3e27812bb8a37a58826019d363982b460eb20b99038f077e2e",
+    "mtime_ns": 1790841676132162946
+  },
+  {
+    "path": "Edited.one",
+    "bytes": 28952,
+    "sha256": "36fa95d9944b91cc702b2834a8938fdf4db03cb4cc4eea59ad4118cc0045fe1a",
+    "mtime_ns": 1790841675847211065
+  },
+  {
+    "path": "New Section 1.one",
+    "bytes": 6064,
+    "sha256": "7c59a07e40a6162d9392b069dfec88822b0ba540e671ed1199582e89c958013b",
+    "mtime_ns": 1790841674768801766
+  },
+  {
+    "path": "Open Notebook.onetoc2",
+    "bytes": 8520,
+    "sha256": "4308d8a6273eb58cd0089cbc056d4cdb5f5767e8f61a1173bbb17a8fb853e6ed",
+    "mtime_ns": 1790841675974244740
+  },
+  {
+    "path": "Protected.one",
+    "bytes": 22976,
+    "sha256": "d1ec539f23bd1b7355c3e9891735fc23a3f27b65d304c6cfd19eed18f0fae857",
+    "mtime_ns": 1790841675582959551
+  },
+  {
+    "path": "Removed.one",
+    "bytes": 19656,
+    "sha256": "4db34bfd031431a02909183e75c0f836eb10e43aef0842434b44ec801735a232",
+    "mtime_ns": 1790841675961507402
+  }
+]

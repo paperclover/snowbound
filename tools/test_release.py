@@ -22,6 +22,28 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(release['parse']('2026-09-29-r10'), ('2026-09-29', 10))
         self.assertEqual(release['folder'](('2026-09-29', 10)), '2026-09-29.r10')
 
+    def test_a_commit_counts_once_by_its_prefix_or_once_per_bullet(self):
+        entries = release['entries']
+        self.assertEqual(entries('fix(update): accept an archive of exactly its size\n\nureq refuses.\n'),
+                         [('fix', 'Accept an archive of exactly its size')])
+        self.assertEqual(entries('docs: center the row'), [('other', 'Center the row')])
+        self.assertEqual(entries('Initial import'), [('other', 'Initial import')])
+        self.assertEqual(entries('feat!: macOS icon'), [('feature', 'macOS icon')])
+        self.assertEqual(
+            entries('feat: icon, builds\n\nIntro.\n\n- macOS ships an icon so Tahoe\n  shows it.\n'
+                    '* pinch zoom.\n\nAssisted-by: claude-opus-5.5\n'),
+            [('feature', 'macOS ships an icon so Tahoe shows it'), ('feature', 'Pinch zoom')])
+
+    def test_changes_start_after_the_first_build_and_carry_their_commits_versions(self):
+        first = release['FIRST']
+        commits = {first: ([], utc('2026-09-30T10:00:00'), 'fix: published first'),
+                   'b': ([first], utc('2026-09-30T11:00:00'), 'feat: pinch zoom'),
+                   'c': (['b'], utc('2026-09-30T12:00:00'), 'fix: two\n\n- one\n- two\n')}
+        self.assertEqual(release['changes'](commits, 'c'), [
+            {'version': '2026-09-30-r2', 'kind': 'feature', 'title': 'Pinch zoom'},
+            {'version': '2026-09-30-r3', 'kind': 'fix', 'title': 'One'},
+            {'version': '2026-09-30-r3', 'kind': 'fix', 'title': 'Two'}])
+
     def test_latest_only_moves_forward(self):
         latest = {'macos-aarch64': '2026-09-29-r9', 'linux-x86_64': '2026-09-30-r1'}
         moved = release['newest'](latest, {'macos-aarch64': {}, 'linux-x86_64': {}, 'macos-10.6': {}},

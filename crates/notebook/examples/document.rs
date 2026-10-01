@@ -39,7 +39,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let bytes = onestore::read_file(&source_path)?;
     let store = Store::parse(&bytes)?;
     let index = RevisionIndex::parse(&store)?;
-    #[cfg(feature = "protected")]
     let unlocked = if let Some(path) = &password_file {
         use std::io::Read;
         let mut password = zeroize::Zeroizing::new(String::new());
@@ -57,20 +56,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         None
     };
-    #[cfg(not(feature = "protected"))]
-    if password_file.is_some() {
-        return Err(
-            "Build this exporter with the protected feature to open a password-protected section."
-                .into(),
-        );
-    }
-    #[cfg(feature = "protected")]
     let document = match &unlocked {
         Some(section) => section.document()?,
         None => Document::parse(&index)?,
     };
-    #[cfg(not(feature = "protected"))]
-    let document = Document::parse(&index)?;
     if let Some(destination) = destination {
         #[cfg(unix)]
         {

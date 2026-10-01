@@ -331,7 +331,7 @@ impl Client {
 
     /// Gives a file or directory the hidden attribute, keeping its others, as OneNote 2010
     /// skips a hidden folder.
-    pub fn hide(&self, path: &str) -> io::Result<()> {
+    pub(crate) fn hide(&self, path: &str) -> io::Result<()> {
         // FILE_READ_ATTRIBUTES and FILE_WRITE_ATTRIBUTES.
         let file = self.open_with(path, 0x180, 7, CreateDisposition::FileOpen, 0)?;
         let file_id = file.id.ok_or(io::ErrorKind::InvalidInput)?;
@@ -389,7 +389,7 @@ impl Client {
 
     /// Reads a bounded external payload while denying concurrent writes and deletion.
     /// Empty files succeed; limits, sharing contention and failed close return no payload.
-    pub fn read_asset(&self, path: &str, limit: usize) -> io::Result<Vec<u8>> {
+    pub(crate) fn read_asset(&self, path: &str, limit: usize) -> io::Result<Vec<u8>> {
         let mut file = self.open_shared(path, false, 1)?;
         let mut bytes = Vec::new();
         let mut block = [0; 65536];
@@ -491,6 +491,33 @@ impl Client {
     /// version, under native writer coordination.
     pub fn confirm(&self, path: &str, base: &onestore::Stamp) -> Result<(), CommitError> {
         self.commit(path, &checked(base), |file| onestore::confirm(file, base))
+    }
+
+    /// Puts the file `with` in the place of the revision store at `path`, provided `path` still
+    /// has `base`'s stamp, as OneNote 2010's maintenance puts a file it wrote anew in place:
+    /// under writer coordination the old file goes aside, `with` takes its name, and the old
+    /// file is deleted once released. A server renames nothing over an open file.
+    pub(crate) fn supersede(
+        &self,
+        path: &str,
+        base: &onestore::Stamp,
+        with: &str,
+    ) -> Result<(), CommitError> {
+        let aside = format!("{with}.old");
+        let failed = |state| move |error| CommitError { state, error };
+        self.commit(path, &checked(base), |file| {
+            base.check(file)
+                .and_then(|()| self.rename(path, &aside))
+                .map_err(failed(CommitState::NotCommitted))?;
+            self.rename(with, path).map_err(|error| CommitError {
+                state: match self.rename(&aside, path) {
+                    Ok(()) => CommitState::NotCommitted,
+                    Err(_) => CommitState::Unknown,
+                },
+                error,
+            })
+        })?;
+        self.delete(&aside).map_err(failed(CommitState::Committed))
     }
 
     /// Opens `path` for writing under OneNote's coordination, making `reads` with the locks.

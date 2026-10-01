@@ -376,16 +376,13 @@ def compare(notebook, native, versions=None, password_file=None):
                 source = space['nodes'][source_page['children'][z]]
                 if source['kind']['type'] == 'Ink':
                     if child.tag == '{%s}InkDrawing' % ns['one']:
-                        # Stroke coordinates are absolute; left-to-right pages report them
-                        # relative to the canonical margin origin, right-to-left pages as stored.
+                        # A drawing lies in the page's frame as outlines do: its strokes plus the
+                        # offset a move gives it, reported from the canonical margin origin.
                         extent = ink_extent(space, source)
-                        # A moved drawing keeps its strokes and takes an offset.
-                        extent[0] += source['layout']['x'] or 0.0
-                        extent[1] += source['layout']['y'] or 0.0
-                        if not source_page['kind']['rtl']:
-                            for index, (axis, canonical_origin) in enumerate((('x', 36.0), ('y', 14.4))):
-                                origin = source_page['kind']['margin_origin_' + axis]
-                                extent[index] += canonical_origin - origin if origin is not None else 0
+                        for index, axis in enumerate(('x', 'y')):
+                            origin = source_page['kind']['margin_origin_' + axis]
+                            canonical_origin = (-36.0 if source_page['kind']['rtl'] else 36.0) if axis == 'x' else 14.4
+                            extent[index] += (source['layout'][axis] or 0.0) + (canonical_origin - origin if origin is not None else 0)
                         size = child.find('one:Size', ns)
                         # Native sizes are one HIMETRIC unit larger than the point extent.
                         reported = [float(position.attrib['x']), float(position.attrib['y']), float(size.get('width')) - 72 / 2540, float(size.get('height')) - 72 / 2540]
@@ -400,11 +397,11 @@ def compare(notebook, native, versions=None, password_file=None):
                         origin = source_page['kind']['margin_origin_' + axis]
                         canonical_origin = (-36.0 if source_page['kind']['rtl'] else 36.0) if axis == 'x' else 14.4
                         projected = stored_position + (canonical_origin - origin if origin is not None else 0)
-                        if axis == 'x' and source_page['kind']['rtl']:
-                            assert source['kind']['type'] == 'Outline' and source['layout']['max_width'] is not None, 'RTL positioning requires an outline width'
+                        if axis == 'x' and source_page['kind']['rtl'] and source['kind']['type'] == 'Outline':
                             assert not any(p['id'] == 0x14001c84 for group in source['extra'] for p in group), 'Explicit RTL outline alignment requires a native control'
-                            # Default RTL outlines keep their right edge when native layout changes width.
-                            projected += source['layout']['max_width'] - float(child.find('one:Size', ns).get('width'))
+                            # An outline laid out wider than its stored width keeps its right edge.
+                            width = source['layout']['max_width']
+                            projected -= max(0.0, float(child.find('one:Size', ns).get('width')) - width) if width is not None else 0.0
                         if abs(projected - native_position) > 0.002:
                             geometry.append({'file': str(relative), 'page': ordinal, 'z': z, 'axis': axis,
                                              'stored': stored_position, 'origin': origin, 'projected': projected, 'native': native_position})

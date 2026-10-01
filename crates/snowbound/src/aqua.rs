@@ -17,10 +17,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 use ui::{Axis, PaintedScroller, Scroller, ScrollerPart};
-use winit::{
-    raw_window_handle::{HasWindowHandle, RawWindowHandle},
-    window::{CursorIcon, Window},
-};
+use winit::window::{CursorIcon, Window};
 
 static PRETEND: AtomicBool = AtomicBool::new(false);
 
@@ -49,14 +46,8 @@ pub fn textured(window: &Window, row: f32) -> bool {
         return false;
     }
     TEXTURED.store(true, Ordering::Relaxed);
-    let RawWindowHandle::AppKit(handle) =
-        window.window_handle().expect("Live AppKit window").as_raw()
-    else {
-        unreachable!()
-    };
+    let window = crate::platform::ns_window(window);
     unsafe {
-        let view = &*handle.ns_view.as_ptr().cast::<AnyObject>();
-        let window: Retained<AnyObject> = msg_send_id![view, window];
         let title: Retained<AnyObject> = msg_send_id![&window, title];
         let mask: usize = msg_send![&window, styleMask];
         // NSTexturedBackgroundWindowMask.
@@ -450,16 +441,8 @@ pub fn resize_grip(ui: &mut ui::Ui, window: &Window, size: [f32; 2]) {
     }
     static HIDDEN: std::sync::Once = std::sync::Once::new();
     HIDDEN.call_once(|| {
-        let RawWindowHandle::AppKit(handle) =
-            window.window_handle().expect("Live AppKit window").as_raw()
-        else {
-            unreachable!()
-        };
-        unsafe {
-            let view = &*handle.ns_view.as_ptr().cast::<AnyObject>();
-            let window: Retained<AnyObject> = msg_send_id![view, window];
-            let _: () = msg_send![&window, setShowsResizeIndicator: false];
-        }
+        let window = crate::platform::ns_window(window);
+        let _: () = unsafe { msg_send![&window, setShowsResizeIndicator: false] };
     });
     thread_local! {
         static GRIP: draw::RasterImage = {

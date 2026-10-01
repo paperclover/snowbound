@@ -92,36 +92,36 @@ impl Surface {
     }
 
     /// The window's next frame, or none to skip this one.
-    pub fn frame(&mut self, _: &Renderer) -> Result<Option<Frame>, Box<dyn Error>> {
+    pub fn frame(&mut self, renderer: &Renderer) -> Result<Option<Frame>, Box<dyn Error>> {
         if self.size.contains(&0) {
             return Ok(None);
         }
         let target = match self.target.take() {
             Some(target) if target.size() == self.size => target,
-            _ => Target::new(self.size)?,
+            _ => renderer.target(self.size)?,
         };
         Ok(Some(Frame { target }))
     }
 
     pub fn present(&mut self, renderer: &Renderer, frame: Frame) {
-        if self.translucent {
-            renderer.present_translucent(&frame.target);
-        } else {
-            frame.target.present();
-        }
+        renderer.present(&frame.target, self.translucent);
         let _: () = unsafe { msg_send![&self.context, flushBuffer] };
         self.target = Some(frame.target);
     }
 
     /// A target the size of the window's frames that `read` reads back.
-    pub fn offscreen(&self, _: &Renderer) -> Result<Offscreen, Box<dyn Error>> {
+    pub fn offscreen(&self, renderer: &Renderer) -> Result<Offscreen, Box<dyn Error>> {
         Ok(Frame {
-            target: Target::new(self.size)?,
+            target: renderer.target(self.size)?,
         })
     }
 
     /// The offscreen target's sRGB RGBA rows, top first.
-    pub fn read(&self, _: &Renderer, offscreen: Offscreen) -> Result<Vec<u8>, Box<dyn Error>> {
-        Ok(offscreen.target.read_pixels())
+    pub fn read(
+        &self,
+        renderer: &Renderer,
+        offscreen: Offscreen,
+    ) -> Result<Vec<u8>, Box<dyn Error>> {
+        Ok(renderer.read_pixels(&offscreen.target)?)
     }
 }

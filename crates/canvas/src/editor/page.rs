@@ -10,19 +10,19 @@ use std::collections::BTreeMap;
 
 /// A title object's own state, plus the child origins `build` replaces with page coordinates.
 pub(crate) struct TitleArea {
-    pub id: onestore::ExGuid,
-    pub date: Option<onestore::ExGuid>,
-    pub layout: onestore::document::Layout,
-    pub origins: BTreeMap<onestore::ExGuid, [Option<f32>; 2]>,
+    pub(crate) id: onestore::ExGuid,
+    pub(crate) date: Option<onestore::ExGuid>,
+    pub(crate) layout: onestore::document::Layout,
+    pub(crate) origins: BTreeMap<onestore::ExGuid, [Option<f32>; 2]>,
 }
 
 pub(crate) struct Import {
-    pub objects: Vec<Content>,
-    pub outlines: Vec<TextOutline>,
-    pub date: Option<PageDate>,
-    pub areas: Vec<TitleArea>,
+    pub(crate) objects: Vec<Content>,
+    pub(crate) outlines: Vec<TextOutline>,
+    pub(crate) date: Option<PageDate>,
+    pub(crate) areas: Vec<TitleArea>,
     /// The paragraph each outline holding no text shows after its objects, not stored.
-    pub provisional: BTreeMap<onestore::ExGuid, PageParagraph>,
+    pub(crate) provisional: BTreeMap<onestore::ExGuid, PageParagraph>,
 }
 
 pub(crate) enum Content {
@@ -95,9 +95,8 @@ impl Content {
         let Self::File { source, layout } = self else {
             return None;
         };
-        let [x, y] = [source.layout.x, source.layout.y].map(|v| v.unwrap_or(0.0));
-        let [x0, y0, x1, y1] = layout.bounds();
-        Some((source, [x + x0, y + y0, x + x1, y + y1]))
+        let origin = crate::origin(&source.layout);
+        Some((source, crate::translated(layout.bounds(), origin)))
     }
 
     /// A tagged picture or file: its identity, note tags and bounds in page points.
@@ -106,7 +105,7 @@ impl Content {
     ) -> Option<(onestore::ExGuid, &[onestore::document::Tag], [f32; 4])> {
         let (id, tags, bounds) = match self {
             Self::Image(image) => {
-                let [x, y] = [image.layout.x, image.layout.y].map(|v| v.unwrap_or(0.0));
+                let [x, y] = crate::origin(&image.layout);
                 let [width, height] = crate::outline::image_size(image)?;
                 (image.id, &image.tags, [x, y, x + width, y + height])
             }
@@ -143,14 +142,11 @@ impl ReadOnlyObject {
             [0.0; 2]
         };
         let layout = source.layout();
-        let x = layout.x.unwrap_or(0.0) + offset[0];
-        let y = layout.y.unwrap_or(0.0) + offset[1];
         let width = layout.max_width.unwrap_or(160.0);
         let height = layout.max_height.unwrap_or(42.0);
-        if [x, y, width, height].iter().any(|v| !v.is_finite()) || width <= 0.0 || height <= 0.0 {
+        if ![width, height].iter().all(|v| v.is_finite() && *v > 0.0) {
             return Err(EditorError::InvalidGeometry);
         }
-        let width = width.max(160.0);
         let label = engine.layout(
             &Paragraph::new(
                 message.into(),
@@ -160,21 +156,21 @@ impl ReadOnlyObject {
                     ..Default::default()
                 },
             ),
-            width - 16.0,
+            width.max(160.0) - 16.0,
         )?;
-        let height = height.max(label.height() + 16.0);
-        let rect = [x, y, x + width, y + height];
-        if rect.iter().any(|v| !v.is_finite()) {
-            return Err(EditorError::InvalidGeometry);
-        }
-        Ok(Box::new(Self {
+        let object = Box::new(Self {
             source,
             message,
             label,
             offset,
-        }))
+        });
+        if object.rect().iter().any(|v| !v.is_finite()) {
+            return Err(EditorError::InvalidGeometry);
+        }
+        Ok(object)
     }
-    pub fn rect(&self) -> [f32; 4] {
+
+    pub(crate) fn rect(&self) -> [f32; 4] {
         let layout = self.source.layout();
         let x = layout.x.unwrap_or(0.0) + self.offset[0];
         let y = layout.y.unwrap_or(0.0) + self.offset[1];
@@ -206,10 +202,7 @@ pub(crate) fn build(
     for object in std::mem::take(&mut page.objects) {
         match &object {
             PageObject::Outline(outline) => {
-                let origin = [
-                    outline.layout.x.unwrap_or(0.0),
-                    outline.layout.y.unwrap_or(0.0),
-                ];
+                let origin = crate::origin(&outline.layout);
                 if origin.iter().any(|v| !v.is_finite()) {
                     return Err(EditorError::InvalidGeometry);
                 }
@@ -377,10 +370,7 @@ pub(crate) fn build(
                     objects.push(Content::unavailable(object, engine)?);
                     continue;
                 };
-                let origin = [
-                    source.layout.x.unwrap_or(0.0),
-                    source.layout.y.unwrap_or(0.0),
-                ];
+                let origin = crate::origin(&source.layout);
                 if origin.iter().any(|v| !v.is_finite())
                     || size.iter().any(|v| !v.is_finite() || *v <= 0.0)
                     || !(origin[0] + size[0]).is_finite()
@@ -435,12 +425,7 @@ pub(crate) fn build(
 /// The painted extent of a page's ink drawing, pen included, as `[x0, y0, x1, y1]` page
 /// points.
 pub(crate) fn ink_bounds(ink: &Ink) -> Option<[f32; 4]> {
-    let [x, y] = ink_offset(ink);
-    stroke_bounds(ink).map(|[x0, y0, x1, y1]| [x0 + x, y0 + y, x1 + x, y1 + y])
-}
-
-pub(crate) fn ink_offset(ink: &Ink) -> [f32; 2] {
-    [ink.layout.x.unwrap_or(0.0), ink.layout.y.unwrap_or(0.0)]
+    stroke_bounds(ink).map(|bounds| crate::translated(bounds, crate::origin(&ink.layout)))
 }
 
 /// The painted extent of every stroke before the drawing's offset.

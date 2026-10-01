@@ -35,6 +35,12 @@ pub enum TocEdit {
     Remove {
         identity: [u8; 16],
     },
+    /// The entry's file took the identity `with`, as a section does whose password is set,
+    /// changed or removed.
+    Reidentify {
+        identity: [u8; 16],
+        with: [u8; 16],
+    },
 }
 
 fn component(name: &str) -> bool {
@@ -87,6 +93,7 @@ pub fn edit_table_of_contents(
         stored.into_iter().map(|(_, entry)| entry).collect();
     let mut created: BTreeMap<ExGuid, PropertyObject> = BTreeMap::new();
     let mut renamed = BTreeSet::new();
+    let mut reidentified = BTreeSet::new();
     let mut color = None;
     for edit in edits {
         let position = |identity: &[u8; 16]| {
@@ -178,6 +185,14 @@ pub fn edit_table_of_contents(
                 let (id, _, _) = listed.remove(at);
                 created.remove(&id);
             }
+            TocEdit::Reidentify { identity, with } => {
+                let at = position(identity)?;
+                if *with == [0; 16] || listed.iter().any(|(_, known, _)| known == with) {
+                    return Err(invalid("The table of contents already lists that identity"));
+                }
+                listed[at].1 = *with;
+                reidentified.insert(listed[at].0);
+            }
         }
     }
     let listed = listed;
@@ -188,12 +203,12 @@ pub fn edit_table_of_contents(
             TocEdit::Add { .. } | TocEdit::Order(_) | TocEdit::Remove { .. }
         )
     });
-    let transaction = build_on(&index, &[], None, |index| {
+    let transaction = build_on(&index, &[], |index| {
         let raw = index.resolve_active(space)?;
         let mut changed = BTreeMap::new();
         let mut root_object = PropertyObject::from_object(&raw.objects[&root])?;
         let mut references = Vec::new();
-        for (order, (id, _, filename)) in listed.iter().enumerate() {
+        for (order, (id, identity, filename)) in listed.iter().enumerate() {
             let mut object = match created.remove(id) {
                 Some(object) => object,
                 None => PropertyObject::from_object(&raw.objects[id])?,
@@ -212,6 +227,9 @@ pub fn edit_table_of_contents(
             }
             if renamed.contains(id) {
                 updates.push((0x1c001d6b, crate::create::string(filename)));
+            }
+            if reidentified.contains(id) {
+                updates.push((0x1c001d94, identity.to_vec()));
             }
             let updates: Vec<(u32, &[u8])> = updates
                 .iter()
@@ -287,7 +305,7 @@ mod tests {
             let index = RevisionIndex::parse(&store).unwrap();
             let space = Document::parse(&index).unwrap().root;
             let listed = entries(&toc);
-            let transaction = build_on(&index, &[], None, |index| {
+            let transaction = build_on(&index, &[], |index| {
                 let raw = index.resolve_active(space)?;
                 let mut changed = BTreeMap::new();
                 for ((id, _, _), order) in listed.iter().zip([7u32, 2, 2]) {

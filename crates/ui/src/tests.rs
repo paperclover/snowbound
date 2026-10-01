@@ -605,8 +605,8 @@ fn focused_field(text: &str) -> (Ui, String) {
 /// Moves the pointer over the caret before byte `index` of the field's `text`.
 fn point_to(ui: &mut Ui, text: &str, index: usize) {
     let size = ui.theme.font_size;
-    let (texts, frame) = ui.texts();
-    let layout = &texts.label(text, size, false, None, frame).layout;
+    let (texts, frame) = (&mut ui.texts, ui.frame);
+    let layout = &texts.label(text, size, frame).layout;
     let x = parley::editing::Cursor::from_byte_index(layout, index, parley::Affinity::Downstream)
         .geometry(layout, 1.0)
         .x0 as f32;
@@ -2817,7 +2817,7 @@ fn tab_row(ui: &mut Ui, active: usize) -> Id {
     ];
     let tabs: Vec<_> = names
         .iter()
-        .map(|name| (*name, [0.5, 0.6, 0.9, 1.0]))
+        .map(|name| (*name, [0.5, 0.6, 0.9, 1.0], false))
         .collect();
     let section = ui.theme.section([0.5, 0.6, 0.9, 1.0]);
     let row = Id::ROOT.child("tabs");

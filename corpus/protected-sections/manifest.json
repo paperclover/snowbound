@@ -1,0 +1,10 @@
+{
+  "native_build": "14.0.4763.1000",
+  "source": "source/synthetic.one",
+  "native": {
+    "protected.one": "lab-pass-1",
+    "changed.one": "lab-pass-2",
+    "removed.one": null,
+    "snowbound-changed-then-onenote-edit.one": "snow-pass-2"
+  }
+}

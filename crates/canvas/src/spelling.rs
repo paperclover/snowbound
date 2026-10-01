@@ -60,10 +60,10 @@ pub fn pick(language: u32, available: &[String]) -> Option<&str> {
 
 /// A marked word: misspelled, or repeating the word before it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Mark {
+pub(crate) struct Mark {
     /// Bytes of the paragraph's text.
-    pub range: Range<usize>,
-    pub repeated: bool,
+    pub(crate) range: Range<usize>,
+    pub(crate) repeated: bool,
 }
 
 /// A word of a paragraph: its bytes, its language, and whether its spelling is checked.
@@ -352,7 +352,7 @@ impl Spelling {
 
     /// The marks on `paragraph` once it is checked, less accepted words; until then none,
     /// and it is checked.
-    pub fn marks(&self, paragraph: &Paragraph) -> Vec<Mark> {
+    pub(crate) fn marks(&self, paragraph: &Paragraph) -> Vec<Mark> {
         let key = key(paragraph);
         let mut state = self.shared.state.lock().unwrap();
         if let Some(marks) = state.marks(key, paragraph) {
@@ -366,7 +366,7 @@ impl Spelling {
 
     /// The marks on `paragraph`, checked on this thread where not yet checked, as the
     /// Spelling pane walks the page.
-    pub fn marks_now(&self, paragraph: &Paragraph) -> Vec<Mark> {
+    pub(crate) fn marks_now(&self, paragraph: &Paragraph) -> Vec<Mark> {
         let key = key(paragraph);
         if let Some(marks) = self.shared.state.lock().unwrap().marks(key, paragraph) {
             return marks;
@@ -378,7 +378,7 @@ impl Spelling {
     }
 
     /// Corrections for `word` in `language`, best first.
-    pub fn suggest(&self, word: &str, language: Option<u32>) -> Vec<String> {
+    pub(crate) fn suggest(&self, word: &str, language: Option<u32>) -> Vec<String> {
         self.shared
             .dictionary
             .suggest(word, language.unwrap_or(crate::language::EN_US))

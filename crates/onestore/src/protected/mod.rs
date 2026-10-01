@@ -1,24 +1,26 @@
-//! Explicit, in-memory opening of native OneNote 2010 protected sections.
-//!
-//! AES-128/CBC and SHA-1 Agile password wrappers are supported. Unknown wrappers
-//! remain opaque through the ordinary storage/document APIs. CBC provides no
-//! general ciphertext authentication; native read-only hashes and model checks
-//! detect structural inconsistencies, not arbitrary changes to all content.
+//! OneNote 2010's password-protected sections: an Office Agile password wrapper
+//! (MS-OFFCRYPTO; SHA-1, 100,000 rounds) around an AES-128 key that encrypts every
+//! property object (CBC, an IV of its own) and payload (CBC, one IV from the key data's
+//! salt). Unknown wrappers stay opaque. CBC authenticates nothing; read-only hashes and
+//! model checks catch structural damage, not every change to content.
 
 mod crypto;
 
 use crate::{
-    ExGuid, FileDataReference, ObjectData, Reference, RevisionIndex, Transaction,
+    Chunk, ExGuid, FileDataReference, ObjectData, Reference, RevisionIndex, Store,
     document::Document,
-    op::{Edit, Op, OpError},
 };
+use bumpalo::Bump;
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     fmt,
+    sync::Arc,
 };
 use zeroize::Zeroizing;
 
 type Result<T> = std::result::Result<T, Error>;
+type Format<T> = std::result::Result<T, crate::Error>;
 
 #[derive(Debug)]
 pub enum Error {
@@ -34,15 +36,34 @@ impl From<crate::Error> for Error {
     }
 }
 
+impl Error {
+    fn message(&self) -> &'static str {
+        match self {
+            Self::PasswordMismatch => "The password did not match the section verifier",
+            Self::Unsupported => "This protection format is not supported",
+            Self::Limit => "Opening the protected section exceeded its work limit",
+            Self::Invalid(error) => error.message,
+        }
+    }
+}
+
+impl From<Error> for crate::Error {
+    fn from(error: Error) -> Self {
+        match error {
+            Error::Invalid(error) => error,
+            other => crate::Error {
+                offset: 0,
+                message: other.message(),
+            },
+        }
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::PasswordMismatch => {
-                f.write_str("The password did not match the section verifier")
-            }
-            Self::Unsupported => f.write_str("This protection format is not supported"),
-            Self::Limit => f.write_str("Opening the protected section exceeded its work limit"),
             Self::Invalid(error) => error.fmt(f),
+            other => f.write_str(other.message()),
         }
     }
 }
@@ -79,17 +100,10 @@ impl Default for Limits {
     }
 }
 
-struct Decoded<'a> {
-    stored: &'a [u8],
-    clear: Zeroizing<Vec<u8>>,
-}
-
-/// Owns decoded buffers until dropped; returned views cannot outlive this owner.
-///
-/// Passwords are not retained. Dropping this owner clears its derived key and
-/// decoded buffers; a protected save works on ordinary buffers, which are not cleared. Owned strings or exports made from a `Document` are separate
-/// caller-owned copies and must be disposed of by the caller when locking.
-/// Opening never rewrites the source image or changes its protection state.
+/// A protected section's labelled revisions decoded for reading as a `Document`, which
+/// cannot outlive it. Holds no password; dropping it clears its keys and decoded buffers,
+/// while strings and exports made from the `Document` are the caller's to dispose of.
+/// Edits go through `Section::unlock`.
 ///
 /// ```compile_fail
 /// # use onestore::{RevisionIndex, protected::{Limits, UnlockedSection}};
@@ -103,22 +117,30 @@ struct Decoded<'a> {
 pub struct UnlockedSection<'a> {
     index: &'a RevisionIndex<'a>,
     /// By object space and stored address.
-    objects: BTreeMap<(ExGuid, usize), Decoded<'a>>,
+    objects: BTreeMap<(ExGuid, usize), Zeroizing<Vec<u8>>>,
     files: BTreeMap<[u8; 16], Zeroizing<Vec<u8>>>,
-    keys: BTreeMap<&'a [u8], crypto::Key>,
 }
 
 impl<'a> UnlockedSection<'a> {
     /// Verifies the password and every labeled revision before exposing a view.
     /// Metadata and password input are each bounded to 64 KiB.
     pub fn open(index: &'a RevisionIndex<'a>, password: &str, limits: Limits) -> Result<Self> {
-        Self::unlock(index, limits, |metadata, rounds| {
+        Self::open_with(index, limits, |metadata, rounds| {
             crypto::Key::open(metadata, password, rounds)
         })
     }
 
-    /// `open` with each distinct encryption metadata's key from `key`.
-    fn unlock(
+    /// `open` with the key `Key::open` gave, which every space's encryption data must name.
+    pub fn unlock(index: &'a RevisionIndex<'a>, key: &Key, limits: Limits) -> Result<Self> {
+        Self::open_with(index, limits, |metadata, _| {
+            match metadata == &key.metadata[..] {
+                true => Ok(key.key.clone()),
+                false => Err(Error::PasswordMismatch),
+            }
+        })
+    }
+
+    fn open_with(
         index: &'a RevisionIndex<'a>,
         mut limits: Limits,
         mut key: impl FnMut(&[u8], &mut u64) -> Result<crypto::Key>,
@@ -133,31 +155,10 @@ impl<'a> UnlockedSection<'a> {
             index,
             objects: BTreeMap::new(),
             files: BTreeMap::new(),
-            keys: BTreeMap::new(),
         };
         let mut keys = BTreeMap::new();
         let mut file_keys = BTreeMap::new();
-        let mut hashes = BTreeMap::new();
-        for node in index.store.lists.values().flat_map(|list| &list.nodes) {
-            if !matches!(node.id, 0xc4 | 0xc5) {
-                continue;
-            }
-            let Some(Reference::Data(chunk)) = node.reference else {
-                return Err(invalid("Read-only object has no data reference"));
-            };
-            let bytes = index.store.chunk_data(chunk)?;
-            let expected: [u8; 16] = node
-                .payload
-                .last_chunk::<16>()
-                .copied()
-                .ok_or_else(|| invalid("Missing read-only object hash"))?;
-            if hashes
-                .insert(bytes.as_ptr().addr(), expected)
-                .is_some_and(|old| old != expected)
-            {
-                return Err(invalid("Inconsistent read-only hashes for one payload"));
-            }
-        }
+        let hashes = hashes(index.store)?;
         for (space_id, space) in &index.spaces {
             let mut metadata = None;
             for revision in space.revisions.values() {
@@ -203,23 +204,10 @@ impl<'a> UnlockedSection<'a> {
                                 .checked_sub(bytes.len())
                                 .ok_or(Error::Limit)?;
                             let decoded = key.property(bytes)?;
-                            if let Some(expected) = expected {
-                                let mut hash = md5::Context::new();
-                                hash.consume(&decoded);
-                                hash.consume(&[0; 7][..(8 - decoded.len() % 8) % 8]);
-                                if hash.finalize().0 != *expected {
-                                    return Err(invalid(
-                                        "Decrypted read-only object hash mismatch",
-                                    ));
-                                }
+                            if expected.is_some_and(|expected| digest(&decoded) != *expected) {
+                                return Err(invalid("Decrypted read-only object hash mismatch"));
                             }
-                            result.objects.insert(
-                                identity,
-                                Decoded {
-                                    stored: bytes,
-                                    clear: decoded,
-                                },
-                            );
+                            result.objects.insert(identity, decoded);
                         }
                         ObjectData::File { .. } => {
                             if let Some(FileDataReference::Internal(guid)) =
@@ -251,7 +239,6 @@ impl<'a> UnlockedSection<'a> {
                 }
             }
         }
-        result.keys = keys;
         for (space, info) in &index.spaces {
             for rid in info.labels.values().copied().collect::<BTreeSet<_>>() {
                 result.resolve(*space, rid)?.reachable()?;
@@ -276,7 +263,7 @@ impl<'a> UnlockedSection<'a> {
                             offset: 0,
                             message: "Protected object was not decoded",
                         })?;
-                object.data = ObjectData::Properties(&decoded.clear);
+                object.data = ObjectData::Properties(decoded);
             }
         }
         Ok(revision)
@@ -299,216 +286,345 @@ impl<'a> UnlockedSection<'a> {
     }
 }
 
-impl UnlockedSection<'_> {
-    /// A plaintext section holding every object space's current revision and payloads
-    /// under their own identities, for writers that read ordinary sections.
-    fn twin(&self) -> std::result::Result<Zeroizing<Vec<u8>>, crate::Error> {
-        use crate::write::{PropertyObject, RevisionEdit, append_revisions};
-        let copy = |space: ExGuid, revision: ExGuid| {
-            let revision = self.resolve(space, revision)?;
-            // A revision still declares objects its edits detached; a new one holds live ones.
-            let live = revision.reachable()?;
-            let mut objects = BTreeMap::new();
-            for (id, object) in revision.objects.iter().filter(|(id, _)| live.contains(id)) {
-                let copy = match object.data {
-                    ObjectData::File {
-                        reference,
-                        extension,
-                    } => {
-                        let text = |bytes: &[u8]| {
-                            String::from_utf16(
-                                &bytes
-                                    .chunks_exact(2)
-                                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                                    .collect::<Vec<_>>(),
-                            )
-                            .map_err(|_| crate::Error {
-                                offset: 0,
-                                message: "Invalid UTF-16 file-data declaration",
-                            })
-                        };
-                        let mut copy =
-                            PropertyObject::file(*id, &text(reference)?, &text(extension)?)?;
-                        copy.jcid = object.jcid;
-                        copy.global_ids = std::sync::Arc::clone(&object.global_ids);
-                        copy
-                    }
-                    _ => PropertyObject::from_object(object)?,
-                };
-                objects.insert(*id, copy);
-            }
-            Ok::<_, crate::Error>((revision.roots, objects))
-        };
-        let payloads: Vec<_> = self
-            .files
-            .iter()
-            .map(|(id, bytes)| (*id, bytes.as_slice()))
-            .collect();
-        let current = (ExGuid::default(), 1);
-        // The scaffold's root space takes the section's identity, then its content.
-        let mut scaffold = crate::create_section("twin.one", "", "")?;
-        let identity = |id: ExGuid| {
-            let mut bytes = Vec::new();
-            id.encode(&mut bytes);
-            bytes
-        };
-        let store = crate::Store::parse(&scaffold)?;
-        let placeholder = identity(RevisionIndex::parse(&store)?.root);
-        for at in 0..=scaffold.len() - 20 {
-            if scaffold[at..at + 20] == placeholder {
-                scaffold[at..at + 20].copy_from_slice(&identity(self.index.root));
+/// A protected section's key, opened with its password or made for a new one. Holds no
+/// password; the key is cleared when its last clone drops.
+#[derive(Clone)]
+pub struct Key {
+    key: crypto::Key,
+    /// The encryption data (MS-ONESTORE 2.5.19) that opens the key.
+    metadata: Arc<[u8]>,
+}
+
+impl fmt::Debug for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Key")
+    }
+}
+
+impl Key {
+    /// Opens the key of the protected section `image` with `password`.
+    pub fn open(image: &[u8], password: &str) -> Result<Self> {
+        let store = Store::parse(image)?;
+        let metadata = metadata(&store)?.ok_or(Error::Unsupported)?;
+        Ok(Self {
+            key: crypto::Key::open(metadata, password, &mut Limits::default().kdf_rounds)?,
+            metadata: Arc::from(metadata),
+        })
+    }
+
+    /// A fresh key for `password`, with OneNote 2010's encryption data.
+    pub fn new(password: &str) -> Result<Self> {
+        let (key, metadata) = crypto::Key::create(password)?;
+        Ok(Self {
+            key,
+            metadata: Arc::from(metadata),
+        })
+    }
+
+    /// The AES key the section's content is encrypted under, for keys derived from it.
+    pub fn secret(&self) -> &[u8; 16] {
+        self.key.value()
+    }
+
+    pub(crate) fn metadata(&self) -> &[u8] {
+        &self.metadata
+    }
+}
+
+/// The section `image` written anew, under `new` or in the clear, as OneNote 2010 rewrites
+/// a section whose password it sets, changes or removes: the file and its object spaces
+/// take new identities, each space keeps its labelled revisions, every one a checkpoint,
+/// and the payloads come along. A protected `image` opens under `key`.
+pub fn rekey(image: &[u8], key: Option<&Key>, new: Option<&Key>) -> Result<Vec<u8>> {
+    let store = Store::parse(image)?;
+    if !store.checksum_mismatches.is_empty() {
+        return Err(invalid(
+            "Cannot write a file with transaction checksum damage",
+        ));
+    }
+    let index = RevisionIndex::parse(&store)?;
+    let opened = match (key, metadata(&store)?) {
+        (Some(key), Some(_)) => Some(Opened::new(&store, key)?),
+        (None, None) => None,
+        (None, Some(_)) => return Err(Error::PasswordMismatch),
+        (Some(_), None) => return Err(invalid("The section is not protected")),
+    };
+    let arena = Bump::new();
+    let mut fresh = BTreeMap::new();
+    for space in index.spaces.keys() {
+        if let std::collections::btree_map::Entry::Vacant(entry) = fresh.entry(space.guid) {
+            entry.insert(crate::write::fresh_guid()?);
+        }
+    }
+    // OneNote gives the payloads new identities too.
+    let mut files = BTreeMap::new();
+    for guid in crate::write::declared_payloads(&store) {
+        files.insert(guid, crate::write::fresh_guid()?);
+    }
+    let rename = |id: ExGuid| ExGuid {
+        guid: fresh.get(&id.guid).copied().unwrap_or(id.guid),
+        n: id.n,
+    };
+    let mut spaces = Vec::new();
+    for (space, info) in &index.spaces {
+        let mut labelled: Vec<(ExGuid, Vec<(ExGuid, u32)>)> = Vec::new();
+        // The current revision first, as OneNote writes it.
+        let mut labels: Vec<_> = info.labels.iter().collect();
+        labels.sort_by_key(|(label, _)| **label != (ExGuid::default(), 1));
+        for (label, rid) in labels {
+            match labelled.iter_mut().find(|(known, _)| known == rid) {
+                Some((_, names)) => names.push(*label),
+                None => labelled.push((*rid, vec![*label])),
             }
         }
-        let mut twin = Zeroizing::new(append_revisions(&scaffold, &payloads, None, |_| {
-            let mut spaces = BTreeMap::new();
-            for id in self.index.spaces.keys() {
-                let (roots, objects) = copy(*id, self.index.active(*id)?)?;
-                let edit = if *id == self.index.root {
-                    RevisionEdit::Label {
-                        context: current.0,
-                        role: current.1,
-                        roots,
-                        objects,
+        let mut revisions = Vec::new();
+        for (rid, labels) in labelled {
+            let mut resolved = index.resolve(*space, rid)?;
+            if let Some(opened) = &opened {
+                for object in resolved.objects.values_mut() {
+                    if let ObjectData::Encrypted(stored) = object.data {
+                        object.data = ObjectData::Properties(opened.property(&arena, stored)?);
                     }
-                } else {
-                    RevisionEdit::Create { roots, objects }
-                };
-                spaces.insert(*id, edit);
-            }
-            Ok(spaces)
-        })?);
-        // One revision per call and space: the remaining labels follow in rounds.
-        for round in 0.. {
-            let mut spaces = BTreeMap::new();
-            for (id, space) in &self.index.spaces {
-                let label = space.labels.iter().filter(|(label, _)| **label != current);
-                if let Some(((context, role), revision)) = label.clone().nth(round) {
-                    let (roots, objects) = copy(*id, *revision)?;
-                    spaces.insert(
-                        *id,
-                        RevisionEdit::Label {
-                            context: *context,
-                            role: *role,
-                            roots,
-                            objects,
-                        },
-                    );
                 }
             }
-            if spaces.is_empty() {
-                break;
+            let mut objects = BTreeMap::new();
+            for id in resolved.reachable()? {
+                let mut object = resolved.objects[&id].clone();
+                if let (Some(FileDataReference::Internal(guid)), ObjectData::File { extension, .. }) =
+                    (object.file_reference()?, object.data)
+                    && let Some(renamed) = files.get(&guid)
+                {
+                    let reference: Vec<u8> = crate::op::content::payload_reference(*renamed)
+                        .encode_utf16()
+                        .flat_map(u16::to_le_bytes)
+                        .collect();
+                    object.data = ObjectData::File {
+                        reference: arena.alloc_slice_copy(&reference),
+                        extension,
+                    };
+                }
+                object.global_ids = Arc::new(
+                    object
+                        .global_ids
+                        .iter()
+                        .map(|(entry, guid)| (*entry, fresh.get(guid).copied().unwrap_or(*guid)))
+                        .collect(),
+                );
+                objects.insert(rename(id), object);
             }
-            twin = Zeroizing::new(append_revisions(&twin, &[], None, |_| Ok(spaces))?);
+            let roots = resolved
+                .roots
+                .iter()
+                .map(|(role, id)| (*role, rename(*id)))
+                .collect();
+            revisions.push(crate::write::Labelled {
+                labels,
+                revision: crate::ResolvedRevision { roots, objects },
+            });
         }
-        Ok(twin)
+        spaces.push((rename(*space), revisions));
     }
-}
-
-impl UnlockedSection<'_> {
-    /// Applies `edit` to this section as `Section::apply` applies it to an ordinary one and
-    /// seals the result as one revision per changed space, stored under the section's key.
-    /// Page ops only: a protected section's page list is not edited.
-    pub fn apply(&self, author: &str, edit: &Edit) -> std::result::Result<Transaction, OpError> {
-        let failed = |error: crate::Error| OpError::Failed(error);
-        if self.keys.len() != 1 {
-            return Err(OpError::Unsupported(
-                "Only a section under one key takes edits",
-            ));
-        }
-        if edit.ops.iter().any(|op| matches!(op, Op::Section(_))) {
-            return Err(OpError::Unsupported(
-                "A protected section's page list is not edited",
-            ));
-        }
-        let twin = self.twin().map_err(failed)?;
-        let arena = crate::Arena::default();
-        let mut section = crate::Section::open(&arena, twin.to_vec()).map_err(failed)?;
-        section.apply(author, edit)?;
-        section.seal().map_err(failed)?;
-        let applied = Zeroizing::new(section.image());
-        drop(section);
-        let applied_store = crate::Store::parse(&applied).map_err(failed)?;
-        let applied_index = RevisionIndex::parse(&applied_store).map_err(failed)?;
-        // The twin's scaffold spaces are not the section's.
-        let edited = self
-            .index
-            .spaces
-            .keys()
-            .map(|space| Ok((*space, applied_index.resolve_active(*space)?)))
-            .collect::<std::result::Result<Vec<_>, crate::Error>>()
-            .map_err(failed)?;
-        let edited: Vec<_> = edited
-            .iter()
-            .map(|(space, after)| (*space, after))
-            .collect();
-        let payloads = crate::write::declared_payloads(&applied_store)
-            .into_iter()
-            .map(|guid| Ok((guid, applied_store.file_data(guid)?)))
-            .collect::<std::result::Result<Vec<_>, crate::Error>>()
-            .map_err(failed)?;
-        let transaction = crate::write::squash(self.index, &edited, &payloads, Some(self))
-            .map_err(failed)?
-            .ok_or(OpError::Unsupported("The edit changes nothing"))?;
-        let written =
-            crate::write::applied(self.index.store.data, Some(&transaction)).map_err(failed)?;
-        let store = crate::Store::parse(&written).map_err(failed)?;
-        let index = RevisionIndex::parse(&store).map_err(failed)?;
-        UnlockedSection::unlock(&index, Limits::default(), |metadata, _| {
-            self.keys
-                .get(metadata)
-                .cloned()
-                .ok_or(Error::PasswordMismatch)
-        })
-        .map_err(|error| match error {
-            Error::Invalid(error) => failed(error),
-            _ => failed(crate::Error {
-                offset: 0,
-                message: "The written section does not unlock under its key",
-            }),
-        })?;
-        Ok(transaction)
-    }
-}
-
-impl UnlockedSection<'_> {
-    /// The section key; `apply` admits sections with exactly one.
-    fn key(&self) -> &crypto::Key {
-        self.keys.values().next().expect("one section key")
-    }
-}
-
-impl crate::write::Protection for UnlockedSection<'_> {
-    fn resolve(
-        &self,
-        space: ExGuid,
-        revision: ExGuid,
-    ) -> std::result::Result<crate::ResolvedRevision<'_>, crate::Error> {
-        self.resolve(space, revision)
-    }
-
-    fn stored(&self, clear: &[u8]) -> Option<&[u8]> {
-        self.objects
-            .values()
-            .find(|decoded| std::ptr::eq(decoded.clear.as_ptr(), clear.as_ptr()))
-            .map(|decoded| decoded.stored)
-    }
-
-    fn seal_property(&self, clear: &[u8]) -> std::result::Result<Vec<u8>, crate::Error> {
-        let random = crate::Error {
-            offset: 0,
-            message: "System random source failed",
+    let mut payloads = Vec::new();
+    for (guid, renamed) in &files {
+        let stored = store.file_data(*guid)?;
+        let clear = match &opened {
+            Some(opened) => opened.file(&arena, stored)?,
+            None => stored,
         };
-        let mut iv = [0; 16];
-        getrandom::fill(&mut iv).map_err(|_| random)?;
-        self.key()
-            .seal_property(clear, iv)
-            .map_err(|error| match error {
-                Error::Invalid(error) => error,
-                _ => random,
+        payloads.push((*renamed, clear));
+    }
+    let placement = image[128..148].try_into().unwrap();
+    let skeleton = crate::create::skeleton(rename(index.root), placement)?;
+    let written = crate::write::rewrite(skeleton, &spaces, &payloads, new)?;
+    let arena = crate::Arena::default();
+    match new {
+        Some(new) => drop(crate::Section::unlock(&arena, written.clone(), new)?),
+        None => drop(crate::Section::open(&arena, written.clone())?),
+    }
+    Ok(written)
+}
+
+/// The encryption data every revision of `store` names; none in a section without any.
+fn metadata<'a>(store: &Store<'a>) -> Result<Option<&'a [u8]>> {
+    let mut found = None;
+    for node in store.lists.values().flat_map(|list| &list.nodes) {
+        if node.id != 0x7c {
+            continue;
+        }
+        let Some(Reference::Data(chunk)) = node.reference else {
+            return Err(invalid("Missing encryption key reference"));
+        };
+        let data = store.encryption_key(chunk)?;
+        if found.replace(data).is_some_and(|old| old != data) {
+            return Err(Error::Unsupported);
+        }
+    }
+    Ok(found)
+}
+
+/// The hashes read-only declarations give their stored bytes, by address.
+fn hashes(store: &Store<'_>) -> Result<BTreeMap<usize, [u8; 16]>> {
+    let mut hashes = BTreeMap::new();
+    for node in store.lists.values().flat_map(|list| &list.nodes) {
+        if !matches!(node.id, 0xc4 | 0xc5) {
+            continue;
+        }
+        let Some(Reference::Data(chunk)) = node.reference else {
+            return Err(invalid("Read-only object has no data reference"));
+        };
+        let bytes = store.chunk_data(chunk)?;
+        let expected: [u8; 16] = node
+            .payload
+            .last_chunk::<16>()
+            .copied()
+            .ok_or_else(|| invalid("Missing read-only object hash"))?;
+        if hashes
+            .insert(bytes.as_ptr().addr(), expected)
+            .is_some_and(|old| old != expected)
+        {
+            return Err(invalid("Inconsistent read-only hashes for one payload"));
+        }
+    }
+    Ok(hashes)
+}
+
+/// A protected read-only declaration's hash: MD5 of the clear bytes zero-padded to 8.
+pub(crate) fn digest(clear: &[u8]) -> [u8; 16] {
+    let mut hash = md5::Context::new();
+    hash.consume(clear);
+    hash.consume(&[0; 7][..(8 - clear.len() % 8) % 8]);
+    hash.finalize().0
+}
+
+/// A `Section`'s key, with what it decoded under it: clear bytes by the address of the
+/// stored bytes they decode, and stored bytes by the address of their clear bytes.
+pub(crate) struct Opened<'a> {
+    key: Key,
+    /// The encryption data each revision names.
+    chunk: Chunk,
+    /// Read-only declarations' hashes by the address of their stored bytes.
+    hashes: BTreeMap<usize, [u8; 16]>,
+    clear: RefCell<BTreeMap<usize, &'a [u8]>>,
+    stored: RefCell<BTreeMap<usize, &'a [u8]>>,
+}
+
+impl<'a> Opened<'a> {
+    /// `key` for the section `store` holds, every object space of which it must encrypt.
+    pub(crate) fn new(store: &Store<'_>, key: &Key) -> Result<Self> {
+        if metadata(store)?.ok_or(Error::Unsupported)? != &key.metadata[..] {
+            return Err(Error::PasswordMismatch);
+        }
+        let index = RevisionIndex::parse(store)?;
+        if index
+            .spaces
+            .values()
+            .flat_map(|space| space.revisions.values())
+            .any(|revision| !revision.encrypted)
+        {
+            return Err(invalid(
+                "A protected section stores a revision in the clear",
+            ));
+        }
+        let chunk = store
+            .lists
+            .values()
+            .flat_map(|list| &list.nodes)
+            .find_map(|node| match node.reference {
+                Some(Reference::Data(chunk)) if node.id == 0x7c => Some(chunk),
+                _ => None,
             })
+            .ok_or(Error::Unsupported)?;
+        Ok(Self {
+            key: key.clone(),
+            chunk,
+            hashes: hashes(store)?,
+            clear: RefCell::default(),
+            stored: RefCell::default(),
+        })
     }
 
-    fn seal_file(&self, clear: &[u8]) -> Vec<u8> {
-        self.key().seal_file(clear)
+    /// `key` for writing a new image whose encryption data lies at `chunk`.
+    pub(crate) fn sealing(key: &Key, chunk: Chunk) -> Self {
+        Self {
+            key: key.clone(),
+            chunk,
+            hashes: BTreeMap::new(),
+            clear: RefCell::default(),
+            stored: RefCell::default(),
+        }
     }
+
+    /// The clear bytes of a stored object, decoded once into `arena`.
+    pub(crate) fn property(&self, arena: &'a Bump, stored: &'a [u8]) -> Format<&'a [u8]> {
+        if let Some(clear) = self.clear.borrow().get(&stored.as_ptr().addr()) {
+            return Ok(clear);
+        }
+        let decoded = self.key.key.property(stored).map_err(crate::Error::from)?;
+        if let Some(expected) = self.hashes.get(&stored.as_ptr().addr())
+            && digest(&decoded) != *expected
+        {
+            return Err(crate::Error {
+                offset: 0,
+                message: "Decrypted read-only object hash mismatch",
+            });
+        }
+        let clear: &'a [u8] = arena.alloc_slice_copy(&decoded);
+        self.sealed(clear, stored);
+        Ok(clear)
+    }
+
+    /// The clear bytes of a stored payload, in `arena`.
+    pub(crate) fn file(&self, arena: &'a Bump, stored: &[u8]) -> Format<&'a [u8]> {
+        Ok(arena.alloc_slice_copy(&self.key.key.file(stored).map_err(crate::Error::from)?))
+    }
+
+    pub(crate) fn key(&self) -> &Key {
+        &self.key
+    }
+
+    /// Records that `clear` is stored as `stored`.
+    pub(crate) fn sealed(&self, clear: &'a [u8], stored: &'a [u8]) {
+        self.clear
+            .borrow_mut()
+            .insert(stored.as_ptr().addr(), clear);
+        self.stored
+            .borrow_mut()
+            .insert(clear.as_ptr().addr(), stored);
+    }
+}
+
+impl crate::write::Protection for Opened<'_> {
+    fn stored(&self, clear: &[u8]) -> Option<&[u8]> {
+        self.stored.borrow().get(&clear.as_ptr().addr()).copied()
+    }
+
+    fn seal_property(&self, clear: &[u8]) -> Format<Vec<u8>> {
+        seal_property(&self.key, clear)
+    }
+
+    fn seal_file(&self, clear: &[u8]) -> Format<Vec<u8>> {
+        self.key.key.seal_file(clear).map_err(crate::Error::from)
+    }
+
+    fn open_property(&self, stored: &[u8]) -> Format<Zeroizing<Vec<u8>>> {
+        self.key.key.property(stored).map_err(crate::Error::from)
+    }
+
+    fn open_file(&self, stored: &[u8]) -> Format<Zeroizing<Vec<u8>>> {
+        self.key.key.file(stored).map_err(crate::Error::from)
+    }
+
+    fn metadata(&self) -> Chunk {
+        self.chunk
+    }
+}
+
+/// A property object's stored form under `key`, with a fresh IV.
+fn seal_property(key: &Key, clear: &[u8]) -> Format<Vec<u8>> {
+    let mut iv = [0; 16];
+    getrandom::fill(&mut iv).map_err(|_| crate::Error {
+        offset: 0,
+        message: "System random source failed",
+    })?;
+    key.key.seal_property(clear, iv).map_err(crate::Error::from)
 }

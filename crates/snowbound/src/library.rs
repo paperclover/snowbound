@@ -5,6 +5,7 @@ use notebook::discover::{Folder, SectionState};
 use notebook::session::{Background, Notebook, Section};
 use notebook::sidecar::themes::Themes;
 use notebook::smb::{Client, Credentials};
+use onestore::protected::Key;
 use std::{
     error::Error,
     io,
@@ -151,14 +152,14 @@ impl Mount {
         let mut url = String::from("smb://");
         if let Some(user) = &self.user {
             if !self.domain.is_empty() {
-                url += &format!("{};", encode(&self.domain));
+                url += &format!("{};", encode(self.domain.as_bytes()));
             }
-            url += &format!("{}@", encode(user));
+            url += &format!("{}@", encode(user.as_bytes()));
         }
         url += &self.server;
         for part in [&self.share, &self.root] {
             if !part.is_empty() {
-                url += &format!("/{}", encode(part));
+                url += &format!("/{}", encode(part.as_bytes()));
             }
         }
         url
@@ -232,10 +233,11 @@ fn decode(text: &str) -> String {
     String::from_utf8_lossy(&decoded).into_owned()
 }
 
-/// `text` escaped for an address, `/` kept.
-fn encode(text: &str) -> String {
-    text.bytes()
-        .map(|byte| match byte {
+/// `bytes` escaped for an address, outside RFC 3986's unreserved set and `/`.
+pub(crate) fn encode(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|&byte| match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
                 char::from(byte).to_string()
             }
@@ -318,9 +320,34 @@ pub struct Library {
     kept: Mutex<crate::prefetch::Recent<String, Section>>,
     /// The notebook's style themes, and when they were read.
     themes: Mutex<Option<(Instant, Arc<Themes>)>>,
+    /// The keys of its password-protected sections unlocked this run, kept as it is read again.
+    keys: Arc<Keys>,
 }
 
+/// Keys of password-protected sections, by file identity, with when each section was last
+/// worked in; in memory only, each cleared as it goes.
+#[derive(Default)]
+pub struct Keys(Mutex<std::collections::HashMap<[u8; 16], (Key, Instant)>>);
+
 impl Library {
+    /// `location` named `name`, with no notebook read, server, sync or kept sections.
+    fn new(location: &str, name: String, cache: &Path) -> Self {
+        Self {
+            location: location.to_owned(),
+            name,
+            notebook: Ok(None),
+            server: None,
+            notice: None,
+            cache: cache.to_owned(),
+            background: None,
+            watch: None,
+            tag_art: Default::default(),
+            kept: Mutex::new(crate::prefetch::Recent::new(KEPT)),
+            themes: Default::default(),
+            keys: Default::default(),
+        }
+    }
+
     /// The notebook in the folder at `location`, or why it cannot be read. A folder on a
     /// mounted SMB share opens through Snowbound's own SMB client, signed in with the
     /// account the system keeps for the mount, as OneNote's own client coordinates with
@@ -333,18 +360,12 @@ impl Library {
             };
             return login
                 .and_then(|login| Self::on_share(location, mount.clone(), login, cache))
-                .unwrap_or_else(|reason| Self {
-                    location: location.to_owned(),
-                    name: display_name(cache, location).unwrap_or_else(|| mount.name()),
-                    notebook: Err(reason),
-                    server: None,
-                    notice: None,
-                    cache: cache.to_owned(),
-                    background: None,
-                    watch: None,
-                    tag_art: Default::default(),
-                    kept: Mutex::new(crate::prefetch::Recent::new(KEPT)),
-                    themes: Default::default(),
+                .unwrap_or_else(|reason| {
+                    let name = display_name(cache, location).unwrap_or_else(|| mount.name());
+                    Self {
+                        notebook: Err(reason),
+                        ..Self::new(location, name, cache)
+                    }
                 });
         }
         let mut notice = None;
@@ -364,20 +385,16 @@ impl Library {
             Ok(notebook) => local_background(notebook, location),
             Err(_) => (None, None),
         };
+        let name = display_name(cache, location).unwrap_or_else(|| file_name(Path::new(location)));
         Self {
-            location: location.to_owned(),
-            name: display_name(cache, location).unwrap_or_else(|| file_name(Path::new(location))),
             background,
             watch,
             tag_art: Mutex::new(Arc::new(
                 notebook.as_ref().map(read_tag_art).unwrap_or_default(),
             )),
-            kept: Mutex::new(crate::prefetch::Recent::new(KEPT)),
-            themes: Default::default(),
             notebook: notebook.map(Some).map_err(|error| error.to_string()),
-            server: None,
             notice,
-            cache: cache.to_owned(),
+            ..Self::new(location, name, cache)
         }
     }
 
@@ -405,21 +422,17 @@ impl Library {
         .map_err(|error| error.to_string())?;
         background.set_offline(offline());
         background.watch(notebook.replicas());
-        Ok(Self {
-            location: location.to_owned(),
-            name: display_name(cache, location).unwrap_or_else(|| match server_address(location) {
+        let name =
+            display_name(cache, location).unwrap_or_else(|| match server_address(location) {
                 Some(_) => server.mount.name(),
                 None => file_name(Path::new(location)),
-            }),
+            });
+        Ok(Self {
             tag_art: Mutex::new(Arc::new(read_tag_art(&notebook))),
-            kept: Mutex::new(crate::prefetch::Recent::new(KEPT)),
-            themes: Default::default(),
             notebook: Ok(Some(notebook)),
             server: Some(server),
-            notice: None,
-            cache: cache.to_owned(),
             background: Some(Arc::new(background)),
-            watch: None,
+            ..Self::new(location, name, cache)
         })
     }
 
@@ -576,18 +589,16 @@ impl Library {
             }
             _ => self.watch.clone(),
         };
+        let name = display_name(&self.cache, &self.location).unwrap_or_else(|| self.name.clone());
         Self {
-            location: self.location.clone(),
-            name: display_name(&self.cache, &self.location).unwrap_or_else(|| self.name.clone()),
             notebook: Ok(Some(notebook)),
             server: self.server.clone(),
             notice: self.notice.clone(),
-            cache: self.cache.clone(),
             background: self.background.clone(),
             watch,
             tag_art: Mutex::new(self.tag_art()),
-            kept: Mutex::new(crate::prefetch::Recent::new(KEPT)),
-            themes: Default::default(),
+            keys: Arc::clone(&self.keys),
+            ..Self::new(&self.location, name, &self.cache)
         }
     }
 
@@ -595,35 +606,20 @@ impl Library {
     pub fn created(location: &str, mut notebook: Notebook, cache: &Path) -> Self {
         let (background, watch) = local_background(&mut notebook, location);
         Self {
-            location: location.to_owned(),
-            name: file_name(Path::new(location)),
             background,
             watch,
-            tag_art: Default::default(),
-            kept: Mutex::new(crate::prefetch::Recent::new(KEPT)),
-            themes: Default::default(),
             notebook: Ok(Some(notebook)),
-            server: None,
-            notice: None,
-            cache: cache.to_owned(),
+            ..Self::new(location, file_name(Path::new(location)), cache)
         }
     }
 
     /// The section file at `file` as a notebook of one tab.
     pub fn section(file: &Path, cache: &Path) -> Self {
-        Self {
-            location: file.to_string_lossy().into_owned(),
-            name: file_name(file.parent().unwrap_or(file)),
-            notebook: Ok(None),
-            server: None,
-            notice: None,
-            cache: cache.to_owned(),
-            background: None,
-            watch: None,
-            tag_art: Default::default(),
-            kept: Mutex::new(crate::prefetch::Recent::new(KEPT)),
-            themes: Default::default(),
-        }
+        Self::new(
+            &file.to_string_lossy(),
+            file_name(file.parent().unwrap_or(file)),
+            cache,
+        )
     }
 
     /// Opens the section at catalog `path`; on a share, through a replica named by its
@@ -654,6 +650,11 @@ impl Library {
                 }
             }
         };
+        let key = self.unlocked(path);
+        self.touch(path);
+        if key.is_none() && self.protected(path) {
+            return Err("The section is password protected".into());
+        }
         let section = loop {
             if let Some(kept) = self
                 .kept
@@ -671,7 +672,7 @@ impl Library {
                     };
                     let cache = notebook.replica_path(path)?;
                     std::fs::create_dir_all(cache.parent().unwrap_or(&self.cache))?;
-                    let replica = notebook::Replica::open_or_create(&cache, || {
+                    let replica = notebook::Replica::open_or_create(&cache, key.as_ref(), || {
                         Ok(server.connect()?.read_storage(&file, LIMIT)?)
                     });
                     replica.and_then(|replica| {
@@ -681,9 +682,13 @@ impl Library {
                     })
                 }
                 (Ok(Some(notebook)), None) if self.in_icloud() => {
-                    crate::icloud::section(notebook, Path::new(&self.location), path, notifier())
+                    let root = Path::new(&self.location);
+                    crate::icloud::section(notebook, root, path, key.as_ref(), notifier())
                 }
-                (Ok(Some(notebook)), None) => notebook.section(path, notifier()),
+                (Ok(Some(notebook)), None) => match &key {
+                    Some(key) => notebook.section_unlocked(path, key, notifier()),
+                    None => notebook.section(path, notifier()),
+                },
                 (Ok(None), _) if self.in_icloud() => {
                     crate::icloud::lone_section(Path::new(path), &self.cache, notifier())
                 }
@@ -835,16 +840,10 @@ impl Library {
     /// The readable sections of the folder at catalog path `folder`, as tabs in its order.
     pub fn tabs(&self, folder: &str) -> Vec<Tab> {
         match &self.notebook {
-            Ok(Some(notebook)) => {
-                let mut folders = vec![notebook.catalog()];
-                while let Some(candidate) = folders.pop() {
-                    if candidate.path == folder {
-                        return tabs(candidate);
-                    }
-                    folders.extend(&candidate.groups);
-                }
-                Vec::new()
-            }
+            Ok(Some(notebook)) => folders(notebook.catalog(), |_| true)
+                .into_iter()
+                .find(|candidate| candidate.path == folder)
+                .map_or_else(Vec::new, tabs),
             Ok(None) => vec![Tab {
                 path: self.location.clone(),
                 name: section_name(&self.location, &None),
@@ -856,38 +855,23 @@ impl Library {
 
     /// The file identity of the section at catalog `path`.
     pub fn section_identity(&self, path: &str) -> Option<[u8; 16]> {
-        let Ok(Some(notebook)) = &self.notebook else {
-            return None;
-        };
-        let mut folders = vec![notebook.catalog()];
-        while let Some(folder) = folders.pop() {
-            if let Some(section) = folder.sections.iter().find(|section| section.path == path) {
-                return Some(section.file_id);
-            }
-            folders.extend(&folder.groups);
-        }
-        None
+        folders(self.catalog()?, |_| true)
+            .into_iter()
+            .flat_map(|folder| &folder.sections)
+            .find(|section| section.path == path)
+            .map(|section| section.file_id)
     }
 
     /// The first readable section, searching groups after sections, as OneNote opens a
     /// notebook.
     pub fn first_section(&self) -> Option<String> {
-        let Ok(Some(notebook)) = &self.notebook else {
+        let Some(catalog) = self.catalog() else {
             return self.tabs("").pop().map(|tab| tab.path);
         };
-        let mut folders = std::collections::VecDeque::from([notebook.catalog()]);
-        while let Some(folder) = folders.pop_front() {
-            if let Some(tab) = tabs(folder).into_iter().next() {
-                return Some(tab.path);
-            }
-            folders.extend(
-                folder
-                    .groups
-                    .iter()
-                    .filter(|group| !recycle_bin(&group.path)),
-            );
-        }
-        None
+        folders(catalog, |group| !recycle_bin(&group.path))
+            .into_iter()
+            .find_map(|folder| tabs(folder).into_iter().next())
+            .map(|tab| tab.path)
     }
 
     /// Whether the notebook lists a section at catalog path `path`.
@@ -895,14 +879,9 @@ impl Library {
         let Some(catalog) = self.catalog() else {
             return self.location == path;
         };
-        let mut folders = vec![catalog];
-        while let Some(folder) = folders.pop() {
-            if folder.sections.iter().any(|section| section.path == path) {
-                return true;
-            }
-            folders.extend(&folder.groups);
-        }
-        false
+        folders(catalog, |_| true)
+            .iter()
+            .any(|folder| folder.sections.iter().any(|section| section.path == path))
     }
 
     /// The notebook's colour, COLORREF, as its table of contents holds it.
@@ -913,21 +892,12 @@ impl Library {
     /// Whether the notebook lists sections not on this device yet, as iCloud Drive keeps
     /// them elsewhere.
     pub fn downloading(&self) -> bool {
-        let Some(catalog) = self.catalog() else {
-            return false;
-        };
-        let mut folders = vec![catalog];
-        while let Some(folder) = folders.pop() {
-            if folder
-                .unavailable
-                .iter()
-                .any(|entry| entry.reason == notebook::discover::Reason::Evicted)
-            {
-                return true;
-            }
-            folders.extend(&folder.groups);
-        }
-        false
+        self.catalog().is_some_and(|catalog| {
+            folders(catalog, |_| true).iter().any(|folder| {
+                (folder.unavailable.iter())
+                    .any(|entry| entry.reason == notebook::discover::Reason::Evicted)
+            })
+        })
     }
 
     /// The notebook's folders of sections, for the sidebar.
@@ -936,6 +906,89 @@ impl Library {
             Ok(Some(notebook)) => Some(notebook.catalog()),
             _ => None,
         }
+    }
+
+    /// Whether the section at catalog `path` is password protected.
+    pub fn protected(&self, path: &str) -> bool {
+        self.catalog().is_some_and(|catalog| {
+            folders(catalog, |_| true)
+                .into_iter()
+                .flat_map(|folder| &folder.sections)
+                .any(|section| {
+                    section.path == path && matches!(section.state, SectionState::Locked)
+                })
+        })
+    }
+
+    /// Whether the section at catalog `path` is password protected and not unlocked.
+    pub fn locked(&self, path: &str) -> bool {
+        self.protected(path) && self.unlocked(path).is_none()
+    }
+
+    /// The key the section at catalog `path` was unlocked with.
+    pub fn unlocked(&self, path: &str) -> Option<Key> {
+        let identity = self.section_identity(path)?;
+        let keys = self.keys.0.lock().ok()?;
+        keys.get(&identity).map(|(key, _)| key.clone())
+    }
+
+    /// Marks the unlocked section at catalog `path` worked in now.
+    pub fn touch(&self, path: &str) {
+        if let (Some(identity), Ok(mut keys)) = (self.section_identity(path), self.keys.0.lock())
+            && let Some((_, used)) = keys.get_mut(&identity)
+        {
+            *used = Instant::now();
+        }
+    }
+
+    /// Unlocks the section at catalog `path` with `password`, as OneNote's Protected Section
+    /// dialog does; a wrong password is `PasswordMismatch`.
+    pub fn unlock(&self, path: &str, password: &str) -> Result<(), notebook::Error> {
+        let Ok(Some(notebook)) = &self.notebook else {
+            return Err(io::Error::from(io::ErrorKind::NotFound).into());
+        };
+        let key = notebook.unlock(path, password)?;
+        self.keep_key(path, key);
+        Ok(())
+    }
+
+    /// Keeps `key` for the section at catalog `path`, as setting its password gives one.
+    pub fn keep_key(&self, path: &str, key: Key) {
+        if let (Some(identity), Ok(mut keys)) = (self.section_identity(path), self.keys.0.lock()) {
+            keys.insert(identity, (key, Instant::now()));
+        }
+    }
+
+    /// Locks the protected sections unlocked here that `chosen` picks by catalog path and
+    /// time since last worked in, closing the kept sessions that hold them; returns the paths
+    /// locked.
+    pub fn lock(&self, mut chosen: impl FnMut(&str, Duration) -> bool) -> Vec<String> {
+        let Some(catalog) = self.catalog() else {
+            return Vec::new();
+        };
+        let mut locked = Vec::new();
+        if let Ok(mut keys) = self.keys.0.lock() {
+            for section in folders(catalog, |_| true)
+                .into_iter()
+                .flat_map(|folder| &folder.sections)
+            {
+                let stale = keys
+                    .get(&section.file_id)
+                    .is_some_and(|(_, used)| chosen(&section.path, used.elapsed()));
+                if stale {
+                    keys.remove(&section.file_id);
+                    locked.push(section.path.clone());
+                }
+            }
+        }
+        if let Ok(mut kept) = self.kept.lock() {
+            for path in &locked {
+                if let Some(section) = kept.take(path) {
+                    std::thread::spawn(move || close(vec![section]));
+                }
+            }
+        }
+        locked
     }
 }
 
@@ -948,7 +1001,6 @@ pub fn server_address(location: &str) -> Option<Mount> {
         .flatten()
 }
 
-/// Whether the folder at `path` is the notebook's recycle bin, which OneNote keeps out of its lists.
 /// `Library::key` for the notebook at `location`, open or not.
 pub fn key(location: &str, path: &str) -> String {
     format!("{location}\n{path}")
@@ -971,13 +1023,28 @@ fn display_name(cache: &Path, location: &str) -> Option<String> {
     read_display_names(&display_names(cache)).remove(location)
 }
 
+/// `folder` and the groups below it, breadth first, going into those `enter` takes.
+pub fn folders(folder: &Folder, enter: impl Fn(&Folder) -> bool) -> Vec<&Folder> {
+    let mut all = vec![folder];
+    let mut at = 0;
+    while let Some(folder) = all.get(at) {
+        all.extend(folder.groups.iter().filter(|group| enter(group)));
+        at += 1;
+    }
+    all
+}
+
+/// A section's or group's name, as its catalog path ends.
+pub fn entry_name(path: &str) -> &str {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    name.strip_suffix(".one").unwrap_or(name)
+}
+
+/// Whether the folder at `path` is the notebook's recycle bin, which OneNote keeps out of its lists.
 pub fn recycle_bin(path: &str) -> bool {
     path.rsplit('/').next() == Some("OneNote_RecycleBin")
 }
 
-/// A mounted notebook's background sync, following Work Offline, and the watch that reports
-/// the folder's changes to it. A folder on a network volume is kept in offline copies, as on a
-/// share, and where the system does not report its server's changes, checked more often.
 /// The art `notebook` maps its tags to, each picture read once a run.
 fn read_tag_art(notebook: &Notebook) -> TagArt {
     let mut read = TagArt::default();
@@ -999,6 +1066,9 @@ fn read_tag_art(notebook: &Notebook) -> TagArt {
     read
 }
 
+/// A mounted notebook's background sync, following Work Offline, and the watch that reports
+/// the folder's changes to it. A folder on a network volume is kept in offline copies, as on a
+/// share, and where the system does not report its server's changes, checked more often.
 fn local_background(
     notebook: &mut Notebook,
     location: &str,
@@ -1061,6 +1131,10 @@ pub fn file_name(path: &Path) -> String {
 /// A section's name: its display name, or its file's.
 pub fn section_name(path: &str, name: &Option<String>) -> String {
     name.clone().unwrap_or_else(|| {
+        // OneNote names the recycle bin's file of deleted pages so.
+        if path.ends_with("OneNote_RecycleBin/OneNote_DeletedPages.one") {
+            return "Deleted Pages".to_owned();
+        }
         Path::new(path)
             .file_stem()
             .map(|stem| stem.to_string_lossy().into_owned())
@@ -1079,6 +1153,12 @@ fn tabs(catalog: &Folder) -> Vec<Tab> {
                 path: section.path.clone(),
                 color: *color,
             }),
+            // Its name and colour are inside the encryption, but its file is named for it.
+            SectionState::Locked => Some(Tab {
+                name: section_name(&section.path, &None),
+                path: section.path.clone(),
+                color: None,
+            }),
             _ => None,
         })
         .collect()
@@ -1094,6 +1174,8 @@ pub enum Located {
     },
     /// A section file outside any notebook.
     Section(PathBuf),
+    /// A OneNote package, which unpacks into a notebook.
+    Package(PathBuf),
     Nothing,
 }
 
@@ -1111,7 +1193,7 @@ fn has_toc(folder: &Path) -> bool {
 
 /// What `path` opens: a folder is a notebook; a table of contents opens its folder's; a
 /// section opens in the notebook the folders above it with tables of contents make up,
-/// section groups included, or alone.
+/// section groups included, or alone; a package asks to be unpacked.
 pub fn locate(path: &Path) -> Located {
     let extension = path
         .extension()
@@ -1121,6 +1203,7 @@ pub fn locate(path: &Path) -> Located {
             root: path.to_owned(),
             section: None,
         },
+        Some("onepkg") => Located::Package(path.to_owned()),
         Some("onetoc2") => match path.parent() {
             Some(root) => Located::Notebook {
                 root: root.to_owned(),
@@ -1327,9 +1410,6 @@ mod tests {
     #[test]
     fn share_relative_sections_show_under_their_mount() {
         let library = |root: &str| Library {
-            location: "/Volumes/agent/lab".into(),
-            name: "lab".into(),
-            notebook: Ok(None),
             server: Some(Arc::new(Server {
                 mount: Mount {
                     server: "nas".into(),
@@ -1344,13 +1424,7 @@ mod tests {
                     domain: String::new(),
                 },
             })),
-            notice: None,
-            cache: PathBuf::new(),
-            background: None,
-            watch: None,
-            tag_art: Default::default(),
-            kept: Mutex::new(crate::prefetch::Recent::new(KEPT)),
-            themes: Default::default(),
+            ..Library::new("/Volumes/agent/lab", "lab".into(), Path::new(""))
         };
         let shown = |root, file| library(root).local(Path::new(file));
         let under = Some(PathBuf::from("/Volumes/agent/lab/Group/New Section 1.one"));
@@ -1446,6 +1520,10 @@ mod tests {
         assert_eq!(
             locate(&root.join("Loose.one")),
             Located::Section(root.join("Loose.one"))
+        );
+        assert_eq!(
+            locate(&root.join("Shared.onepkg")),
+            Located::Package(root.join("Shared.onepkg"))
         );
         assert_eq!(locate(&root.join("missing.txt")), Located::Nothing);
         std::fs::remove_dir_all(&root).unwrap();

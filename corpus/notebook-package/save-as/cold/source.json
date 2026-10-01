@@ -1,0 +1,14 @@
+[
+  {
+    "path": "Inner copy.one",
+    "bytes": 6032,
+    "sha256": "48f848eb6d0c1ec03a137763b8595b7b4cb7ee6e0f5f8bdf96e6cb5f5c23be1e",
+    "mtime_ns": 1790880013898068009
+  },
+  {
+    "path": "Inside.one",
+    "bytes": 6032,
+    "sha256": "0a311b978c401a5571be844dfd54cddb551d6820eac0b4d72ad590afb563bcb2",
+    "mtime_ns": 1790880013898269467
+  }
+]

@@ -14,7 +14,7 @@ extension CanvasView {
     /// `tool:pen:N`, `tool:shape:N`, `tool:eraser` or `tool:lasso` gives it a tool, `picker` shows or hides the
     /// drawing tools, `pencildoubletap` is the Pencil's double tap, and `deleteink` deletes
     /// what the lasso picked; `rotate:landscape` or `rotate:portrait` turns the device; `done`
-    /// ends editing, `tree` saves the view hierarchy to
+    /// ends editing, `reading` turns the reading view on or off, `tree` saves the view hierarchy to
     /// Documents/tree.txt, and `shot:a` the window to Documents/a.png, as a device has no
     /// screenshot command.
     func runScript() {
@@ -73,8 +73,9 @@ extension CanvasView {
                 from: position(from: beginningOfDocument, offset: values[0])!,
                 to: position(from: beginningOfDocument, offset: values[1])!)
         case "scroll":
-            let values = argument.split(separator: ",").compactMap { Double($0) }
-            setContentOffset(CGPoint(x: values[0], y: values[1]), animated: true)
+            // `scroll:,Y` keeps the horizontal offset.
+            let values = argument.split(separator: ",", omittingEmptySubsequences: false).map { Double($0) }
+            setContentOffset(CGPoint(x: values[0] ?? contentOffset.x, y: values[1] ?? contentOffset.y), animated: true)
         case "zoom": setZoomScale(Double(argument) ?? 1, animated: false)
         case "doubletap":
             let values = argument.split(separator: ",").compactMap { Double($0) }
@@ -90,6 +91,7 @@ extension CanvasView {
             menu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: CGPoint(x: caret.midX, y: caret.minY)))
         case "done": _ = resignFirstResponder()
         case "selectall": selectAll(nil)
+        case "reading": showReading(!readingShown)
         case "format": apply(UInt8(argument) ?? 0)
         case "find": _ = find(argument)
         case "title": _ = focusTitle()

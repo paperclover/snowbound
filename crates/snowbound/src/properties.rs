@@ -151,27 +151,11 @@ impl State {
         }
         label(ui, "Location:");
         dim(ui, "location", &dialog.library.location);
-        let folder = dialog.library.folder().map(std::path::Path::to_owned);
         let reveal = commands::command(commands::Id::ShowNotebook).title;
-        if folder.is_some() && ui::button(ui, "reveal", reveal).clicked {
+        if dialog.library.folder().is_some() && ui::button(ui, "reveal", reveal).clicked {
             crate::platform::reveal(&dialog.library.location);
         }
-        ui.open(
-            "buttons",
-            Spec {
-                size: [fill(), children()],
-                pad: [0.0, 8.0],
-                gap: 8.0,
-                ..Spec::default()
-            },
-        );
-        ui.leaf(
-            "space",
-            Spec {
-                size: [fill(), px(1.0)],
-                ..Spec::default()
-            },
-        );
+        crate::buttons(ui);
         let ok = ui::button(ui, "ok", "OK").clicked || entered;
         let cancel = ui::button(ui, "cancel", "Cancel").clicked;
         ui.close();

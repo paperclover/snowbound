@@ -55,7 +55,15 @@ reopens the same queue after a relaunch. It holds:
 - **payloads**: picture and attachment bytes, stored once each, keyed by hash.
 
 The working state is never stored. It is the base with each sealed batch
-replayed and the open batch applied, rebuilt on open. The database runs in WAL
+replayed and the open batch applied, rebuilt on open.
+
+A password-protected section's replica holds nothing in the clear. Its base and sealed
+transactions are the file's own ciphertext, and its edits and payloads are sealed with
+AES-256-GCM under a key derived from the section's, so the queue opens, offline or after a
+relaunch, only once the section is unlocked. A locked section is never opened in the
+background; its edits wait until it is unlocked again. A replica of a section another device
+then protects is deleted the next time the notebook is read, unless edits wait in it; those
+wait for the key, then come back as copies of the pages they changed. The database runs in WAL
 mode with full synchronous commits, and every setting is read back to check it
 took.
 

@@ -51,6 +51,8 @@ static PREVIOUS: AtomicIsize = AtomicIsize::new(0);
 static COMPOSED: AtomicBool = AtomicBool::new(false);
 /// The window's scale factor, as `f32` bits, for hit-testing outside a frame.
 static SCALE: AtomicU32 = AtomicU32::new(0x3f80_0000);
+/// The window's smallest client size in points, as `f32` bits.
+static MIN_SIZE: [AtomicU32; 2] = [AtomicU32::new(0), AtomicU32::new(0)];
 /// The caption button under the pointer, by its hit-test code: as the system reports it
 /// over Mica, where the system runs them, and as the row saw it for the close button,
 /// whose glyph turns white on red.
@@ -219,7 +221,7 @@ fn offer_to_open() {
         None,
         &format!("\"{executable}\" \"%1\""),
     );
-    for extension in [".one", ".onetoc2"] {
+    for extension in [".one", ".onetoc2", ".onepkg"] {
         set(&format!(r"{extension}\OpenWithProgids"), Some(PROG_ID), "");
     }
 }
@@ -259,6 +261,46 @@ fn reframe(hwnd: HWND) {
     unsafe { wm::SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, 0, 0, flags) };
 }
 
+/// Keeps the window's client area at least `size` points, widening it now if narrower.
+/// winit's `set_min_inner_size` would size the window to its client area with the caption
+/// the row took over, growing it by the caption's height each time.
+pub fn set_min_size(window: &Window, size: [f32; 2]) {
+    for (bound, side) in MIN_SIZE.iter().zip(size) {
+        bound.store(side.to_bits(), Ordering::Relaxed);
+    }
+    let hwnd = hwnd(window);
+    let mut current = RECT::default();
+    unsafe { wm::GetWindowRect(hwnd, &mut current) };
+    let [width, height] = outer(hwnd, min_size());
+    let (now, high) = (current.right - current.left, current.bottom - current.top);
+    if now < width || high < height {
+        let flags = wm::SWP_NOMOVE | wm::SWP_NOZORDER | wm::SWP_NOACTIVATE;
+        let [width, height] = [now.max(width), high.max(height)];
+        unsafe { wm::SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, width, height, flags) };
+    }
+}
+
+/// The smallest client size in device pixels.
+fn min_size() -> [i32; 2] {
+    let scale = f32::from_bits(SCALE.load(Ordering::Relaxed));
+    MIN_SIZE
+        .each_ref()
+        .map(|side| (f32::from_bits(side.load(Ordering::Relaxed)) * scale).ceil() as i32)
+}
+
+/// The window size whose client area is `client`, with the window's frame as it is now.
+fn outer(hwnd: HWND, client: [i32; 2]) -> [i32; 2] {
+    let (mut window, mut inner) = (RECT::default(), RECT::default());
+    unsafe {
+        wm::GetWindowRect(hwnd, &mut window);
+        wm::GetClientRect(hwnd, &mut inner);
+    }
+    [
+        client[0] + (window.right - window.left) - inner.right,
+        client[1] + (window.bottom - window.top) - inner.bottom,
+    ]
+}
+
 fn set_attribute<T>(hwnd: HWND, attribute: u32, value: &T) -> bool {
     unsafe {
         Dwm::DwmSetWindowAttribute(
@@ -292,6 +334,14 @@ unsafe extern "system" fn frame_procedure(
         let procedure: wm::WNDPROC = std::mem::transmute(PREVIOUS.load(Ordering::Relaxed));
         wm::CallWindowProcW(procedure, hwnd, message, wparam, lparam)
     };
+    if message == wm::WM_GETMINMAXINFO {
+        let result = previous(message, wparam, lparam);
+        let info = unsafe { &mut *(lparam as *mut wm::MINMAXINFO) };
+        let [width, height] = outer(hwnd, min_size());
+        let least = &mut info.ptMinTrackSize;
+        (least.x, least.y) = (least.x.max(width), least.y.max(height));
+        return result;
+    }
     match message {
         // Accent colours and transparency effects reach the window only as settings.
         wm::WM_SETTINGCHANGE | wm::WM_DWMCOLORIZATIONCOLORCHANGED => {
@@ -652,21 +702,56 @@ pub fn titlebar(appearance: Theme) -> Option<[[f32; 4]; 2]> {
     })
 }
 
-/// The theme over the window's material. Over Windows 7's glass, fields and tool buttons
-/// take white faces, as Internet Explorer's do there, so their text and icons stay legible,
-/// and the sidebar stays opaque.
-pub fn over_backdrop(theme: ui::Theme, _: Theme) -> ui::Theme {
-    let sidebar = theme.sidebar;
-    let theme = theme.over_backdrop();
-    if caption() != Caption::Glass || eleven() {
-        return theme;
+/// The theme over the window's material. Aero glass takes whatever lies behind the window
+/// and any colour the user picks, so on Windows 7 the toolbar keeps opaque faces under its
+/// icons, as `SNOWBOUND_W7_CHROME` picks: `bar`, Explorer's opaque command bar under the glass
+/// frame; `pills`, a face per group of tools over the glass; `frost`, the strip see-through
+/// enough to tint it; or `tint`, one panel of tools in the glass's colour, and `tint-tiles`,
+/// a tile per group.
+pub fn over_backdrop(theme: ui::Theme, appearance: Theme) -> ui::Theme {
+    if version() >= (6, 2, 0) {
+        return theme.over_backdrop();
     }
-    ui::Theme {
-        sidebar,
-        base: [1.0, 1.0, 1.0, 0.8],
-        tool: [1.0, 1.0, 1.0, 0.35],
-        ..theme
+    match std::env::var("SNOWBOUND_W7_CHROME").as_deref() {
+        Ok("pills") => ui::Theme {
+            strip: [0.0; 4],
+            tool: theme.base,
+            ..theme
+        },
+        Ok("frost") => ui::Theme {
+            strip: [theme.strip[0], theme.strip[1], theme.strip[2], 0.85],
+            ..theme
+        },
+        Ok(chrome @ ("tint" | "tint-tiles")) => ui::Theme {
+            strip: [0.0; 4],
+            tool: glass_tint(appearance == Theme::Dark),
+            tool_panel: chrome == "tint",
+            chip: [0.0, 0.0, 0.0, 0.35],
+            ..theme
+        },
+        _ => theme,
     }
+}
+
+/// The colour Windows 7 tints its glass with, at a lightness text keeps its contrast on, as
+/// Mica takes the wallpaper's: more of it as the colour's intensity rises.
+fn glass_tint(dark: bool) -> [f32; 4] {
+    let (mut color, mut opaque) = (0u32, 0);
+    unsafe { Dwm::DwmGetColorizationColor(&mut color, &mut opaque) };
+    let [blue, green, red, intensity] = color.to_le_bytes();
+    let [high, low] = [red.max(green).max(blue), red.min(green).min(blue)].map(f32::from);
+    let lightness = (high + low) / 510.0;
+    let saturation = if high == low {
+        0.0
+    } else {
+        (high - low) / 255.0 / (1.0 - (2.0 * lightness - 1.0).abs())
+    };
+    let strength = 0.85 * (0.6 + 0.4 * f32::from(intensity) / 255.0);
+    draw::hsl(
+        draw::hue(draw::srgb(red, green, blue)),
+        saturation * strength,
+        if dark { 0.22 } else { 0.84 },
+    )
 }
 
 /// None: the kit's own menus.
@@ -1402,7 +1487,10 @@ pub fn edit_date(
 pub fn pick_notebook(title: &str) -> Option<PathBuf> {
     pick(
         title,
-        &[("OneNote notebooks and sections", "*.onetoc2;*.one")],
+        &[(
+            "OneNote notebooks, sections and packages",
+            "*.onetoc2;*.one;*.onepkg",
+        )],
         None,
         false,
     )

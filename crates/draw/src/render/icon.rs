@@ -1,3 +1,4 @@
+use super::{from_hsl, to_hsl};
 use swash::{
     scale::image::{Content, Image},
     zeno::{self, Cap, Fill, Join, Mask, PathBuilder, Placement, Point, Stroke, Style, Transform},
@@ -140,11 +141,7 @@ pub(crate) fn rasterize(sources: &[&str], size: u32, ink: [f32; 3], palette: &Pa
                     let [x, y] = [index % side as usize, index / side as usize]
                         .map(|device| device as f32 + 0.5)
                         .map(|device| device * 16.0 / size);
-                    let color = color([x, y]);
-                    for channel in 0..3 {
-                        pixel[channel] = color[channel] * alpha + pixel[channel] * (1.0 - alpha);
-                    }
-                    pixel[3] = alpha + pixel[3] * (1.0 - alpha);
+                    over(pixel, color([x, y]), alpha);
                 }
             }
         }
@@ -224,13 +221,16 @@ fn picture(node: roxmltree::Node, side: u32, pixels: &mut [[f32; 4]]) {
     for (column, row, color) in shown.enumerate_pixels() {
         let pixel = &mut pixels[((top + row) * side + left + column) as usize];
         let [r, g, b, a] = color.0;
-        let alpha = f32::from(a) / 255.0;
-        let color = super::srgb(r, g, b);
-        for channel in 0..3 {
-            pixel[channel] = color[channel] * alpha + pixel[channel] * (1.0 - alpha);
-        }
-        pixel[3] = alpha + pixel[3] * (1.0 - alpha);
+        over(pixel, super::srgb(r, g, b), f32::from(a) / 255.0);
     }
+}
+
+/// Paints `color` at `alpha` over premultiplied `pixel`.
+fn over(pixel: &mut [f32; 4], color: [f32; 4], alpha: f32) {
+    for channel in 0..3 {
+        pixel[channel] = color[channel] * alpha + pixel[channel] * (1.0 - alpha);
+    }
+    pixel[3] = alpha + pixel[3] * (1.0 - alpha);
 }
 
 fn hex(value: &str) -> [f32; 4] {
@@ -364,11 +364,11 @@ impl Shift {
         let mean: [f32; 3] = std::array::from_fn(|channel| {
             colors
                 .iter()
-                .map(|color| encode(color[channel]))
+                .map(|color| crate::encode(color[channel]))
                 .sum::<f32>()
                 / count
         });
-        let [from, to] = [mean, target.map(encode)].map(hsl);
+        let [from, to] = [mean, target.map(crate::encode)].map(to_hsl);
         (count > 0.0).then(|| {
             Self([
                 to[0] - from[0],
@@ -379,59 +379,17 @@ impl Shift {
     }
 
     fn apply(&self, color: [f32; 4]) -> [f32; 4] {
-        let [hue, saturation, lightness] = hsl([color[0], color[1], color[2]].map(encode));
+        let [hue, saturation, lightness] =
+            to_hsl([color[0], color[1], color[2]].map(crate::encode));
         let [turn, scale, lift] = self.0;
-        let [r, g, b] = rgb([
+        let [r, g, b] = from_hsl([
             (hue + turn).rem_euclid(360.0),
             (saturation * scale).clamp(0.0, 1.0),
             (lightness + lift).clamp(0.0, 1.0),
         ])
-        .map(decode);
+        .map(crate::linear);
         [r, g, b, color[3]]
     }
-}
-
-fn encode(linear: f32) -> f32 {
-    if linear <= 0.003_130_8 {
-        linear * 12.92
-    } else {
-        1.055 * linear.powf(1.0 / 2.4) - 0.055
-    }
-}
-
-fn decode(encoded: f32) -> f32 {
-    if encoded <= 0.040_45 {
-        encoded / 12.92
-    } else {
-        ((encoded + 0.055) / 1.055).powf(2.4)
-    }
-}
-
-/// Hue in degrees, saturation and lightness of an encoded sRGB colour.
-fn hsl([r, g, b]: [f32; 3]) -> [f32; 3] {
-    let [max, min] = [r.max(g).max(b), r.min(g).min(b)];
-    let lightness = (max + min) / 2.0;
-    let range = max - min;
-    if range == 0.0 {
-        return [0.0, 0.0, lightness];
-    }
-    let saturation = range / (1.0 - (2.0 * lightness - 1.0).abs());
-    let sector = if max == r {
-        (g - b) / range
-    } else if max == g {
-        (b - r) / range + 2.0
-    } else {
-        (r - g) / range + 4.0
-    };
-    [(sector * 60.0).rem_euclid(360.0), saturation, lightness]
-}
-
-fn rgb([hue, saturation, lightness]: [f32; 3]) -> [f32; 3] {
-    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
-    [0.0, 8.0, 4.0].map(|offset: f32| {
-        let k = (offset + hue / 30.0).rem_euclid(12.0);
-        lightness - chroma / 2.0 * (k - 3.0).min(9.0 - k).clamp(-1.0, 1.0)
-    })
 }
 
 /// The tight box around a path's geometry, curves included, as SVG's bounding box is.
@@ -567,11 +525,11 @@ mod tests {
             let image = rasterize(&[ART], 16, [0.0; 3], palette);
             let at = (y * 16 + 8) * 4;
             let [r, g, b] = [0, 1, 2].map(|channel| f32::from(image.data[at + channel]) / 255.0);
-            hsl([r, g, b])
+            to_hsl([r, g, b])
         };
         let plain = Palette::default();
         let green = Palette {
-            accent: Some([0.0, 1.0, 0.0].map(decode)),
+            accent: Some([0.0, 1.0, 0.0].map(crate::linear)),
             ..plain
         };
         let [light, dark] = [2, 6].map(|y| pixel(&green, y));
@@ -583,7 +541,7 @@ mod tests {
         assert!(((light[2] + dark[2]) / 2.0 - 0.5).abs() < 0.02);
         assert_eq!(pixel(&green, 10), pixel(&plain, 10));
         assert_eq!(pixel(&green, 14), [0.0, 0.0, 0.0]);
-        assert!((pixel(&plain, 2)[0] - hsl([0.5, 0.627, 1.0])[0]).abs() < 2.0);
+        assert!((pixel(&plain, 2)[0] - to_hsl([0.5, 0.627, 1.0])[0]).abs() < 2.0);
     }
 
     #[test]

@@ -1,11 +1,13 @@
-//! Frames reach the window through Direct3D 12 where Windows has it (10 and 11), and
-//! otherwise, as on Windows 7, through OpenGL 2.1 on a WGL context: frames draw into an sRGB
-//! target, copied to the window's back buffer and swapped.
+//! Frames reach the window through Direct3D 12 where Windows has it (10 and 11), otherwise
+//! through Direct3D 11, as on Windows 7, and failing both through OpenGL 2.1 on a WGL
+//! context. The last two draw into an sRGB target, copied to the window's back buffer.
+//! `SNOWBOUND_RENDERER` set to `d3d11` or `gl` picks one of those, and to anything else
+//! insists on Direct3D 12.
 
 #[path = "surface.rs"]
 mod webgpu;
 
-use draw::{GlTarget, Renderer, Target};
+use draw::{Renderer, Target};
 use std::{error::Error, sync::Arc};
 use windows_sys::Win32::{
     Foundation::HWND,
@@ -27,13 +29,14 @@ pub struct Surface {
 
 enum Backend {
     Wgpu(Box<webgpu::Surface>),
-    Gl {
-        /// The window's device context, which the context draws to.
-        device: HDC,
+    /// Direct3D 11 or OpenGL, which present the renderer's own targets.
+    Native {
+        /// For OpenGL, the window's device context, which the context draws to.
+        opengl: Option<HDC>,
         /// Frames leave the desktop's glass showing through their transparent pixels.
         translucent: bool,
         /// The frame target, kept between frames.
-        target: Option<GlTarget>,
+        target: Option<Target>,
     },
 }
 
@@ -57,22 +60,42 @@ impl Surface {
         backdrop: bool,
     ) -> Result<(Self, Renderer), Box<dyn Error>> {
         let forced = std::env::var("SNOWBOUND_RENDERER").ok();
-        if forced.as_deref() != Some("gl") {
+        let forced = forced.as_deref();
+        let size = window.inner_size();
+        let size = [size.width, size.height];
+        let native = |opengl, translucent, renderer| {
+            let backend = Backend::Native {
+                opengl,
+                translucent,
+                target: None,
+            };
+            Ok((Self { size, backend }, renderer))
+        };
+        if !matches!(forced, Some("d3d11" | "gl")) {
             match webgpu::Surface::new(window.clone(), backdrop).await {
                 Ok((surface, renderer)) => {
                     let backend = Backend::Wgpu(Box::new(surface));
-                    let size = window.inner_size();
-                    let size = [size.width, size.height];
                     return Ok((Self { size, backend }, renderer));
                 }
                 Err(error) if forced.is_some() => return Err(error),
-                Err(error) => eprintln!("No Direct3D 12 ({error}); drawing with OpenGL"),
+                Err(error) => eprintln!("No Direct3D 12 ({error})"),
             }
         }
         let RawWindowHandle::Win32(handle) = window.window_handle()?.as_raw() else {
             unreachable!()
         };
-        let device = unsafe { GetDC(handle.hwnd.get() as HWND) };
+        let hwnd = handle.hwnd.get() as HWND;
+        if forced != Some("gl") {
+            match Renderer::direct3d11(hwnd) {
+                Ok((renderer, adapter)) => {
+                    eprintln!("Canvas GPU: Direct3D 11 ({adapter})");
+                    return native(None, backdrop, renderer);
+                }
+                Err(error) if forced.is_some() => return Err(error.into()),
+                Err(error) => eprintln!("No Direct3D 11 ({error}); drawing with OpenGL"),
+            }
+        }
+        let device = unsafe { GetDC(hwnd) };
         let request = |alpha| gl::PIXELFORMATDESCRIPTOR {
             nSize: size_of::<gl::PIXELFORMATDESCRIPTOR>() as u16,
             nVersion: 1,
@@ -147,25 +170,14 @@ impl Surface {
                  the driver from your graphics card's maker. ({error})"
             )
         })?;
-        let size = window.inner_size();
-        Ok((
-            Self {
-                size: [size.width, size.height],
-                backend: Backend::Gl {
-                    device,
-                    translucent,
-                    target: None,
-                },
-            },
-            renderer,
-        ))
+        native(Some(device), translucent, renderer)
     }
 
     /// Whether frames leave the system's backdrop showing.
     pub fn translucent(&self) -> bool {
         match &self.backend {
             Backend::Wgpu(surface) => surface.translucent(),
-            Backend::Gl { translucent, .. } => *translucent,
+            Backend::Native { translucent, .. } => *translucent,
         }
     }
 
@@ -189,13 +201,13 @@ impl Surface {
                     texture: Some((frame.texture, frame.reconfigure)),
                 }))
             }
-            Backend::Gl { target, .. } => {
+            Backend::Native { target, .. } => {
                 let target = match target.take() {
                     Some(target) if target.size() == self.size => target,
-                    _ => GlTarget::new(self.size)?,
+                    _ => renderer.target(self.size)?,
                 };
                 Ok(Some(Frame {
-                    target: target.into(),
+                    target,
                     texture: None,
                 }))
             }
@@ -213,20 +225,18 @@ impl Surface {
                 surface.present(renderer, frame);
             }
             (
-                Backend::Gl {
-                    device,
+                Backend::Native {
+                    opengl,
                     translucent,
                     target: kept,
                 },
-                Target::Gl(target),
+                target,
                 None,
             ) => {
-                if *translucent {
-                    renderer.present_translucent(&target);
-                } else {
-                    target.present();
+                renderer.present(&target, *translucent);
+                if let Some(device) = opengl {
+                    unsafe { gl::SwapBuffers(*device) };
                 }
-                unsafe { gl::SwapBuffers(*device) };
                 *kept = Some(target);
             }
             _ => unreachable!("Frames come from the surface's own backend"),
@@ -244,8 +254,8 @@ impl Surface {
                     texture: Some(offscreen.texture),
                 })
             }
-            Backend::Gl { .. } => Ok(Offscreen {
-                target: GlTarget::new(self.size)?.into(),
+            Backend::Native { .. } => Ok(Offscreen {
+                target: renderer.target(self.size)?,
                 texture: None,
             }),
         }
@@ -261,7 +271,7 @@ impl Surface {
             (Backend::Wgpu(surface), target, Some(texture)) => {
                 surface.read(renderer, webgpu::Offscreen { target, texture })
             }
-            (Backend::Gl { .. }, Target::Gl(target), None) => Ok(target.read_pixels()),
+            (Backend::Native { .. }, target, None) => Ok(renderer.read_pixels(&target)?),
             _ => unreachable!("Snapshots come from the surface's own backend"),
         }
     }

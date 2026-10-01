@@ -86,6 +86,13 @@ impl Item<'_> {
     }
 }
 
+/// Whether `items`' rows leave room for an icon or a check.
+fn icons(items: &[Item]) -> bool {
+    items
+        .iter()
+        .any(|item| item.icon.is_some() || item.checked == Some(true))
+}
+
 /// Builds popup `id` as a menu of `items` beside `anchor` while it is open, under a
 /// filter field showing `filter` while empty when given. Returns the index of the item
 /// chosen.
@@ -100,11 +107,7 @@ pub fn menu(
         return None;
     }
     let style = ui.theme.menu();
-    let mut measure = |text| {
-        ui.texts
-            .label(text, style.font_size, false, None, ui.frame)
-            .size[0]
-    };
+    let mut measure = |text| ui.texts.label(text, style.font_size, ui.frame).size[0];
     let [text, shortcut] = items.iter().fold([0.0_f32; 2], |[text, shortcut], item| {
         [
             text.max(
@@ -118,15 +121,12 @@ pub fn menu(
             shortcut.max(measure(item.trailing())),
         ]
     });
-    let icons = items
-        .iter()
-        .any(|item| item.icon.is_some() || item.checked == Some(true));
     let width =
         text + if shortcut > 0.0 {
             3.0 * ICON_GAP + shortcut
         } else {
             0.0
-        } + if icons { ICON + ICON_GAP } else { 0.0 }
+        } + if icons(items) { ICON + ICON_GAP } else { 0.0 }
             + if items.len() as f32 > ROWS {
                 GUTTER
             } else {
@@ -189,7 +189,7 @@ pub fn submenus(ui: &mut Ui, id: Id, items: &[Item], submenu: impl Fn(usize) -> 
         return;
     };
     if now < due {
-        ui.wake = Some(ui.wake.map_or(due, |wake| wake.min(due)));
+        ui.wake_by(due);
         return;
     }
     popup.submenu = Some((key, None));
@@ -283,7 +283,7 @@ fn tooltip_below(
         return;
     };
     if now < due {
-        ui.wake = Some(ui.wake.map_or(due, |wake| wake.min(due)));
+        ui.wake_by(due);
         return;
     }
     let title = if keys.is_empty() {
@@ -723,34 +723,8 @@ pub fn colors(
     // The button is cell 0 and the swatches follow it.
     let cell = |index: usize| id.child(("cell", index));
     let count = swatches.len() + 1;
-    let keys = navigation(
-        ui,
-        &[id],
-        &[
-            NamedKey::ArrowLeft,
-            NamedKey::ArrowRight,
-            NamedKey::ArrowUp,
-            NamedKey::ArrowDown,
-            NamedKey::Enter,
-        ],
-    );
-    let mut highlight = state(ui, id).highlight.map(|cell| cell as usize);
-    let mut chosen = None;
-    for index in 0..count {
-        let signal = ui.signal(cell(index));
-        if signal.hovered && ui.moved {
-            highlight = Some(index);
-        }
-        if signal.clicked {
-            chosen = Some(index);
-        }
-    }
-    for key in keys {
-        highlight = Some(match (key, highlight) {
-            (NamedKey::Enter, _) => {
-                chosen = chosen.or(highlight);
-                continue;
-            }
+    let (highlight, chosen) = pick_cell(ui, id, count, cell, |key, highlight| {
+        match (key, highlight) {
             (_, None) => 0,
             (NamedKey::ArrowLeft, Some(at)) => at.saturating_sub(1),
             (NamedKey::ArrowRight, Some(at)) => (at + 1).min(count - 1),
@@ -758,8 +732,8 @@ pub fn colors(
             (_, Some(0)) => 1,
             (_, Some(at)) if at + columns < count => at + columns,
             (_, Some(at)) => at,
-        });
-    }
+        }
+    });
     if let Some(index) = chosen {
         ui.close_popup(id);
         return Some((index > 0).then(|| swatches[index - 1].0));
@@ -834,7 +808,6 @@ pub fn colors(
     }
     highlighted(ui, id, highlight.map(cell));
     ui.close();
-    state(ui, id).highlight = highlight.map(|cell| cell as u64);
     None
 }
 
@@ -845,14 +818,15 @@ fn highlighted(ui: &mut Ui, id: Id, cell: Option<Id>) {
     }
 }
 
-/// Builds popup `id` as a grid of `size` columns and rows beside `anchor` while it is open,
-/// lit from its corner to the cell pointed at, as Office's table picker is. Returns the
-/// columns and rows chosen.
-pub fn table_picker(ui: &mut Ui, id: Id, anchor: Anchor, size: [usize; 2]) -> Option<[usize; 2]> {
-    if !ui.popup_open(id) {
-        return None;
-    }
-    let cell = |index: usize| id.child(("cell", index));
+/// Routes the pointer and keys over open popup `id`'s `count` cells, keeping its highlight,
+/// which `step` moves for each arrow. Returns the highlight and the cell a click or Enter chose.
+fn pick_cell(
+    ui: &mut Ui,
+    id: Id,
+    count: usize,
+    cell: impl Fn(usize) -> Id,
+    step: impl Fn(NamedKey, Option<usize>) -> usize,
+) -> (Option<usize>, Option<usize>) {
     let keys = navigation(
         ui,
         &[id],
@@ -864,10 +838,9 @@ pub fn table_picker(ui: &mut Ui, id: Id, anchor: Anchor, size: [usize; 2]) -> Op
             NamedKey::Enter,
         ],
     );
-    let [columns, rows] = size;
     let mut highlight = state(ui, id).highlight.map(|cell| cell as usize);
     let mut chosen = None;
-    for index in 0..columns * rows {
+    for index in 0..count {
         let signal = ui.signal(cell(index));
         if signal.hovered && ui.moved {
             highlight = Some(index);
@@ -877,20 +850,36 @@ pub fn table_picker(ui: &mut Ui, id: Id, anchor: Anchor, size: [usize; 2]) -> Op
         }
     }
     for key in keys {
-        let at = highlight.unwrap_or(0);
+        match key {
+            NamedKey::Enter => chosen = chosen.or(highlight),
+            _ => highlight = Some(step(key, highlight)),
+        }
+    }
+    state(ui, id).highlight = highlight.map(|cell| cell as u64);
+    (highlight, chosen)
+}
+
+/// Builds popup `id` as a grid of `size` columns and rows beside `anchor` while it is open,
+/// lit from its corner to the cell pointed at, as Office's table picker is. Returns the
+/// columns and rows chosen.
+pub fn table_picker(ui: &mut Ui, id: Id, anchor: Anchor, size: [usize; 2]) -> Option<[usize; 2]> {
+    if !ui.popup_open(id) {
+        return None;
+    }
+    let cell = |index: usize| id.child(("cell", index));
+    let [columns, rows] = size;
+    let (highlight, chosen) = pick_cell(ui, id, columns * rows, cell, |key, highlight| {
+        let Some(at) = highlight else {
+            return 0;
+        };
         let [column, row] = [at % columns, at / columns];
-        highlight = Some(match key {
-            NamedKey::Enter => {
-                chosen = chosen.or(highlight);
-                continue;
-            }
-            _ if highlight.is_none() => 0,
+        match key {
             NamedKey::ArrowLeft => at - usize::from(column > 0),
             NamedKey::ArrowRight => at + usize::from(column + 1 < columns),
             NamedKey::ArrowUp => at - if row > 0 { columns } else { 0 },
             _ => at + if row + 1 < rows { columns } else { 0 },
-        });
-    }
+        }
+    });
     let extent = |index: usize| [index % columns + 1, index / columns + 1];
     if let Some(index) = chosen {
         ui.close_popup(id);
@@ -971,7 +960,6 @@ pub fn table_picker(ui: &mut Ui, id: Id, anchor: Anchor, size: [usize; 2]) -> Op
     ui.close();
     highlighted(ui, id, highlight.map(cell));
     ui.close();
-    state(ui, id).highlight = highlight.map(|cell| cell as u64);
     None
 }
 
@@ -1011,41 +999,15 @@ pub fn gallery(
             })
             .map_or(1, |group| group.columns)
     };
-    let keys = navigation(
-        ui,
-        &[id],
-        &[
-            NamedKey::ArrowLeft,
-            NamedKey::ArrowRight,
-            NamedKey::ArrowUp,
-            NamedKey::ArrowDown,
-            NamedKey::Enter,
-        ],
-    );
-    let mut highlight = state(ui, id).highlight.map(|cell| cell as usize);
-    let mut chosen = None;
-    for index in 0..count {
-        let signal = ui.signal(cell_id(index));
-        if signal.hovered && ui.moved {
-            highlight = Some(index);
-        }
-        if signal.clicked {
-            chosen = Some(index);
-        }
-    }
-    for key in keys {
+    let (highlight, chosen) = pick_cell(ui, id, count, cell_id, |key, highlight| {
         let at = highlight.or(current.first().copied()).unwrap_or(0);
-        highlight = Some(match key {
-            NamedKey::Enter => {
-                chosen = chosen.or(highlight);
-                continue;
-            }
+        match key {
             NamedKey::ArrowLeft => at.saturating_sub(1),
             NamedKey::ArrowRight => (at + 1).min(count - 1),
             NamedKey::ArrowUp => at.saturating_sub(columns(at)),
             _ => (at + columns(at)).min(count - 1),
-        });
-    }
+        }
+    });
     if let Some(index) = chosen {
         ui.close_popup(id);
         return Some(index);
@@ -1113,7 +1075,6 @@ pub fn gallery(
     }
     highlighted(ui, id, highlight.map(cell_id));
     ui.close();
-    state(ui, id).highlight = highlight.map(|cell| cell as u64);
     None
 }
 
@@ -1488,9 +1449,7 @@ impl<'a> Matches<'a> {
             rules,
             ruled,
             rule,
-            icons: items
-                .iter()
-                .any(|item| item.icon.is_some() || item.checked == Some(true)),
+            icons: icons(items),
         }
     }
 }

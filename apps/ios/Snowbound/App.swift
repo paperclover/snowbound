@@ -150,6 +150,8 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
     private let notebooks = NotebooksViewController()
     private let pages = PagesViewController()
     private var showingPage = false
+    /// A first launch opened a page by itself.
+    private var landed = false
     private var background = UIBackgroundTaskIdentifier.invalid
 
     func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options: UIScene.ConnectionOptions) {
@@ -203,8 +205,15 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
             }
             return
         }
-        guard let place = Place.saved, place.notebook == notebook.id,
-            let tab = notebook.tabs.first(where: { $0.path == place.section })
+        guard let place = Place.saved else {
+            // The first notebook found opens at its first page, as Notes opens on a note.
+            guard Prototype.welcome, !landed, let tab = notebook.tabs.first(where: \.readable) else { return }
+            landed = true
+            return open(tab, of: notebook) { [weak self] section in
+                if let page = section.rows.first { self?.show(section: section, page: page.id) }
+            }
+        }
+        guard place.notebook == notebook.id, let tab = notebook.tabs.first(where: { $0.path == place.section })
         else { return }
         open(tab, of: notebook, page: place.page)
     }
@@ -213,7 +222,8 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
         _ tab: Tab, of notebook: Notebook, page: String? = nil, reveal: Reveal? = nil,
         then: ((Section) -> Void)? = nil
     ) {
-        guard Author.name != nil else {
+        // The welcome prototype asks at the first edit instead.
+        guard Author.name != nil || Prototype.welcome else {
             return Author.ask(from: split) { [weak self] in
                 self?.open(tab, of: notebook, page: page, reveal: reveal, then: then)
             }
@@ -223,7 +233,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
         Section.open(tab, of: notebook) { [weak self] section, problem in
             guard let self else { return }
             guard let section else {
-                pages.failed(tab, problem)
+                pages.failed(problem)
                 return
             }
             pages.load(section)
@@ -300,7 +310,8 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
     /// Composition ends and every edit is stored and published while the system allows.
     func sceneDidEnterBackground(_ scene: UIScene) {
         NotificationCenter.default.post(name: PageViewController.leaving, object: nil)
-        for notebook in Notebooks.all { notebook.pause() }
+        // Protected sections open again only once unlocked.
+        for notebook in Notebooks.all { notebook.pause(); notebook.lockAll() }
         let sections = Section.all
         guard !sections.isEmpty, background == .invalid else { return }
         background = UIApplication.shared.beginBackgroundTask(withName: "Saving") { [weak self] in

@@ -78,7 +78,7 @@ fn label(chord: Chord) -> String {
 fn title(id: Command) -> String {
     match id {
         Command::Tag(place) => format!("Tag {}", place + 1),
-        id => commands::command(id).title.trim_end_matches('…').to_owned(),
+        id => crate::title(id).to_owned(),
     }
 }
 
@@ -428,13 +428,6 @@ impl crate::State {
             self.window.request_redraw();
         }
         taken
-    }
-
-    /// Whether Options is recording a chord, which the menu bar must then leave to it.
-    pub(crate) fn recording_chord(&self) -> bool {
-        self.options
-            .as_ref()
-            .is_some_and(|options| options.keyboard.recording())
     }
 
     /// Puts `keymap` in use, and in the menu bar where it changes.

@@ -7,7 +7,6 @@
 use super::*;
 use std::{
     ffi::{CStr, CString, c_char, c_void},
-    mem::offset_of,
     ptr,
 };
 
@@ -250,9 +249,6 @@ functions! {
     );
 }
 
-/// Blending a premultiplied picture over what lies beneath.
-const PREMULTIPLIED: [GLenum; 4] = [ONE, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA];
-
 /// An sRGB RGBA texture, deleted with its value.
 pub(super) struct Image {
     name: GLuint,
@@ -305,9 +301,9 @@ pub struct Target {
 }
 
 impl Target {
-    /// Needs the renderer's context current, as every method here does.
-    pub fn new(size: [u32; 2]) -> Result<Self, String> {
-        let texture = Image::new(size, NEAREST, None);
+    /// Sampled with `filter`.
+    fn new(size: [u32; 2], filter: GLint) -> Result<Self, String> {
+        let texture = Image::new(size, filter, None);
         let mut framebuffer = 0;
         unsafe {
             glGenFramebuffersEXT(1, &mut framebuffer);
@@ -329,53 +325,6 @@ impl Target {
     pub fn size(&self) -> [u32; 2] {
         self.texture.size
     }
-
-    /// Copies the frame to the context's window, which is the same size.
-    pub fn present(&self) {
-        let [width, height] = self.size().map(|side| side as GLint);
-        unsafe {
-            glBindFramebufferEXT(READ_FRAMEBUFFER, self.framebuffer);
-            glBindFramebufferEXT(DRAW_FRAMEBUFFER, 0);
-            glBlitFramebufferEXT(
-                0,
-                0,
-                width,
-                height,
-                0,
-                0,
-                width,
-                height,
-                COLOR_BUFFER_BIT,
-                NEAREST as GLenum,
-            );
-            glBindFramebufferEXT(FRAMEBUFFER, 0);
-        }
-    }
-
-    /// sRGB-encoded RGBA rows, top first.
-    pub fn read_pixels(&self) -> Vec<u8> {
-        let [width, height] = self.size();
-        let mut pixels = vec![0; (width * height * 4) as usize];
-        unsafe {
-            glBindFramebufferEXT(FRAMEBUFFER, self.framebuffer);
-            glReadPixels(
-                0,
-                0,
-                width as GLsizei,
-                height as GLsizei,
-                RGBA,
-                UNSIGNED_BYTE,
-                pixels.as_mut_ptr().cast(),
-            );
-            glBindFramebufferEXT(FRAMEBUFFER, 0);
-        }
-        pixels
-            .chunks(width as usize * 4)
-            .rev()
-            .flatten()
-            .copied()
-            .collect()
-    }
 }
 
 impl Drop for Target {
@@ -396,38 +345,10 @@ pub(super) struct Gpu {
     groups: Vec<Target>,
 }
 
-/// Each attribute's name, component count and offset, bound to its index in the shader.
-const ATTRIBUTES: [(&CStr, GLint, usize); 9] = [
-    (c"position", 2, offset_of!(Vertex, position)),
-    (c"uv", 2, offset_of!(Vertex, uv)),
-    (c"color", 4, offset_of!(Vertex, color)),
-    (c"local", 2, offset_of!(Vertex, local)),
-    (c"shape", 4, offset_of!(Vertex, shape)),
-    (c"stroke", 1, offset_of!(Vertex, stroke)),
-    (c"clip_local", 2, offset_of!(Vertex, clip_local)),
-    (c"clip", 3, offset_of!(Vertex, clip)),
-    (c"blur", 1, offset_of!(Vertex, blur)),
-];
-
-#[cfg(not(feature = "wgpu"))]
-impl Renderer {
-    /// Draws with the OpenGL context current on this thread, which must stay current
-    /// whenever the renderer or a `Target` is used.
-    pub fn opengl() -> Result<Self, String> {
-        Gpu::new().map(Self::with_gpu)
-    }
-
-    /// Copies `target` to the context's window, the same size, premultiplying each pixel
-    /// again in sRGB, as a window server compositing a transparent surface needs.
-    pub fn present_translucent(&self, target: &Target) {
-        self.gpu.present_translucent(target);
-    }
-}
-
 impl Gpu {
     pub(super) fn new() -> Result<Self, String> {
         load()?;
-        let names: Vec<_> = ATTRIBUTES.iter().map(|(name, _, _)| *name).collect();
+        let names = ATTRIBUTES.map(|(name, _, _)| name);
         let draw = unsafe { program(include_str!("../draw.glsl"), &names)? };
         let translucent = unsafe { program(include_str!("translucent.glsl"), &[c"position"])? };
         let [mut buffer, mut triangle] = [0; 2];
@@ -445,7 +366,7 @@ impl Gpu {
             );
             glGetIntegerv(MAX_TEXTURE_SIZE, &mut max_texture);
         }
-        Ok(Gpu {
+        Ok(Self {
             program: draw,
             buffer,
             translucent,
@@ -456,7 +377,36 @@ impl Gpu {
         })
     }
 
-    pub(super) fn present_translucent(&self, target: &Target) {
+    /// Needs the renderer's context current, as every method here does.
+    pub(super) fn target(&self, size: [u32; 2]) -> Result<Target, String> {
+        Target::new(size, NEAREST)
+    }
+
+    /// Copies `target` to the context's window, the same size; if `translucent`,
+    /// premultiplying each pixel again in sRGB, as a window server compositing a transparent
+    /// surface needs.
+    pub(super) fn present(&self, target: &Target, translucent: bool) {
+        if !translucent {
+            let [width, height] = target.size().map(|side| side as GLint);
+            unsafe {
+                glBindFramebufferEXT(READ_FRAMEBUFFER, target.framebuffer);
+                glBindFramebufferEXT(DRAW_FRAMEBUFFER, 0);
+                glBlitFramebufferEXT(
+                    0,
+                    0,
+                    width,
+                    height,
+                    0,
+                    0,
+                    width,
+                    height,
+                    COLOR_BUFFER_BIT,
+                    NEAREST as GLenum,
+                );
+                glBindFramebufferEXT(FRAMEBUFFER, 0);
+            }
+            return;
+        }
         let [width, height] = target.size().map(|side| side as f32);
         let program = self.translucent;
         unsafe {
@@ -518,6 +468,31 @@ impl Gpu {
         }
     }
 
+    /// sRGB-encoded RGBA rows, top first.
+    pub(super) fn read_pixels(&self, target: &Target) -> Result<Vec<u8>, String> {
+        let [width, height] = target.size();
+        let mut pixels = vec![0; (width * height * 4) as usize];
+        unsafe {
+            glBindFramebufferEXT(FRAMEBUFFER, target.framebuffer);
+            glReadPixels(
+                0,
+                0,
+                width as GLsizei,
+                height as GLsizei,
+                RGBA,
+                UNSIGNED_BYTE,
+                pixels.as_mut_ptr().cast(),
+            );
+            glBindFramebufferEXT(FRAMEBUFFER, 0);
+        }
+        Ok(pixels
+            .chunks(width as usize * 4)
+            .rev()
+            .flatten()
+            .copied()
+            .collect())
+    }
+
     pub(super) fn upload_image(&self, image: &RasterImage) -> Image {
         Image::new(image.size, LINEAR, Some(image.pixels()))
     }
@@ -539,14 +514,9 @@ impl Gpu {
             self.groups.clear();
         }
         while self.groups.len() < frame.groups.len() {
-            match Target::new(size) {
-                Ok(picture) => unsafe {
-                    // Filtered, so a picture leaning back stays smooth.
-                    glBindTexture(TEXTURE_2D, picture.texture.name);
-                    glTexParameteri(TEXTURE_2D, TEXTURE_MIN_FILTER, LINEAR);
-                    glTexParameteri(TEXTURE_2D, TEXTURE_MAG_FILTER, LINEAR);
-                    self.groups.push(picture);
-                },
+            // Filtered, so a picture leaning back stays smooth.
+            match Target::new(size, LINEAR) {
+                Ok(picture) => self.groups.push(picture),
                 Err(error) => {
                     eprintln!("{error}");
                     return;
@@ -555,36 +525,30 @@ impl Gpu {
         }
         let [width, height] = size.map(|side| side as GLsizei);
         let gpu = &*self;
-        let begin = |target: &Target, clear: [f32; 4]| unsafe {
+        let paint = |target: &Target, clear: [f32; 4], batches: &[Batch]| unsafe {
             glBindFramebufferEXT(FRAMEBUFFER, target.framebuffer);
             glDisable(SCISSOR_TEST);
             glClearColor(clear[0], clear[1], clear[2], clear[3]);
             glClear(COLOR_BUFFER_BIT);
             glEnable(SCISSOR_TEST);
-        };
-        let draw = |batches: &[Batch]| unsafe {
             for batch in batches {
                 let [x, y, w, h] = batch.scissor.map(|value| value as GLint);
                 glScissor(x, height - y - h, w, h);
-                let (texture, [src_rgb, dst_rgb, src_alpha, dst_alpha]) = match batch.blend {
-                    Blend::Over => (
-                        gpu.atlas.name,
-                        [SRC_ALPHA, ONE_MINUS_SRC_ALPHA, ONE, ONE_MINUS_SRC_ALPHA],
-                    ),
-                    Blend::Image(id) => {
-                        let image: &Image = frame.images[&id].texture.as_ref();
-                        (image.name, PREMULTIPLIED)
-                    }
-                    Blend::Erase => (
-                        gpu.atlas.name,
-                        [ZERO, ONE_MINUS_SRC_ALPHA, ZERO, ONE_MINUS_SRC_ALPHA],
-                    ),
-                    Blend::Multiply => {
-                        (gpu.atlas.name, [DST_COLOR, ONE_MINUS_SRC_ALPHA, ZERO, ONE])
-                    }
-                };
+                let [src_rgb, dst_rgb, src_alpha, dst_alpha] = Blend::STATES[batch.blend.state()]
+                    .map(|factor| match factor {
+                        Factor::Zero => ZERO,
+                        Factor::One => ONE,
+                        Factor::SourceAlpha => SRC_ALPHA,
+                        Factor::OneMinusSourceAlpha => ONE_MINUS_SRC_ALPHA,
+                        Factor::Destination => DST_COLOR,
+                    });
                 glBlendFuncSeparate(src_rgb, dst_rgb, src_alpha, dst_alpha);
-                glBindTexture(TEXTURE_2D, texture);
+                let texture = match batch.blend {
+                    Blend::Image(id) => frame.image::<Image>(id),
+                    Blend::Group(index) => &gpu.groups[index].texture,
+                    Blend::Over | Blend::Erase | Blend::Multiply => &gpu.atlas,
+                };
+                glBindTexture(TEXTURE_2D, texture.name);
                 glDrawArrays(
                     TRIANGLES,
                     batch.vertices.start as GLint,
@@ -605,38 +569,22 @@ impl Gpu {
                 frame.vertices.as_ptr().cast(),
                 STREAM_DRAW,
             );
-            for (index, (_, components, offset)) in ATTRIBUTES.iter().enumerate() {
+            for (index, (_, floats, offset)) in ATTRIBUTES.into_iter().enumerate() {
                 glEnableVertexAttribArray(index as GLuint);
                 glVertexAttribPointer(
                     index as GLuint,
-                    *components,
+                    floats as GLint,
                     FLOAT,
                     0,
                     size_of::<Vertex>() as GLsizei,
-                    ptr::without_provenance(*offset),
+                    ptr::without_provenance(offset),
                 );
             }
             glEnable(BLEND);
-            for (group, picture) in frame.groups.iter().zip(&gpu.groups) {
-                begin(picture, [0.0; 4]);
-                draw(&frame.batches[group.batches.clone()]);
+            for (batches, picture) in frame.groups.iter().zip(&gpu.groups) {
+                paint(picture, [0.0; 4], batches);
             }
-            begin(target, clear);
-            let mut next = 0;
-            for (group, picture) in frame.groups.iter().zip(&gpu.groups) {
-                draw(&frame.batches[next..group.batches.start]);
-                glScissor(0, 0, width, height);
-                let [src_rgb, dst_rgb, src_alpha, dst_alpha] = PREMULTIPLIED;
-                glBlendFuncSeparate(src_rgb, dst_rgb, src_alpha, dst_alpha);
-                glBindTexture(TEXTURE_2D, picture.texture.name);
-                glDrawArrays(
-                    TRIANGLES,
-                    group.composite.start as GLint,
-                    group.composite.len() as GLsizei,
-                );
-                next = group.batches.end;
-            }
-            draw(&frame.batches[next..]);
+            paint(target, clear, frame.batches);
             glDisable(SCISSOR_TEST);
             glDisable(BLEND);
             glBindFramebufferEXT(FRAMEBUFFER, 0);

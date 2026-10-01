@@ -432,25 +432,11 @@ pub fn caret_blink(since: Duration) -> (f32, Option<Duration>) {
 /// `caret`, linear RGBA, with the alpha that shows it at `opacity` over `backdrop` as bright
 /// as AppKit's layers do, which blend in sRGB rather than linear light.
 pub fn caret_color(caret: [f32; 4], backdrop: [f32; 4], opacity: f32) -> [f32; 4] {
-    let encode = |value: f32| {
-        if value <= 0.003_130_8 {
-            value * 12.92
-        } else {
-            1.055 * value.powf(1.0 / 2.4) - 0.055
-        }
-    };
-    let decode = |value: f32| {
-        if value <= 0.040_45 {
-            value / 12.92
-        } else {
-            ((value + 0.055) / 1.055).powf(2.4)
-        }
-    };
     let luminance = |[red, green, blue]: [f32; 3]| 0.2126 * red + 0.7152 * green + 0.0722 * blue;
     let [under, over] = [backdrop, caret].map(|color| [color[0], color[1], color[2]]);
     let shown: [f32; 3] = std::array::from_fn(|channel| {
-        let [under, over] = [under[channel], over[channel]].map(encode);
-        decode(under + opacity * (over - under))
+        let [under, over] = [under[channel], over[channel]].map(crate::encode);
+        crate::linear(under + opacity * (over - under))
     });
     let span = luminance(over) - luminance(under);
     let alpha = if span.abs() < 1e-4 {

@@ -50,6 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         identity: None,
         created: None,
         margin_origin: [0.0; 2],
+        rtl: false,
         color: None,
         rule_lines: None,
         objects: vec![PageObject::Outline(Outline {

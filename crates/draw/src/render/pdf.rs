@@ -37,7 +37,6 @@ pub fn pdf(title: &str, sheets: &[Sheet<'_>]) -> Result<Vec<u8>, RenderError> {
         images: HashMap::new(),
         states: HashMap::new(),
         scale: ScaleContext::new(),
-        rows: None,
     };
     let catalog = document.reserve();
     let tree = document.reserve();
@@ -101,9 +100,6 @@ struct Document {
     /// Graphics states by fill and stroke opacity bits and whether they multiply.
     states: HashMap<(u32, bool), Ref>,
     scale: ScaleContext,
-    /// The top and bottom of the layer drawn, in its units, where it clips; lines of text
-    /// outside it are left out, so that no sheet's text layer holds text it does not show.
-    rows: Option<[f32; 2]>,
 }
 
 #[derive(Hash, PartialEq, Eq)]
@@ -258,7 +254,9 @@ impl Document {
                     .clip_nonzero()
                     .end_path();
             }
-            self.rows = layer
+            // Lines of text outside a clipping layer are left out, so that no sheet's text
+            // layer holds text it does not show.
+            let rows = layer
                 .clip
                 .map(|clip| [clip[1], clip[3]].map(|y| (y - layer.origin[1]) / layer.scale));
             content.transform([
@@ -270,7 +268,7 @@ impl Document {
                 layer.origin[1],
             ]);
             for primitive in layer.primitives {
-                self.primitive(&mut content, &mut used, primitive)?;
+                self.primitive(&mut content, &mut used, primitive, rows)?;
             }
             content.restore_state();
         }
@@ -290,28 +288,30 @@ impl Document {
             content.set_fill_rgb(red, green, blue);
         }
         if color[3] < 1.0 {
-            let state = self.state(color[3], false);
-            Used::add(&mut used.states, state);
-            content.set_parameters(Name(format!("G{}", state.get()).as_bytes()));
+            self.opacity(content, used, color[3], false);
         }
     }
 
-    fn state(&mut self, opacity: f32, multiply: bool) -> Ref {
-        let key = (opacity.clamp(0.0, 1.0).to_bits(), multiply);
-        if let Some(state) = self.states.get(&key) {
-            return *state;
-        }
-        let state = self.reserve();
-        let mut writer = self.pdf.ext_graphics(state);
-        writer
-            .non_stroking_alpha(opacity.clamp(0.0, 1.0))
-            .stroking_alpha(opacity.clamp(0.0, 1.0));
-        if multiply {
-            writer.blend_mode(BlendMode::Multiply);
-        }
-        writer.finish();
-        self.states.insert(key, state);
-        state
+    /// Paints at `opacity`, multiplying what lies beneath if `multiply`.
+    fn opacity(&mut self, content: &mut Content, used: &mut Used, opacity: f32, multiply: bool) {
+        let opacity = opacity.clamp(0.0, 1.0);
+        let key = (opacity.to_bits(), multiply);
+        let state = match self.states.get(&key) {
+            Some(state) => *state,
+            None => {
+                let state = self.reserve();
+                let mut writer = self.pdf.ext_graphics(state);
+                writer.non_stroking_alpha(opacity).stroking_alpha(opacity);
+                if multiply {
+                    writer.blend_mode(BlendMode::Multiply);
+                }
+                writer.finish();
+                self.states.insert(key, state);
+                state
+            }
+        };
+        Used::add(&mut used.states, state);
+        content.set_parameters(Name(format!("G{}", state.get()).as_bytes()));
     }
 
     fn primitive(
@@ -319,6 +319,7 @@ impl Document {
         content: &mut Content,
         used: &mut Used,
         primitive: &Primitive<'_>,
+        rows: Option<[f32; 2]>,
     ) -> Result<(), RenderError> {
         match primitive {
             Primitive::Text {
@@ -334,7 +335,7 @@ impl Document {
                         .clip_nonzero()
                         .end_path();
                 }
-                text.runs(&mut |run| self.run(content, used, run, *origin, *ink))?;
+                text.runs(&mut |run| self.run(content, used, run, *origin, *ink, rows))?;
                 content.restore_state();
             }
             Primitive::Icon {
@@ -364,9 +365,7 @@ impl Document {
                 };
                 content.save_state();
                 if tint[3] < 1.0 {
-                    let state = self.state(tint[3], false);
-                    Used::add(&mut used.states, state);
-                    content.set_parameters(Name(format!("G{}", state.get()).as_bytes()));
+                    self.opacity(content, used, tint[3], false);
                 }
                 self.place(
                     content,
@@ -603,9 +602,7 @@ impl Document {
                 color,
             } => {
                 content.save_state();
-                let state = self.state(color[3], true);
-                Used::add(&mut used.states, state);
-                content.set_parameters(Name(format!("G{}", state.get()).as_bytes()));
+                self.opacity(content, used, color[3], true);
                 let [red, green, blue] = encoded(*color);
                 content
                     .set_stroke_rgb(red, green, blue)
@@ -649,7 +646,7 @@ impl Document {
                     return [pixel[0], pixel[1], pixel[2], alpha];
                 }
                 let [red, green, blue] = [pixel[0], pixel[1], pixel[2]].map(|byte| {
-                    let linear = super::linear(f32::from(byte) / 255.0);
+                    let linear = crate::linear(f32::from(byte) / 255.0);
                     srgb_byte((linear * 255.0 / f32::from(alpha)).min(1.0))
                 });
                 [red, green, blue, alpha]
@@ -756,15 +753,13 @@ impl Document {
         run: GlyphRun<'_>,
         origin: [f32; 2],
         ink: [f32; 4],
+        rows: Option<[f32; 2]>,
     ) -> Result<(), RenderError> {
         let [top, bottom] = [
             origin[1] + run.line[0],
             origin[1] + run.line[0] + run.line[1],
         ];
-        if self
-            .rows
-            .is_some_and(|[first, last]| bottom <= first || top >= last)
-        {
+        if rows.is_some_and(|[first, last]| bottom <= first || top >= last) {
             return Ok(());
         }
         let font = self.font(run.font, run.index)?;

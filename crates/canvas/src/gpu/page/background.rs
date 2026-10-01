@@ -410,11 +410,11 @@ const INLINE_PIXELS: f32 = 1024.0 * 1024.0;
 pub(super) struct Background {
     svg: &'static str,
     /// Points; OneNote draws a picture without a stored size at its natural size.
-    pub size: [f32; 2],
+    pub(crate) size: [f32; 2],
     /// For light and for dark paper.
     variants: [Variant; 2],
     /// Whether the first raster is made on the frame's thread rather than awaited.
-    pub inline: bool,
+    pub(crate) inline: bool,
 }
 
 /// A raster's device pixels per point, and the dark paper it was recoloured for.
@@ -430,19 +430,19 @@ struct Variant {
 
 impl Background {
     /// The rasters made so far, for light and for dark paper.
-    pub fn images(&self) -> impl Iterator<Item = &RasterImage> {
+    pub(crate) fn images(&self) -> impl Iterator<Item = &RasterImage> {
         self.variants
             .iter()
             .filter_map(|variant| variant.shown.as_ref().map(|(image, _)| image))
     }
 
     /// Whether both recreate the same template picture at the same size.
-    pub fn same(&self, other: &Self) -> bool {
+    pub(crate) fn same(&self, other: &Self) -> bool {
         self.svg == other.svg && self.size == other.size
     }
 
     /// OneNote's template pictures by their hash, and those Snowbound wrote by their marker.
-    pub fn recognise(picture: &onestore::page::Image) -> Option<Self> {
+    pub(crate) fn recognise(picture: &onestore::page::Image) -> Option<Self> {
         let bytes = picture.bytes.as_deref()?;
         let digest: String = Sha256::digest(bytes)
             .iter()
@@ -472,7 +472,7 @@ impl Background {
     }
 
     /// The latest raster for this paper, if one has landed.
-    pub fn image(&self, paper: Paper) -> Option<&RasterImage> {
+    pub(crate) fn image(&self, paper: Paper) -> Option<&RasterImage> {
         let (image, _) = self.variants[usize::from(dark(paper))].shown.as_ref()?;
         Some(image)
     }
@@ -480,7 +480,7 @@ impl Background {
     /// Takes a finished raster and asks the worker for one at `scale` device pixels per
     /// point when the shown one differs; `waker` hears when it lands. True once the raster
     /// shown matches.
-    pub fn update(&mut self, paper: Paper, scale: f32, waker: &Waker) -> bool {
+    pub(crate) fn update(&mut self, paper: Paper, scale: f32, waker: &Waker) -> bool {
         let dark = dark(paper);
         let [width, height] = self.size.map(|side| side.max(1.0));
         let density = density(scale)
@@ -958,6 +958,7 @@ mod tests {
             created: None,
             title: String::new(),
             margin_origin: [0.0; 2],
+            rtl: false,
             color: None,
             rule_lines: None,
             definitions: BTreeMap::new(),

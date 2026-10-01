@@ -125,6 +125,28 @@ const SECTIONS: &[Section] = &[
                     control: Control::Check(|options| &mut options.pen_pressure),
                 }],
             },
+            Group {
+                heading: "Passwords",
+                rows: &[
+                    Row {
+                        label: "Lock password protected sections after I have not worked in \
+                                them for:",
+                        keywords: "protect protected lock unlock idle minutes timeout security",
+                        control: Control::Check(|options| &mut options.lock_idle),
+                    },
+                    Row {
+                        label: "Amount of time:",
+                        keywords: "password protect protected lock idle minutes hours timeout",
+                        control: Control::Field(lock_after),
+                    },
+                    Row {
+                        label: "Lock password protected sections as soon as I navigate away \
+                                from them",
+                        keywords: "password protect protected lock leave switch security",
+                        control: Control::Check(|options| &mut options.lock_on_leave),
+                    },
+                ],
+            },
         ],
     },
     Section {
@@ -210,6 +232,10 @@ pub struct Options {
     default_font: DefaultFont,
     page_tabs_left: bool,
     navigation_bar_left: bool,
+    lock_idle: bool,
+    /// Minutes, as `protection::AFTER` lists them.
+    lock_minutes: u32,
+    lock_on_leave: bool,
     pub(crate) keyboard: crate::keys::Keyboard,
 }
 
@@ -239,6 +265,10 @@ fn fonts() -> Id {
 
 fn sizes() -> Id {
     id().child("sizes")
+}
+
+fn lock_times() -> Id {
+    id().child("lock-times")
 }
 
 fn font_colors() -> Id {
@@ -298,6 +328,9 @@ impl State {
             default_font: self.view.editor.default_font.clone(),
             page_tabs_left: self.page_tabs_left,
             navigation_bar_left: !self.navigation_bar_right,
+            lock_idle: self.passwords.lock_after.is_some(),
+            lock_minutes: self.passwords.lock_after.unwrap_or(10),
+            lock_on_leave: self.passwords.lock_on_leave,
             keyboard: crate::keys::Keyboard::new(),
         });
         self.ui.open_popup(id());
@@ -600,6 +633,10 @@ impl State {
             self.view.editor.default_font = options.default_font;
             self.page_tabs_left = options.page_tabs_left;
             self.navigation_bar_right = !options.navigation_bar_left;
+            self.passwords = crate::settings::Passwords {
+                lock_after: options.lock_idle.then_some(options.lock_minutes),
+                lock_on_leave: options.lock_on_leave,
+            };
             self.updates.set_automatic(options.automatic_updates);
             self.show_spelling();
             self.follow_color_scheme();
@@ -676,6 +713,35 @@ fn appearance(state: &mut State, options: &mut Options) {
     let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
     if let Some(index) = ui::popup::menu(ui, schemes(), anchor, &items, None) {
         options.color_scheme = SCHEMES[index].0;
+    }
+}
+
+fn lock_after(state: &mut State, options: &mut Options) {
+    let ui = &mut state.ui;
+    let combo = ui.id("combo");
+    let current = crate::protection::AFTER
+        .iter()
+        .find(|(minutes, _)| *minutes == options.lock_minutes)
+        .map_or("", |(_, name)| name);
+    ui::shell::combo(
+        ui,
+        "combo",
+        "Amount of time",
+        current,
+        140.0,
+        lock_times(),
+        true,
+    );
+    let items = crate::protection::AFTER.map(|(minutes, name)| Item {
+        text: name,
+        checked: Some(minutes == options.lock_minutes),
+        current: minutes == options.lock_minutes,
+        ..Item::default()
+    });
+    let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
+    if let Some(index) = ui::popup::menu(ui, lock_times(), anchor, &items, None) {
+        options.lock_minutes = crate::protection::AFTER[index].0;
+        options.lock_idle = true;
     }
 }
 

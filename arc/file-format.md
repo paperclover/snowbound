@@ -182,11 +182,19 @@ tools), while the writer stays strict.
 
 ## Protected sections
 
-Password-protected sections keep their encrypted structure. With the
-`protected` feature, `onestore` opens OneNote 2010's AES wrapper for a supplied
-password. Edits are sealed back under the section's key, with a fresh IV for
-each object. Plaintext never reaches the replica's cache. A protected section is
-edited directly in its file and never queued.
+A password-protected section keeps its structure in the clear and encrypts every
+object and payload under one AES-128 key, which Office's Agile password encryption
+wraps (SHA-1, 100,000 rounds). `protected::Key` opens it with the password, and
+`Section::unlock` keeps the section open under it: objects decode into the arena as it
+opens, and each seal encrypts what it appends with a fresh IV and names the key in every
+revision. Edits are ops like any other's; only the bytes differ.
+
+Setting, changing or removing a password is one of the few whole-image writes, as it is
+in OneNote 2010, which writes the section anew under a new file identity, new object
+space identities and new payload identities, and leaves its TOC to follow. Snowbound does
+the same (`protected::rekey`): keeping any identity would let a cache, OneNote's or a
+replica, mistake the old file's revisions or payloads for the new file's. The evidence,
+with the crypto, is in `corpus/protected-sections`.
 
 ## Looking inside
 

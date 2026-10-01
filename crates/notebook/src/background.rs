@@ -30,8 +30,6 @@ const STAGGER: Duration = Duration::from_millis(100);
 /// How long a reported change settles before its section is checked, so the writes of one
 /// commit cost one check.
 const SETTLE: Duration = Duration::from_secs(1);
-/// The most entries a folder listing takes.
-const ENTRIES: usize = 100_000;
 
 /// Keeps each watched section in sync: a section is checked when a watch on the notebook's
 /// folder reports it changed, when it could not be reached, and otherwise every interval.
@@ -66,6 +64,7 @@ pub(crate) struct Shared {
 }
 
 /// A connection's report of its notebook folder's changes, from a watch armed on connecting.
+#[cfg_attr(not(feature = "smb"), allow(dead_code))]
 pub(crate) struct Reports {
     shared: Weak<Shared>,
     connection: u64,
@@ -338,7 +337,8 @@ impl Background {
                 let root = root.clone();
                 let list = move |folder: &str| {
                     use crate::discover::Source;
-                    crate::discover::Smb::new(&client, &root)?.entries(folder, ENTRIES)
+                    crate::discover::Smb::new(&client, &root)?
+                        .entries(folder, crate::session::LIMITS.entries)
                 };
                 Ok(((bind, list), reported))
             },
@@ -361,6 +361,7 @@ impl Background {
     pub fn hold(&self, path: &str, section: &Section) {
         let replica = section.replica();
         let Some(worker) = replica
+            .section
             .worker
             .lock()
             .ok()
@@ -487,6 +488,7 @@ impl Shared {
     }
 }
 
+#[cfg_attr(not(feature = "smb"), allow(dead_code))]
 impl Reports {
     /// The sections at or below these paths changed.
     pub(crate) fn touched(&self, paths: &[String]) {
@@ -741,7 +743,10 @@ fn list(
 
 /// Deletes the replica at `replica` if it holds nothing unpublished and no one holds it.
 fn discard(replica: &Path) {
-    if matches!(crate::peek(replica), Ok((_, 0))) {
+    if matches!(
+        crate::closed(replica).and_then(|held| crate::peek(&held)),
+        Ok((_, 0))
+    ) {
         for suffix in ["-wal", "-shm", ""] {
             let mut file = replica.as_os_str().to_owned();
             file.push(suffix);
@@ -837,7 +842,7 @@ fn step<R: Remote>(
             if let Some(folder) = replica.parent() {
                 std::fs::create_dir_all(folder)?;
             }
-            Replica::seed(replica, &image)?;
+            Replica::seed(replica, &image, None)?;
             Ok(Stamp::of(&image)?)
         })();
         return match copied {
@@ -854,7 +859,7 @@ fn step<R: Remote>(
         Ok(versions) => versions,
         Err(error) => return (None, Err(Error::RemoteIo(error))),
     };
-    match crate::peek(replica) {
+    match crate::closed(replica).and_then(|held| crate::peek(&held)) {
         Ok((base, 0)) if base == stamp && versions.is_empty() => {
             return (Some(0), Ok((stamp, moved)));
         }
