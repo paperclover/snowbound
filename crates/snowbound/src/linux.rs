@@ -4,6 +4,7 @@
 
 use canvas::date::DateField;
 use std::{
+    error::Error,
     ffi::CStr,
     path::PathBuf,
     process::Command,
@@ -15,7 +16,6 @@ use std::{
 };
 use ui::{Flags, Spec, Ui, px};
 use winit::{
-    error::EventLoopError,
     event_loop::{EventLoop, EventLoopProxy},
     platform::{
         wayland::{EventLoopExtWayland, WindowAttributesExtWayland},
@@ -41,17 +41,31 @@ static QUIT: OnceLock<EventLoopProxy<crate::UserEvent>> = OnceLock::new();
 /// KWin leaves windows square.
 static BREEZE_RADIUS: AtomicU32 = AtomicU32::new(0);
 
-pub fn event_loop(headless: bool) -> Result<EventLoop<crate::UserEvent>, EventLoopError> {
+pub fn event_loop(headless: bool) -> Result<EventLoop<crate::UserEvent>, Box<dyn Error>> {
     // Month and day names and date orders follow the user's locale; other categories stay C.
     unsafe { libc::setlocale(libc::LC_TIME, c"".as_ptr()) };
     let mut builder = EventLoop::with_user_event();
     // winit takes Wayland wherever a compositor is named, even without libwayland-client.
     let named = |names: &[&str]| names.iter().any(|name| std::env::var_os(name).is_some());
-    if named(&["WAYLAND_DISPLAY", "WAYLAND_SOCKET"])
-        && named(&["DISPLAY"])
-        && !crate::loader::loads(c"libwayland-client.so.0")
-    {
+    let mut x11 = !named(&["WAYLAND_DISPLAY", "WAYLAND_SOCKET"]);
+    if !x11 && named(&["DISPLAY"]) && !crate::loader::loads(c"libwayland-client.so.0") {
         builder.with_x11();
+        x11 = true;
+    }
+    // winit panics on the keyboard without them.
+    let keyboard: &[(&CStr, &str)] = if x11 {
+        &[
+            (c"libxkbcommon.so.0", "libxkbcommon"),
+            (c"libxkbcommon-x11.so.0", "libxkbcommon-x11"),
+        ]
+    } else {
+        &[(c"libxkbcommon.so.0", "libxkbcommon")]
+    };
+    if let Some((_, package)) = keyboard
+        .iter()
+        .find(|(library, _)| !crate::loader::loads(library))
+    {
+        return Err(format!("Install {package} to start Snowbound.").into());
     }
     let event_loop = builder.build()?;
     if !headless {
