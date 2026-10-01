@@ -17,7 +17,10 @@ use ui::{Flags, Spec, Ui, px};
 use winit::{
     error::EventLoopError,
     event_loop::{EventLoop, EventLoopProxy},
-    platform::wayland::{EventLoopExtWayland, WindowAttributesExtWayland},
+    platform::{
+        wayland::{EventLoopExtWayland, WindowAttributesExtWayland},
+        x11::EventLoopBuilderExtX11,
+    },
     window::{ResizeDirection, Theme, Window, WindowAttributes},
 };
 
@@ -41,7 +44,16 @@ static BREEZE_RADIUS: AtomicU32 = AtomicU32::new(0);
 pub fn event_loop(headless: bool) -> Result<EventLoop<crate::UserEvent>, EventLoopError> {
     // Month and day names and date orders follow the user's locale; other categories stay C.
     unsafe { libc::setlocale(libc::LC_TIME, c"".as_ptr()) };
-    let event_loop = EventLoop::with_user_event().build()?;
+    let mut builder = EventLoop::with_user_event();
+    // winit takes Wayland wherever a compositor is named, even without libwayland-client.
+    let named = |names: &[&str]| names.iter().any(|name| std::env::var_os(name).is_some());
+    if named(&["WAYLAND_DISPLAY", "WAYLAND_SOCKET"])
+        && named(&["DISPLAY"])
+        && !crate::loader::loads(c"libwayland-client.so.0")
+    {
+        builder.with_x11();
+    }
+    let event_loop = builder.build()?;
     if !headless {
         crate::desktop::prepare(&event_loop);
     }
