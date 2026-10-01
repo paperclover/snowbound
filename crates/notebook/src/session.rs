@@ -1650,11 +1650,7 @@ impl Section {
         let store = Store::parse(&source)?;
         let identity = RevisionIndex::parse(&store)?.root;
         let cache = replica(&identity.guid, &source)?;
-        let replica = if cache.exists() {
-            Replica::open(&cache)?
-        } else {
-            Replica::create(&cache, &source)?
-        };
+        let replica = Replica::open_or_create(&cache, || Ok(source))?;
         let remote = file.clone();
         Self::start(file, replica, move || connect(&remote), notify)
     }

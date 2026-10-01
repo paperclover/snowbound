@@ -59,6 +59,24 @@ fn typed(space: ExGuid, text: ExGuid, with: &str) -> Edit {
     }
 }
 
+/// A cache another thread creates while this one reads its section, as the background
+/// makes a section's offline copy while the section opens, is opened instead of refused.
+#[test]
+fn a_cache_created_meanwhile_opens() {
+    let source = onestore::create_section("Raced.one", "Raced", "Fixture").unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("raced.sqlite");
+    let replica = Replica::open_or_create(&path, || {
+        drop(Replica::create(&path, &source)?);
+        Ok(source.clone())
+    })
+    .unwrap();
+    assert_eq!(replica.pages().unwrap()[0].1, "Raced");
+    drop(replica);
+    let reopened = Replica::open_or_create(&path, || unreachable!()).unwrap();
+    assert_eq!(reopened.pages().unwrap()[0].1, "Raced");
+}
+
 #[test]
 fn cache_reopen_preserves_the_base_and_queued_edits() {
     let dir = tempfile::tempdir().unwrap();

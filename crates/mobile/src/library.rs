@@ -603,15 +603,16 @@ impl Library {
                     .ok_or("The notebook hasn’t listed this section")?;
                 let replicas = self.share_replicas().ok_or("Not a share")?;
                 let cache = replicas.join(format!("{identity}.sqlite"));
-                let replica = if cache.exists() {
-                    Replica::open(&cache)?
-                } else {
-                    let client = self
-                        .client()
-                        .ok_or("The server can’t be reached, and this section hasn’t been opened here before.")?;
-                    std::fs::create_dir_all(&replicas)?;
-                    Replica::create(&cache, &client.read_storage(&file, LIMIT)?)?
-                };
+                std::fs::create_dir_all(&replicas)?;
+                let replica = Replica::open_or_create(&cache, || {
+                    let client = self.client().ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotConnected,
+                            "The server can’t be reached, and this section hasn’t been opened here before.",
+                        )
+                    })?;
+                    Ok(client.read_storage(&file, LIMIT)?)
+                })?;
                 let server = Arc::clone(server);
                 Ok(session::Section::resume_smb(
                     file,

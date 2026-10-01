@@ -128,6 +128,23 @@ impl Replica {
         Self::start(cache_connection(path.as_ref())?)
     }
 
+    /// Opens the cache at `path`, first creating it from the image `source` reads where there
+    /// is none. A cache another thread creates meanwhile, as the background makes an offline
+    /// copy, is opened instead.
+    pub fn open_or_create(
+        path: impl AsRef<Path>,
+        source: impl FnOnce() -> Result<Vec<u8>>,
+    ) -> Result<Self> {
+        let path = path.as_ref();
+        if !path.exists() {
+            match Self::seed(path, &source()?) {
+                Err(Error::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                seeded => seeded?,
+            }
+        }
+        Self::open(path)
+    }
+
     /// `create` without opening the cache it made, as for an offline copy.
     pub(crate) fn seed(path: &Path, source: &[u8]) -> Result<()> {
         validate(source)?;

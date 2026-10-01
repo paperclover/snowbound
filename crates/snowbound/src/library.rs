@@ -671,14 +671,9 @@ impl Library {
                     };
                     let cache = notebook.replica_path(path)?;
                     std::fs::create_dir_all(cache.parent().unwrap_or(&self.cache))?;
-                    let replica = if cache.exists() {
-                        notebook::Replica::open(&cache)
-                    } else {
-                        notebook::Replica::create(
-                            &cache,
-                            &server.connect()?.read_storage(&file, LIMIT)?,
-                        )
-                    };
+                    let replica = notebook::Replica::open_or_create(&cache, || {
+                        Ok(server.connect()?.read_storage(&file, LIMIT)?)
+                    });
                     replica.and_then(|replica| {
                         let server = Arc::clone(server);
                         let connect = move || server.connect();
