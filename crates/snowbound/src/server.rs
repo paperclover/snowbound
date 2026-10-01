@@ -3,9 +3,12 @@
 //! where the system's file sharing can't reach the server.
 
 use crate::library::{Library, Login, Mount};
+#[cfg(target_arch = "wasm32")]
+use crate::platform::smb::{self, Client, Credentials, DirectoryEntry, Refusal};
 use crate::{State, art, platform};
 use accesskit::Role;
-use notebook::smb::{Client, Credentials, DirectoryEntry, Refusal};
+#[cfg(not(target_arch = "wasm32"))]
+use notebook::smb::{self, Client, Credentials, DirectoryEntry, Refusal};
 use std::{io, path::Path, sync::mpsc, time::Duration};
 use ui::{Anchor, Axis, Flags, Id, Spec, Ui, children, fill, px};
 use winit::keyboard::NamedKey;
@@ -98,7 +101,7 @@ fn credentials(login: &Login) -> Credentials<'_> {
 
 impl Reach for Embedded {
     fn shares(&self, mount: &Mount, login: &Login) -> io::Result<Vec<String>> {
-        notebook::smb::shares(&mount.endpoint(), credentials(login), TIMEOUT)
+        smb::shares(&mount.endpoint(), credentials(login), TIMEOUT)
     }
 
     fn list(&self, mount: &Mount, login: &Login) -> io::Result<Vec<DirectoryEntry>> {
@@ -512,7 +515,7 @@ impl State {
             return;
         };
         let (replies, redraw) = (connect.replies.0.clone(), self.redraw.clone());
-        std::thread::spawn(move || {
+        crate::spawn(move || {
             let _ = replies.send(request.run(&Embedded));
             redraw.wake();
         });

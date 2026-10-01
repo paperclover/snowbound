@@ -2,11 +2,14 @@
 //! `build.json` the release key signs; `latest.json` names each platform's newest build. A
 //! thread checks on launch and daily, downloads a newer build for this platform, verifies
 //! it, and unpacks it beside the install. Restart to Update swaps it in once the app quits.
-//! `tools/RELEASE.md` describes the publishing side.
+//! `tools/RELEASE.md` describes the publishing side. In the browser an update is a reload,
+//! so nothing is fetched or installed there.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
 #[cfg(target_os = "linux")]
 use crate::loader::executable;
-use crate::{State, UserEvent, platform};
+use crate::{EventLoopProxy, State, UserEvent, platform};
+#[cfg(not(target_arch = "wasm32"))]
 use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -16,8 +19,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use winit::event_loop::EventLoopProxy;
+use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 /// Where the builds are published.
 const BASE: &str = "https://file.paperclover.net/shr/snowbound/";
@@ -206,6 +210,16 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
         .flatten()
 }
 
+#[cfg(target_arch = "wasm32")]
+fn verify(_: &[u8], _: &[u8], _: &str) -> Result<(), String> {
+    Err(BROWSER.to_owned())
+}
+
+/// Why the browser installs no builds: it loads the newest each time the page opens.
+#[cfg(target_arch = "wasm32")]
+const BROWSER: &str = "The browser loads the newest Snowbound each time the page opens.";
+
+#[cfg(not(target_arch = "wasm32"))]
 fn verify(key: &[u8], message: &[u8], signature: &str) -> Result<(), String> {
     let signature = unhex(signature).ok_or("The signature isn’t hex")?;
     UnparsedPublicKey::new(&ED25519, key)
@@ -271,9 +285,12 @@ fn check_archive(key: &[u8], archive: &Archive, bytes: &[u8]) -> Result<(), Stri
             archive.size
         ));
     }
-    let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
-    if unhex(&archive.sha256).as_deref() != Some(digest.as_ref()) {
-        return Err(format!("{}’s SHA-256 doesn’t match", archive.file));
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let digest = ring::digest::digest(&ring::digest::SHA256, bytes);
+        if unhex(&archive.sha256).as_deref() != Some(digest.as_ref()) {
+            return Err(format!("{}’s SHA-256 doesn’t match", archive.file));
+        }
     }
     verify(key, bytes, &archive.signature)
 }
@@ -448,7 +465,13 @@ fn check(
     result.unwrap_or_else(Status::Failed)
 }
 
+#[cfg(target_arch = "wasm32")]
+fn download(_: &str, _: u64) -> Result<Vec<u8>, String> {
+    Err(BROWSER.to_owned())
+}
+
 /// The `Fetch` the app uses.
+#[cfg(not(target_arch = "wasm32"))]
 fn download(path: &str, limit: u64) -> Result<Vec<u8>, String> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(10 * 60)))
@@ -498,6 +521,12 @@ impl Updates {
             ..Shared::default()
         }));
         let key = unhex(KEY).expect("release-key.pub holds a key in hex");
+        #[cfg(target_arch = "wasm32")]
+        let thread = {
+            let _ = (key, proxy);
+            std::thread::current()
+        };
+        #[cfg(not(target_arch = "wasm32"))]
         let thread = {
             let shared = Arc::clone(&shared);
             std::thread::Builder::new()
@@ -570,8 +599,13 @@ impl Updates {
 
     /// Checks now, and shows what the check finds when it finishes.
     pub fn check_now(&self) {
-        self.shared.lock().unwrap().asked = true;
-        self.thread.unpark();
+        #[cfg(target_arch = "wasm32")]
+        platform::inform("Snowbound is up to date", BROWSER);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.shared.lock().unwrap().asked = true;
+            self.thread.unpark();
+        }
     }
 
     /// The staged build to swap in, once Restart to Update has quit the app.
@@ -713,6 +747,11 @@ fn quits(pid: u32, patience: Duration) -> bool {
         std::thread::sleep(Duration::from_millis(100));
     }
     true
+}
+
+#[cfg(target_arch = "wasm32")]
+fn quits(_: u32, _: Duration) -> bool {
+    false
 }
 
 #[cfg(windows)]

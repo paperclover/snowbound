@@ -26,10 +26,8 @@ use draw::{
     Primitive, Stroke,
     edit::{self, Clicks, Command, Key, Modifiers, Movement, NamedKey, SelectionUnit},
 };
-use std::{
-    error::Error,
-    time::{Duration, Instant},
-};
+use std::{error::Error, time::Duration};
+use web_time::Instant;
 
 const HANDLE_HEIGHT: f32 = 6.75;
 /// Accessible names of the page date's fields.

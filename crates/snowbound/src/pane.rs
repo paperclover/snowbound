@@ -169,7 +169,7 @@ fn local_day(time: u64) -> i64 {
         libc::localtime_r(&unix, &mut tm);
         tm.tm_gmtoff as i64
     };
-    #[cfg(windows)]
+    #[cfg(any(windows, target_arch = "wasm32"))]
     let offset = crate::platform::utc_offset(unix);
     (unix + offset).div_euclid(86_400)
 }

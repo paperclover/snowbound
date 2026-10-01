@@ -90,7 +90,7 @@ A paragraph stored as an equation draws in two dimensions from the tree `onestor
 
 `TextEngine::default()` lays out Calibri, Arial, Times New Roman and Courier New in the bundled Carlito 1.104, Arimo 1.341, Tinos 1.340 and Cousine 1.241 (`crates/canvas/assets/fonts`, SIL Open Font License) wherever the system lacks them. The font box names such a family with its substitute, as "Carlito (Calibri)"; stored `Format.font` values keep the document's name.
 
-The host and `layout-probe` also accept repeated `--substitute-font FONT_FILE` options for another Arimo, Carlito, Tinos or Cousine file. Each file is registered only in this process, as its family's counterpart; this explicitly replaces that family even when a system copy exists. No font files are installed.
+The host and `layout-probe` also accept repeated `--substitute-font FONT_FILE` options for another Arimo, Carlito, Caladea, Tinos or Cousine file. Each file is registered only in this process, as its family's counterpart; this explicitly replaces that family even when a system copy exists. No font files are installed.
 
 ```sh
 "target/Snowbound.app/Contents/MacOS/Snowbound" TEXT_FILE 240 --substitute-font ARIMO_FILE

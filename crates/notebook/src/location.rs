@@ -6,6 +6,7 @@
 //! A location is a string naming where a notebook or lone section is reached: the canonical
 //! path of a local folder or file (`local`), or `smb` for one on a share.
 
+use crate::fs;
 use onestore::{Header, Stamp};
 use std::{
     io,
@@ -26,11 +27,10 @@ pub fn folder(cache: &Path, location: &str) -> PathBuf {
 /// its canonical path, or its folder's with its name.
 pub fn local(path: &Path) -> io::Result<String> {
     let canonical =
-        path.canonicalize()
-            .or_else(|error| match (path.parent(), path.file_name()) {
-                (Some(parent), Some(name)) => Ok(parent.canonicalize()?.join(name)),
-                _ => Err(error),
-            })?;
+        fs::canonicalize(path).or_else(|error| match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) => Ok(fs::canonicalize(parent)?.join(name)),
+            _ => Err(error),
+        })?;
     Ok(canonical.to_string_lossy().into_owned())
 }
 
@@ -46,13 +46,15 @@ pub fn smb(address: &str, share: &str, root: &str) -> String {
 /// must be closed.
 pub fn moved(cache: &Path, from: &str, to: &str) -> io::Result<()> {
     let old = folder(cache, from);
-    if !old.exists() {
+    if fs::metadata(&old).is_err() {
         return Ok(());
     }
     let new = claimed(cache, to)?;
-    for entry in std::fs::read_dir(&old)? {
+    for entry in fs::read_dir(&old)? {
         let name = entry?.file_name();
-        if Path::new(&name).extension() == Some("sqlite".as_ref()) && !new.join(&name).exists() {
+        if Path::new(&name).extension() == Some("sqlite".as_ref())
+            && fs::metadata(new.join(&name)).is_err()
+        {
             adopt(&old.join(&name), &new.join(&name))?;
         }
     }
@@ -64,9 +66,9 @@ pub fn moved(cache: &Path, from: &str, to: &str) -> io::Result<()> {
 fn claimed(cache: &Path, location: &str) -> io::Result<PathBuf> {
     let folder = folder(cache, location);
     let label = folder.join(LOCATION);
-    if !label.exists() {
-        std::fs::create_dir_all(&folder)?;
-        std::fs::write(&label, location)?;
+    if fs::metadata(&label).is_err() {
+        fs::create_dir_all(&folder)?;
+        fs::write(&label, location)?;
     }
     Ok(folder)
 }
@@ -93,7 +95,7 @@ pub(crate) fn claim(
     let folder = claimed(cache, location)?;
     let missing: Vec<&[u8; 16]> = sections
         .iter()
-        .filter(|identity| !crate::session::replica_file(&folder, identity).exists())
+        .filter(|identity| fs::metadata(crate::session::replica_file(&folder, identity)).is_err())
         .collect();
     if missing.is_empty() {
         return Ok(folder);
@@ -107,7 +109,7 @@ pub(crate) fn claim(
             .iter()
             .map(|orphan| (crate::session::replica_file(orphan, identity), false));
         for (replica, legacy) in legacy.chain(left) {
-            if !replica.exists() {
+            if fs::metadata(&replica).is_err() {
                 continue;
             }
             let adoptable = match crate::closed(&replica).and_then(|held| crate::peek(&held)) {
@@ -132,15 +134,15 @@ pub(crate) fn claim(
 
 /// The replica folders of local locations that no longer exist.
 fn orphans(cache: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(cache.join("replicas")) else {
+    let Ok(entries) = fs::read_dir(cache.join("replicas")) else {
         return Vec::new();
     };
     entries
         .filter_map(|entry| {
             let folder = entry.ok()?.path();
-            let location = std::fs::read_to_string(folder.join(LOCATION)).ok()?;
+            let location = fs::read_to_string(folder.join(LOCATION)).ok()?;
             let path = Path::new(&location);
-            (path.is_absolute() && !path.exists()).then_some(folder)
+            (path.is_absolute() && fs::metadata(path).is_err()).then_some(folder)
         })
         .collect()
 }
@@ -160,7 +162,7 @@ fn adopt(from: &Path, to: &Path) -> io::Result<()> {
         let (mut source, mut target) = (from.as_os_str().to_owned(), to.as_os_str().to_owned());
         source.push(suffix);
         target.push(suffix);
-        match std::fs::rename(&source, &target) {
+        match fs::rename(&source, &target) {
             Err(error) if !suffix.is_empty() && error.kind() == io::ErrorKind::NotFound => {}
             moved => moved?,
         }
@@ -170,12 +172,12 @@ fn adopt(from: &Path, to: &Path) -> io::Result<()> {
 
 /// Removes a replica folder that holds no replica.
 fn tidy(folder: &Path) {
-    let empty = std::fs::read_dir(folder).is_ok_and(|mut entries| {
+    let empty = fs::read_dir(folder).is_ok_and(|mut entries| {
         entries.all(|entry| entry.is_ok_and(|entry| entry.file_name() == LOCATION))
     });
     if empty {
-        let _ = std::fs::remove_file(folder.join(LOCATION));
-        let _ = std::fs::remove_dir(folder);
+        let _ = fs::remove_file(folder.join(LOCATION));
+        let _ = fs::remove_dir(folder);
     }
 }
 

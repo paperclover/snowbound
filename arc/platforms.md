@@ -146,6 +146,24 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   Windows has no menu bar: the toolbar and the command palette run the
   command table, with OneNote 2010's Ctrl chords.
 
+### The browser
+
+- The same `snowbound`, built for `wasm32-unknown-unknown`: `web.rs` is its platform
+  module, and `web/index.html` and `web/glue.js` are the page around it. `glue.js` brings the
+  canvas's pointer, wheel and touch, and a hidden text area's keys, composition and paste, as
+  the `ui::Event`s winit would; `web.rs` stands in for winit's window and event loop and runs
+  `State` a turn per animation frame. `tools/release_web.py` builds and publishes it.
+- The page has one thread. The notebook's section thread, sync worker and background run as
+  tasks on its event loop (`notebook::task`), and work the desktop gives a thread runs once
+  the frame is done (`spawn`).
+- Files are `notebook::fs`'s: std's elsewhere, here held in memory and kept in IndexedDB,
+  with SQLite's VFS over the same files, so replicas and notebooks live side by side under
+  `/Notebooks` and `/Cache`. One tab at a time holds them.
+- Menus are the kit's own, as on Linux, with the PC's chords and ⌘ for Ctrl on a Mac; the
+  browser keeps its own window and tab chords. Dialogs are the browser's; Open and Insert
+  ask for files to copy in; printing downloads the PDF. Servers, recording and accessibility
+  are still to come.
+
 ## iOS: native around the canvas
 
 On iOS the split moves. Touch text editing depends on affordances that users

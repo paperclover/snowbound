@@ -1,7 +1,8 @@
 //! The section thread: the only owner of the parsed section, which is the cached base
 //! image with each sealed batch replayed and the open batch's edits applied. Edits apply
 //! here and are written in one SQLite transaction per burst; the sync thread asks it to seal
-//! and, when the remote changed, to rebase the queue.
+//! and, when the remote changed, to rebase the queue. In the browser, which has one thread,
+//! the section is served as each request is sent, and a rebuild runs as it is asked for.
 
 use crate::{Result, base, lock, merge, queue, worker::Signal};
 use onestore::{
@@ -15,7 +16,6 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     io,
     sync::{Arc, Mutex, Weak, mpsc},
-    thread,
 };
 
 pub(crate) type Reply<T> = Box<dyn FnOnce(Result<T>) + Send>;
@@ -64,8 +64,10 @@ pub(crate) enum Request {
         reply: Reply<()>,
     },
     /// From the thread that rebuilt the section: hand it the requests.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Handover(mpsc::SyncSender<Takeover>),
     /// From the thread that rebuilt nothing: carry on with the section as it is.
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Resume,
 }
 
@@ -107,7 +109,8 @@ pub(crate) struct Thread {
     pub(crate) worker: Mutex<Weak<Signal>>,
     /// Taken when the replica drops, which ends every section thread.
     sender: Mutex<Option<mpsc::Sender<Request>>>,
-    threads: Mutex<Vec<thread::JoinHandle<()>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    threads: Mutex<Vec<std::thread::JoinHandle<()>>>,
     /// A password-protected section's key, under which its queue is sealed too.
     pub(crate) key: Option<Key>,
 }
@@ -118,7 +121,10 @@ impl Thread {
             .lock()
             .ok()
             .and_then(|sender| sender.as_ref()?.send(request).ok())
-            .ok_or_else(|| io::Error::other("The section thread stopped").into())
+            .ok_or_else(|| io::Error::other("The section thread stopped"))?;
+        #[cfg(target_arch = "wasm32")]
+        serving::serve(self);
+        Ok(())
     }
 
     /// Ends the section threads and waits for them, so the cache is released.
@@ -126,6 +132,9 @@ impl Thread {
         if let Ok(mut sender) = self.sender.lock() {
             sender.take();
         }
+        #[cfg(target_arch = "wasm32")]
+        serving::serve(self);
+        #[cfg(not(target_arch = "wasm32"))]
         while let Some(thread) = self
             .threads
             .lock()
@@ -136,17 +145,81 @@ impl Thread {
         }
     }
 
-    fn start(self: &Arc<Self>, run: impl FnOnce(Arc<Self>) + Send + 'static) -> Result<()> {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start<F: Future<Output = ()>>(
+        self: &Arc<Self>,
+        run: impl FnOnce(Arc<Self>) -> F + Send + 'static,
+    ) -> Result<()> {
         let shared = Arc::clone(self);
-        let thread = thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("onestore-section".into())
-            .spawn(move || run(shared))?;
+            .spawn(move || crate::task::complete(run(shared)))?;
         self.threads
             .lock()
             .map_err(|_| io::Error::other("The section thread panicked"))?
             .push(thread);
         Ok(())
     }
+
+    #[cfg(target_arch = "wasm32")]
+    fn start<F: Future<Output = ()> + 'static>(
+        self: &Arc<Self>,
+        run: impl FnOnce(Arc<Self>) -> F,
+    ) -> Result<()> {
+        serving::start(self, Box::pin(run(Arc::clone(self))));
+        Ok(())
+    }
+}
+
+/// The browser's section threads: each replica's `run`, polled whenever a request is sent
+/// until it waits for the next.
+#[cfg(target_arch = "wasm32")]
+mod serving {
+    use super::Thread;
+    use std::{cell::RefCell, collections::BTreeMap, future::Future, pin::Pin, task};
+
+    type Serving = Pin<Box<dyn Future<Output = ()>>>;
+
+    thread_local! {
+        /// By the address of each replica's `Thread`, which its `run` keeps alive.
+        static SERVING: RefCell<BTreeMap<usize, Serving>> = const { RefCell::new(BTreeMap::new()) };
+    }
+
+    pub(super) fn start(thread: &Thread, run: Serving) {
+        SERVING.with_borrow_mut(|serving| serving.insert(std::ptr::from_ref(thread).addr(), run));
+        serve(thread);
+    }
+
+    /// Serves what `thread` was sent. A request sent while it is being served, as from a
+    /// reply, waits for the serving already under way, which takes it next.
+    pub(super) fn serve(thread: &Thread) {
+        let id = std::ptr::from_ref(thread).addr();
+        let Some(mut run) = SERVING.with_borrow_mut(|serving| serving.remove(&id)) else {
+            return;
+        };
+        let mut context = task::Context::from_waker(task::Waker::noop());
+        if run.as_mut().poll(&mut context).is_pending() {
+            SERVING.with_borrow_mut(|serving| serving.insert(id, run));
+        }
+    }
+}
+
+/// The next request, or none once the replica dropped.
+#[cfg(not(target_arch = "wasm32"))]
+async fn receive(requests: &mpsc::Receiver<Request>) -> Option<Request> {
+    requests.recv().ok()
+}
+
+/// The next request, waiting for `serving::serve` where none is queued, or none once the
+/// replica dropped.
+#[cfg(target_arch = "wasm32")]
+async fn receive(requests: &mpsc::Receiver<Request>) -> Option<Request> {
+    std::future::poll_fn(|_| match requests.try_recv() {
+        Ok(request) => std::task::Poll::Ready(Some(request)),
+        Err(mpsc::TryRecvError::Disconnected) => std::task::Poll::Ready(None),
+        Err(mpsc::TryRecvError::Empty) => std::task::Poll::Pending,
+    })
+    .await
 }
 
 /// Starts the section thread once the queue opens.
@@ -156,6 +229,7 @@ pub(crate) fn spawn(connection: Connection, key: Option<Key>) -> Result<(Arc<Thr
         connection: Mutex::new(connection),
         worker: Mutex::new(Weak::new()),
         sender: Mutex::new(Some(sender)),
+        #[cfg(not(target_arch = "wasm32"))]
         threads: Mutex::new(Vec::new()),
         key,
     });
@@ -180,7 +254,7 @@ enum Next {
     Handover(mpsc::SyncSender<Takeover>, VecDeque<Request>),
 }
 
-fn run(
+async fn run(
     shared: Arc<Thread>,
     requests: mpsc::Receiver<Request>,
     mut backlog: VecDeque<Request>,
@@ -202,7 +276,7 @@ fn run(
         if let Some(ready) = ready.take() {
             let _ = ready.send(Ok(working.section.root()));
         }
-        match working.serve(&shared, &requests, &mut backlog) {
+        match working.serve(&shared, &requests, &mut backlog).await {
             Next::Stop => return,
             Next::Reopen => {}
             Next::Handover(to, held) => {
@@ -222,6 +296,7 @@ fn fail(error: crate::Error, backlog: VecDeque<Request>, requests: mpsc::Receive
 }
 
 /// What a rebuilding thread does before it rereads the section.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 enum Job {
     Rebase {
         image: Option<Vec<u8>>,
@@ -234,6 +309,7 @@ enum Job {
 
 /// Runs `job`, rereads the section and takes the requests over from the thread that
 /// started it; a failed rebase changed nothing that thread serves.
+#[cfg(not(target_arch = "wasm32"))]
 fn build(shared: Arc<Thread>, job: Job, signal: mpsc::Sender<Request>) {
     let answer: Box<dyn FnOnce() + Send> = match job {
         Job::Reopen { reply } => Box::new(move || reply(Ok(()))),
@@ -263,13 +339,32 @@ fn build(shared: Arc<Thread>, job: Job, signal: mpsc::Sender<Request>) {
         Ok(working) => working,
         Err(error) => return fail(error, backlog, requests),
     };
-    match working.serve(&shared, &requests, &mut backlog) {
+    match crate::task::complete(working.serve(&shared, &requests, &mut backlog)) {
         Next::Stop => {}
-        Next::Reopen => run(shared, requests, backlog, None),
+        Next::Reopen => crate::task::complete(run(shared, requests, backlog, None)),
         Next::Handover(to, held) => {
             let _ = to.send((requests, held));
         }
     }
+}
+
+/// `build` where there is one thread: runs `job` before the section is reread, which the
+/// serving thread does once true is returned; a failed rebase changed nothing it serves.
+#[cfg(target_arch = "wasm32")]
+fn inline(shared: &Thread, job: Job) -> bool {
+    match job {
+        Job::Reopen { reply } => reply(Ok(())),
+        Job::Rebase { image, reply } => {
+            match rebase(&shared.connection, image, shared.key.as_ref()) {
+                Ok(changed) => reply(Ok(changed)),
+                Err(error) => {
+                    reply(Err(error));
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// An edit applied to the section and not yet written, with who waits for it.
@@ -297,7 +392,7 @@ impl<'a> Working<'a> {
         })
     }
 
-    fn serve(
+    async fn serve(
         mut self,
         shared: &Arc<Thread>,
         requests: &mpsc::Receiver<Request>,
@@ -310,9 +405,9 @@ impl<'a> Working<'a> {
         loop {
             let first = match backlog.pop_front() {
                 Some(request) => request,
-                None => match requests.recv() {
-                    Ok(request) => request,
-                    Err(_) => return Next::Stop,
+                None => match receive(requests).await {
+                    Some(request) => request,
+                    None => return Next::Stop,
                 },
             };
             let mut burst: VecDeque<Request> = VecDeque::from([first]);
@@ -415,10 +510,16 @@ impl<'a> Working<'a> {
                     }
                     Request::Rebase { image, reply } => {
                         if self.flush(shared, &mut accepted) {
-                            held = self
-                                .rebuild(shared, Job::Rebase { image, reply })
-                                .then(VecDeque::new);
-                            false
+                            #[cfg(target_arch = "wasm32")]
+                            let reopen = inline(shared, Job::Rebase { image, reply });
+                            #[cfg(not(target_arch = "wasm32"))]
+                            let reopen = {
+                                held = self
+                                    .rebuild(shared, Job::Rebase { image, reply })
+                                    .then(VecDeque::new);
+                                false
+                            };
+                            reopen
                         } else {
                             reply(Err(
                                 io::Error::other("The queue could not be written").into()
@@ -428,10 +529,16 @@ impl<'a> Working<'a> {
                     }
                     Request::Reopen { reply } => {
                         self.flush(shared, &mut accepted);
-                        held = self
-                            .rebuild(shared, Job::Reopen { reply })
-                            .then(VecDeque::new);
-                        false
+                        #[cfg(target_arch = "wasm32")]
+                        let reopen = inline(shared, Job::Reopen { reply });
+                        #[cfg(not(target_arch = "wasm32"))]
+                        let reopen = {
+                            held = self
+                                .rebuild(shared, Job::Reopen { reply })
+                                .then(VecDeque::new);
+                            false
+                        };
+                        reopen
                     }
                     Request::Handover(_) | Request::Resume => false,
                 };
@@ -448,6 +555,7 @@ impl<'a> Working<'a> {
 
     /// Starts a thread that runs `job` and rereads the section; false when the replica is
     /// stopping, which answers the job's request.
+    #[cfg(not(target_arch = "wasm32"))]
     fn rebuild(&self, shared: &Arc<Thread>, job: Job) -> bool {
         let signal = shared
             .sender
@@ -466,7 +574,7 @@ impl<'a> Working<'a> {
             return false;
         };
         shared
-            .start(move |shared| build(shared, job, signal))
+            .start(move |shared| async move { build(shared, job, signal) })
             .is_ok()
     }
 

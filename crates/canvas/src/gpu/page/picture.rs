@@ -4,12 +4,8 @@
 use super::{SETTLE, Slot, density, queue};
 use draw::RasterImage;
 use onestore::ExGuid;
-use std::{
-    collections::BTreeMap,
-    sync::Arc,
-    task::Waker,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeMap, sync::Arc, task::Waker, time::Duration};
+use web_time::Instant;
 
 /// Decoded bytes a scene's pictures keep at once. Pictures in view shrink to fit it, and
 /// the rest of the renderer's frame budget stays for template art and the interface.

@@ -261,7 +261,7 @@ mod tests {
     }
 
     fn titles(root: &std::path::Path, path: &str) -> Vec<(String, Option<[u8; 16]>)> {
-        let pages = stored_pages(&std::fs::read(root.join(path)).unwrap()).unwrap();
+        let pages = stored_pages(&notebook::fs::read(root.join(path)).unwrap()).unwrap();
         (pages.into_iter())
             .map(|page| (page.page.title, page.page.identity))
             .collect()
@@ -275,8 +275,8 @@ mod tests {
     #[test]
     fn pages_and_sections_leave_the_recycle_bin_as_onenote_restores_them() {
         let folder = std::env::temp_dir().join(format!("snowbound-recycle-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&folder);
-        std::fs::create_dir_all(&folder).unwrap();
+        let _ = notebook::fs::remove_dir_all(&folder);
+        notebook::fs::create_dir_all(&folder).unwrap();
         let (root, cache) = (folder.join("Recycled"), folder.join("cache"));
         let page = |title: &str| PageCreation::new(None, Some(title), AUTHOR).unwrap();
         let mut notebook =
@@ -376,17 +376,17 @@ mod tests {
         if let Some(directory) = &export {
             copy(&root, &directory.join("after"));
         }
-        std::fs::remove_dir_all(&folder).unwrap();
+        notebook::fs::remove_dir_all(&folder).unwrap();
     }
 
     fn copy(from: &std::path::Path, to: &std::path::Path) {
-        std::fs::create_dir_all(to).unwrap();
-        for entry in std::fs::read_dir(from).unwrap().flatten() {
+        notebook::fs::create_dir_all(to).unwrap();
+        for entry in notebook::fs::read_dir(from).unwrap().flatten() {
             let target = to.join(entry.file_name());
             if entry.file_type().unwrap().is_dir() {
                 copy(&entry.path(), &target);
             } else {
-                std::fs::copy(entry.path(), target).unwrap();
+                notebook::fs::copy(entry.path(), target).unwrap();
             }
         }
     }

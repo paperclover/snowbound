@@ -3,7 +3,7 @@
 
 pub use crate::background::{Background, Known};
 use crate::{
-    EditStatus, Error, PendingEdit, Remote, Replica, Resolution, Result, SyncWorker, discover,
+    EditStatus, Error, PendingEdit, Remote, Replica, Resolution, Result, SyncWorker, discover, fs,
 };
 use onestore::{
     CommitError, ExGuid, PageCreation, RevisionIndex, Stamp, Store, Transaction,
@@ -132,17 +132,17 @@ impl Storage for Directory {
     }
 
     fn exists(&self, path: &str) -> bool {
-        self.path(path).exists()
+        fs::metadata(self.path(path)).is_ok()
     }
 
     fn read(&self, path: &str) -> Result<Vec<u8>> {
-        Ok(onestore::read_file(self.path(path))?)
+        Ok(fs::read_file(self.path(path))?)
     }
 
     fn read_file(&self, path: &str, limit: usize) -> Result<Vec<u8>> {
         use std::io::Read;
         let mut bytes = Vec::new();
-        std::fs::File::open(self.path(path))?
+        fs::File::open(self.path(path))?
             .take(limit as u64 + 1)
             .read_to_end(&mut bytes)?;
         if bytes.len() > limit {
@@ -153,15 +153,16 @@ impl Storage for Directory {
 
     fn create(&self, path: &str, bytes: &[u8]) -> Result<()> {
         let path = self.path(path);
-        if discover::placeholder(&path).is_some_and(|placeholder| placeholder.exists()) {
+        if discover::placeholder(&path).is_some_and(|placeholder| fs::metadata(placeholder).is_ok())
+        {
             return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
         }
-        std::fs::File::create_new(path)?.write_all(bytes)?;
+        fs::File::create_new(path)?.write_all(bytes)?;
         Ok(())
     }
 
     fn create_directory(&self, path: &str) -> Result<()> {
-        Ok(std::fs::create_dir(self.path(path))?)
+        Ok(fs::create_dir(self.path(path))?)
     }
 
     /// macOS keeps the attribute as `UF_HIDDEN`, and passes it on to a share it mounted;
@@ -207,37 +208,33 @@ impl Storage for Directory {
     }
 
     fn rename(&self, from: &str, to: &str) -> Result<()> {
-        Ok(std::fs::rename(self.path(from), self.path(to))?)
+        Ok(fs::rename(self.path(from), self.path(to))?)
     }
 
     fn replace(&self, from: &str, to: &str) -> Result<()> {
-        Ok(std::fs::rename(self.path(from), self.path(to))?)
+        Ok(fs::rename(self.path(from), self.path(to))?)
     }
 
     fn delete(&self, path: &str) -> Result<()> {
         let path = self.path(path);
-        if path.is_dir() {
-            std::fs::remove_dir(path)?;
+        if fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+            fs::remove_dir(path)?;
         } else {
-            std::fs::remove_file(path)?;
+            fs::remove_file(path)?;
         }
         Ok(())
     }
 
     fn place(&self, path: &str, ancestor: [u8; 16], name: &str) -> Result<()> {
-        Ok(onestore::place_file(self.path(path), ancestor, name)?)
+        Ok(fs::place_file(self.path(path), ancestor, name)?)
     }
 
     fn commit(&self, path: &str, transaction: &Transaction) -> Result<()> {
-        Ok(transaction.commit_file(self.path(path))?)
+        Ok(fs::commit_file(transaction, self.path(path))?)
     }
 
     fn supersede(&self, path: &str, base: &Stamp, with: &str) -> Result<()> {
-        Ok(onestore::supersede_file(
-            self.path(path),
-            base,
-            self.path(with),
-        )?)
+        Ok(fs::supersede_file(self.path(path), base, self.path(with))?)
     }
 }
 
@@ -363,7 +360,7 @@ impl Notebook {
     pub const NEW_COLOR: u32 = 0x00aeba91;
 
     pub fn open(root: impl AsRef<Path>, cache: impl AsRef<Path>) -> Result<Self> {
-        let root = root.as_ref().canonicalize()?;
+        let root = fs::canonicalize(root)?;
         Self::with(Box::new(Directory(root.clone())), Some(root), cache)
     }
 
@@ -376,7 +373,7 @@ impl Notebook {
         color: u32,
         page: &PageCreation,
     ) -> Result<Self> {
-        std::fs::create_dir(root.as_ref())?;
+        fs::create_dir(root.as_ref())?;
         let mut notebook = Self::open(root, cache)?;
         notebook.edit_toc("", &[onestore::TocEdit::Color(color)])?;
         notebook.refresh()?;
@@ -412,13 +409,13 @@ impl Notebook {
     ) -> Result<Self> {
         let cache = cache.as_ref().to_path_buf();
         let listings = cache.join("listings");
-        std::fs::create_dir_all(&listings)?;
+        fs::create_dir_all(&listings)?;
         let name: String = <sha2::Sha256 as sha2::Digest>::digest(storage.location())[..16]
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
         let listing = listings.join(format!("{name}.json"));
-        let mut read = std::fs::read(&listing)
+        let mut read = fs::read(&listing)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
@@ -1271,7 +1268,7 @@ impl Notebook {
         let folders: BTreeSet<&PathBuf> = placed.iter().map(|(.., folder)| folder).collect();
         let mut superseded = Vec::new();
         for folder in folders {
-            let Ok(entries) = std::fs::read_dir(folder) else {
+            let Ok(entries) = fs::read_dir(folder) else {
                 continue;
             };
             for path in entries.filter_map(|entry| Some(entry.ok()?.path())) {
@@ -1337,8 +1334,8 @@ impl Notebook {
         let section = self.section_path(path)?;
         let replica = self.replica_path(path)?;
         // Held until the file is replaced, so that no session queues edits to the old file.
-        let held = replica
-            .exists()
+        let held = fs::metadata(&replica)
+            .is_ok()
             .then(|| crate::closed(&replica))
             .transpose()?;
         if let Some(held) = &held
@@ -1525,7 +1522,7 @@ impl Notebook {
             .into());
         };
         // A section replaced by a link out of the notebook is not the catalog's section.
-        let file = root.join(path).canonicalize()?;
+        let file = fs::canonicalize(root.join(path))?;
         if !file.starts_with(root) {
             return Err(io::Error::from(io::ErrorKind::PermissionDenied).into());
         }
@@ -1533,14 +1530,14 @@ impl Notebook {
         // worker checks next, as a share's does.
         if let discover::SectionState::Readable { document, .. } = &section.state {
             let cache = replica_file(&replicas, document);
-            if cache.exists() {
+            if fs::metadata(&cache).is_ok() {
                 let (replica, remote, mut connect) =
                     (Replica::open(&cache)?, file.clone(), connect);
                 return Section::start(file, replica, move || connect(&remote), notify);
             }
         }
         let replica = |identity: &[u8; 16], _: &[u8]| {
-            std::fs::create_dir_all(&replicas)?;
+            fs::create_dir_all(&replicas)?;
             Ok(replica_file(&replicas, identity))
         };
         Section::open_in(file, key, replica, connect, notify)
@@ -1712,7 +1709,7 @@ fn remove_replica(replica: &Path) -> io::Result<()> {
     for suffix in ["", "-wal", "-shm"] {
         let mut file = replica.as_os_str().to_owned();
         file.push(suffix);
-        match std::fs::remove_file(file) {
+        match fs::remove_file(file) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
             _ => {}
         }
@@ -1839,7 +1836,7 @@ impl Section {
         connect: impl FnMut(&Path) -> io::Result<R> + Send + 'static,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Self> {
-        let file = file.as_ref().canonicalize()?;
+        let file = fs::canonicalize(file)?;
         let location = file.to_string_lossy().into_owned();
         let replicas = |identity: &[u8; 16], source: &[u8]| {
             let folder = crate::location::claim(cache.as_ref(), &location, &[*identity], |_| {
@@ -1875,7 +1872,7 @@ impl Section {
         replica: Replica,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Self> {
-        let file = std::path::absolute(file)?;
+        let file = fs::absolute(file)?;
         let remote = file.clone();
         Self::start(
             file,
@@ -2200,14 +2197,14 @@ struct FileRemote(PathBuf);
 
 impl Remote for FileRemote {
     fn read(&mut self) -> io::Result<Vec<u8>> {
-        onestore::read_file(&self.0)
+        fs::read_file(&self.0)
     }
 
     /// Read without the whole-file lock, which would block OneNote's readers: a change
     /// detector, never a snapshot to edit.
     fn stamp(&mut self) -> io::Result<Stamp> {
         use std::io::Read;
-        let mut file = std::fs::File::open(&self.0)?;
+        let mut file = fs::File::open(&self.0)?;
         let mut header = [0; 1024];
         file.read_exact(&mut header)?;
         let length = file.metadata()?.len();
@@ -2215,11 +2212,11 @@ impl Remote for FileRemote {
     }
 
     fn publish(&mut self, transaction: &Transaction) -> std::result::Result<(), CommitError> {
-        transaction.commit_file(&self.0)
+        fs::commit_file(transaction, &self.0)
     }
 
     fn confirm(&mut self, base: &Stamp) -> std::result::Result<(), CommitError> {
-        onestore::confirm_file(&self.0, base)
+        fs::confirm_file(&self.0, base)
     }
 }
 

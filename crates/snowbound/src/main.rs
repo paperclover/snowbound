@@ -1,4 +1,6 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
+// The browser drives `State` from `web.rs`; launch, replays and screenshots are the desktop's.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 #[cfg(target_os = "macos")]
 mod aqua;
 mod art;
@@ -18,6 +20,7 @@ mod history;
 #[cfg_attr(not(target_os = "macos"), path = "icloud_linux.rs")]
 #[cfg_attr(target_os = "macos", path = "icloud_macos.rs")]
 mod icloud;
+#[cfg(not(target_arch = "wasm32"))]
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod instance;
 mod keys;
@@ -30,6 +33,7 @@ mod manage;
 #[cfg_attr(target_os = "linux", path = "media_linux.rs")]
 #[cfg_attr(target_os = "macos", path = "media_macos.rs")]
 #[cfg_attr(windows, path = "media_windows.rs")]
+#[cfg_attr(target_arch = "wasm32", path = "media_web.rs")]
 mod media;
 mod meeting;
 #[cfg(target_os = "macos")]
@@ -43,12 +47,14 @@ mod paste;
 #[cfg_attr(target_os = "linux", path = "linux.rs")]
 #[cfg_attr(target_os = "macos", path = "macos.rs")]
 #[cfg_attr(windows, path = "windows.rs")]
+#[cfg_attr(target_arch = "wasm32", path = "web.rs")]
 mod platform;
 mod prefetch;
 mod print;
 #[cfg_attr(target_os = "linux", path = "print_linux.rs")]
 #[cfg_attr(target_os = "macos", path = "print_macos.rs")]
 #[cfg_attr(windows, path = "print_windows.rs")]
+#[cfg_attr(target_arch = "wasm32", path = "print_web.rs")]
 mod printer;
 mod properties;
 mod protection;
@@ -64,6 +70,7 @@ mod sidebar;
 #[cfg_attr(target_os = "linux", path = "spell_linux.rs")]
 #[cfg_attr(target_os = "macos", path = "spell_macos.rs")]
 #[cfg_attr(windows, path = "spell_windows.rs")]
+#[cfg_attr(target_arch = "wasm32", path = "spell_web.rs")]
 mod spell;
 #[cfg_attr(not(feature = "wgpu"), path = "surface_gl.rs")]
 #[cfg_attr(windows, path = "surface_windows.rs")]
@@ -78,17 +85,17 @@ mod unpack;
 mod unread;
 mod update;
 mod video;
+#[cfg_attr(target_arch = "wasm32", path = "watch_web.rs")]
 mod watch;
 
+#[cfg(not(target_arch = "wasm32"))]
+use accesskit_winit::Adapter as AccessAdapter;
+#[cfg(not(target_arch = "wasm32"))]
+use canvas::editor::{DEFAULT_OUTLINE_WIDTH, TextOutline};
 use canvas::gpu::colorref;
 use canvas::gpu::page::PageScene;
 use canvas::interaction::{Cursor, PageView, Place, Request, Response, TextColors, accessibility};
-use canvas::{
-    date::DateField,
-    document::TextDocument,
-    editor::{CanvasEditor, DEFAULT_OUTLINE_WIDTH, TextOutline},
-    layout::TextEngine,
-};
+use canvas::{date::DateField, document::TextDocument, editor::CanvasEditor, layout::TextEngine};
 use draw::Renderer;
 use library::Library;
 use onestore::ExGuid;
@@ -96,21 +103,29 @@ use onestore::document::Format;
 use onestore::page::Page;
 use onestore::page::ink::ShapeKind;
 use onestore::page::text::Paragraph;
+#[cfg(target_arch = "wasm32")]
+use platform::{AccessAdapter, ActiveEventLoop, EventLoopProxy, Window};
 use std::{
     collections::{HashMap, HashSet},
     error::Error,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
-    time::Instant,
 };
 use ui::{Axis, Flags, Id, Spec, Theme, Ui, children, fill, fit, px};
+use web_time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalPosition, LogicalSize},
-    event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{ElementState, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy},
-    keyboard::{Key, ModifiersState, NamedKey},
-    window::{CursorIcon, Window, WindowId},
+    keyboard::ModifiersState,
+    window::{Window, WindowId},
+};
+use winit::{
+    dpi::{LogicalPosition, LogicalSize},
+    event::{Ime, MouseButton},
+    keyboard::{Key, NamedKey},
+    window::CursorIcon,
 };
 
 /// Height of the toolbar's row, which is the title bar where the platform lets it: a
@@ -207,6 +222,7 @@ enum UserEvent {
     /// A picture to insert at the caret, such as a screen clipping.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Picture(Vec<u8>),
+    #[cfg(not(target_arch = "wasm32"))]
     Accessibility(accesskit_winit::Event),
     /// The section's synchronization thread reported an event.
     Sync,
@@ -298,6 +314,7 @@ enum Replay {
     Quit,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl From<accesskit_winit::Event> for UserEvent {
     fn from(event: accesskit_winit::Event) -> Self {
         Self::Accessibility(event)
@@ -314,7 +331,7 @@ fn lap(phase: &str, start: Instant) {
 
 fn trace_input(event: &impl std::fmt::Debug) {
     if std::env::var_os("SNOWBOUND_TRACE_INPUT").is_some() {
-        eprintln!("Input {:?}: {event:?}", std::time::SystemTime::now());
+        eprintln!("Input {:?}: {event:?}", web_time::SystemTime::now());
     }
 }
 
@@ -334,6 +351,7 @@ fn cursor_icon(cursor: Cursor) -> CursorIcon {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 struct App {
     proxy: EventLoopProxy<UserEvent>,
     input: Option<Input>,
@@ -373,7 +391,7 @@ impl Input {
     /// Lists the notebook folder `root` and shows it first, where the window shows notebooks.
     fn show(&mut self, root: &Path) -> std::io::Result<()> {
         if let Input::Notebooks { locations, current } = self {
-            let location = std::path::absolute(root)?.to_string_lossy().into_owned();
+            let location = notebook::fs::absolute(root)?.to_string_lossy().into_owned();
             if !locations.contains(&location) {
                 locations.push(location.clone());
             }
@@ -816,7 +834,7 @@ struct State {
     min_width: f32,
     ime_allowed: bool,
     clipboard: Clipboard,
-    access_adapter: accesskit_winit::Adapter,
+    access_adapter: AccessAdapter,
     accessibility: accessibility::Accessibility,
     /// Assistive technology holds the page's tree, grafted into the interface's.
     page_grafted: bool,
@@ -889,7 +907,7 @@ impl State {
         commands::Keymap::from_saved(&stored.keys).install();
         platform::install_menu();
         let access_adapter =
-            accesskit_winit::Adapter::with_event_loop_proxy(event_loop, &window, proxy.clone());
+            AccessAdapter::with_event_loop_proxy(event_loop, &window, proxy.clone());
         window.set_visible(visible);
         let (surface, renderer) = surface::Surface::new(window.clone(), backdrop).await?;
         let size = window.inner_size();
@@ -897,8 +915,9 @@ impl State {
         let fallbacks = platform::symbol_fonts();
         draw::fall_back_to(&mut engine.fonts.collection, &fallbacks);
         for path in substitutes {
-            let target = engine
-                .register_substitute(parley::fontique::Blob::new(Arc::new(std::fs::read(path)?)))?;
+            let target = engine.register_substitute(parley::fontique::Blob::new(Arc::new(
+                notebook::fs::read(path)?,
+            )))?;
             eprintln!("Using {} for {target}", path.display());
         }
         let layouts = Arc::new(Mutex::new(engine.clone()));
@@ -1028,7 +1047,6 @@ impl State {
             .unwrap_or([ui.theme.strip; 2]);
         // A window shown but never focused hears no focus event; a hidden one draws as focused.
         ui.window_focused = !visible || window.has_focus();
-        platform::system_interface(&mut ui);
         ui.fall_back_to(&fallbacks);
         ui.set_focus(Some(page()));
         for family in FONTS {
@@ -1036,6 +1054,7 @@ impl State {
                 ui.preview_font(face.clone(), family);
             }
         }
+        platform::system_interface(&mut ui);
         let mut fonts: Vec<String> = engine
             .fonts
             .collection
@@ -3089,7 +3108,7 @@ impl State {
                     let library = Arc::clone(&session.library);
                     let path = session.tabs[tab].path.clone();
                     let (notify, author) = (notify(self.proxy.clone()), self.author.clone());
-                    std::thread::spawn(move || {
+                    crate::spawn(move || {
                         let copied = library.open(&path, notify).and_then(|section| {
                             section.import_page(&page, &author)?;
                             Ok(section.close()?)
@@ -3161,7 +3180,7 @@ impl State {
         let requested = Instant::now();
         let scenes = Arc::clone(&self.prefetch.scenes);
         let open = self.session.as_ref().map(Session::key);
-        std::thread::spawn(move || {
+        crate::spawn(move || {
             let laid = read().and_then(|loaded| {
                 lap("switch read", requested);
                 let (shown, page) = match loaded {
@@ -3283,7 +3302,7 @@ impl State {
                         library.keep(&previous.tabs[previous.tab].path, previous.section);
                     } else {
                         let section = previous.section;
-                        std::thread::spawn(move || {
+                        crate::spawn(move || {
                             if let Err(error) = section.close() {
                                 eprintln!("Synchronization stopped: {error}");
                             }
@@ -3914,7 +3933,7 @@ impl State {
         }
         let mut out = String::new();
         write(&tree.state().root(), 0, &mut out);
-        std::fs::write(path, out)?;
+        notebook::fs::write(path, out)?;
         Ok(())
     }
 
@@ -4000,7 +4019,7 @@ impl State {
             let pixels = self.capture()?;
             let size = self.surface.size;
             // Encoding off the frame keeps the frames at the pace they are drawn.
-            std::thread::spawn(move || {
+            crate::spawn(move || {
                 if let Err(error) = write_png(&path, size, &pixels) {
                     eprintln!("{error}");
                 }
@@ -5436,14 +5455,143 @@ fn page_text(editor: &CanvasEditor) -> String {
         .join("\n\n")
 }
 
+/// Runs `work` beside the frame: on a thread of its own, or in the browser, which gives the
+/// page one thread, once the frame under way is done.
+fn spawn(work: impl FnOnce() + Send + 'static) {
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::spawn(work);
+    #[cfg(target_arch = "wasm32")]
+    platform::defer(work);
+}
+
 /// FILETIME now: when an edit happened, which its modification times record.
 fn filetime() -> u64 {
-    let unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let unix = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .unwrap_or_default();
     (unix.as_secs() + 11_644_473_600) * 10_000_000 + u64::from(unix.subsec_nanos() / 100)
 }
 
+impl State {
+    /// Does what an event sent to the event loop asks of the open window.
+    fn user_event(&mut self, event: UserEvent) {
+        match event {
+            // The event loop quits; a page stays open.
+            UserEvent::Quit | UserEvent::Replay(Replay::Quit) => {}
+            UserEvent::Picture(bytes) => {
+                if let Err(error) = self.insert_picture(bytes, None) {
+                    eprintln!("{error}");
+                }
+                self.window.request_redraw();
+            }
+            UserEvent::InsertText(text) => {
+                if self.ui.focused() == Some(page()) {
+                    match self.view.insert_text(text) {
+                        Ok(response) => self.respond(response),
+                        Err(error) => eprintln!("{error}"),
+                    }
+                    self.window.request_redraw();
+                } else {
+                    self.input(ui::Event::Ime(Ime::Commit(text)));
+                }
+            }
+            UserEvent::Then(then) => {
+                if let Err(error) = then(self) {
+                    eprintln!("{error}");
+                }
+                self.window.request_redraw();
+            }
+            UserEvent::ICloudFolder => self.list_icloud(),
+            UserEvent::ICloudAccount => {
+                self.icloud_account_changed();
+                self.window.request_redraw();
+            }
+            UserEvent::Open(paths) => {
+                for path in paths {
+                    self.open_path(&path);
+                }
+                self.window.set_minimized(false);
+                self.window.focus_window();
+                self.window.request_redraw();
+            }
+            UserEvent::Update => {
+                self.updated();
+                self.window.request_redraw();
+            }
+            UserEvent::Sync => {
+                if let Err(error) = self.synced() {
+                    eprintln!("{error}");
+                }
+            }
+            UserEvent::Choose(choice) => self.choose(choice),
+            UserEvent::Appearance => {
+                self.follow_color_scheme();
+                self.window.request_redraw();
+            }
+            UserEvent::Redraw => self.window.request_redraw(),
+            UserEvent::Replay(replay) => {
+                match replay {
+                    Replay::Input(event) => self.input(event),
+                    Replay::Pinch(factor) => {
+                        if let Err(error) = self.pinch(factor) {
+                            eprintln!("{error}");
+                        }
+                    }
+                    Replay::Snapshot(path) => self.snapshot = Some(path),
+                    Replay::Accessibility(path) => {
+                        if let Err(error) = self.write_accessibility(&path) {
+                            eprintln!("{error}");
+                        }
+                    }
+                    Replay::Tick | Replay::Quit => {}
+                    Replay::Appearance(appearance) => {
+                        self.window.set_theme(Some(appearance));
+                        self.set_appearance(appearance);
+                    }
+                    Replay::Resize([width, height]) => {
+                        let _ = self
+                            .window
+                            .request_inner_size(LogicalSize::new(width, height));
+                    }
+                }
+                // A covered window gets no redraws, so each step draws its own frame.
+                if let Err(error) = self.frame() {
+                    eprintln!("{error}");
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            UserEvent::Accessibility(event) => self.access_event(event),
+        }
+    }
+
+    /// Does what assistive technology asked of the window.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn access_event(&mut self, event: accesskit_winit::Event) {
+        if event.window_id != self.window.id() {
+            return;
+        }
+        let was_marked = self.view.editor.marked_range().is_some();
+        let result = match event.window_event {
+            accesskit_winit::WindowEvent::InitialTreeRequested => {
+                self.deactivate_accessibility();
+                self.update_accessibility(true)
+            }
+            accesskit_winit::WindowEvent::ActionRequested(request) => self.access_action(request),
+            accesskit_winit::WindowEvent::AccessibilityDeactivated => {
+                self.deactivate_accessibility();
+                Ok(())
+            }
+        };
+        if was_marked && self.view.editor.marked_range().is_none() {
+            platform::clear_marked_text(&self.window);
+        }
+        if let Err(error) = result {
+            eprintln!("{error}");
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl App {
     fn close(&self, event_loop: &ActiveEventLoop) {
         if self.state.as_ref().is_none_or(|state| {
@@ -5480,8 +5628,10 @@ impl App {
 
 /// How long quitting waits for the open section's edits to reach its file; they stay in the
 /// replica and publish at the next launch otherwise.
+#[cfg(not(target_arch = "wasm32"))]
 const QUIT_PUBLISH: std::time::Duration = std::time::Duration::from_secs(3);
 
+#[cfg(not(target_arch = "wasm32"))]
 impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         let Some(state) = &mut self.state else {
@@ -5493,114 +5643,9 @@ impl ApplicationHandler<UserEvent> for App {
             }
             return;
         };
-        let event = match event {
-            UserEvent::Quit | UserEvent::Replay(Replay::Quit) => return self.close(event_loop),
-            UserEvent::Picture(bytes) => {
-                if let Err(error) = state.insert_picture(bytes, None) {
-                    eprintln!("{error}");
-                }
-                return state.window.request_redraw();
-            }
-            UserEvent::InsertText(text) => {
-                if state.ui.focused() == Some(page()) {
-                    match state.view.insert_text(text) {
-                        Ok(response) => state.respond(response),
-                        Err(error) => eprintln!("{error}"),
-                    }
-                    state.window.request_redraw();
-                } else {
-                    state.input(ui::Event::Ime(Ime::Commit(text)));
-                }
-                return;
-            }
-            UserEvent::Then(then) => {
-                if let Err(error) = then(state) {
-                    eprintln!("{error}");
-                }
-                return state.window.request_redraw();
-            }
-            UserEvent::ICloudFolder => return state.list_icloud(),
-            UserEvent::ICloudAccount => {
-                state.icloud_account_changed();
-                return state.window.request_redraw();
-            }
-            UserEvent::Open(paths) => {
-                for path in paths {
-                    state.open_path(&path);
-                }
-                state.window.set_minimized(false);
-                state.window.focus_window();
-                return state.window.request_redraw();
-            }
-            UserEvent::Update => {
-                state.updated();
-                return state.window.request_redraw();
-            }
-            UserEvent::Sync => {
-                if let Err(error) = state.synced() {
-                    eprintln!("{error}");
-                }
-                return;
-            }
-            UserEvent::Choose(choice) => return state.choose(choice),
-            UserEvent::Appearance => {
-                state.follow_color_scheme();
-                return state.window.request_redraw();
-            }
-            UserEvent::Redraw => return state.window.request_redraw(),
-            UserEvent::Replay(replay) => {
-                match replay {
-                    Replay::Input(event) => state.input(event),
-                    Replay::Pinch(factor) => {
-                        if let Err(error) = state.pinch(factor) {
-                            eprintln!("{error}");
-                        }
-                    }
-                    Replay::Snapshot(path) => state.snapshot = Some(path),
-                    Replay::Accessibility(path) => {
-                        if let Err(error) = state.write_accessibility(&path) {
-                            eprintln!("{error}");
-                        }
-                    }
-                    Replay::Tick | Replay::Quit => {}
-                    Replay::Appearance(appearance) => {
-                        state.window.set_theme(Some(appearance));
-                        state.set_appearance(appearance);
-                    }
-                    Replay::Resize([width, height]) => {
-                        let _ = state
-                            .window
-                            .request_inner_size(LogicalSize::new(width, height));
-                    }
-                }
-                // A covered window gets no redraws, so each step draws its own frame.
-                if let Err(error) = state.frame() {
-                    eprintln!("{error}");
-                }
-                return;
-            }
-            UserEvent::Accessibility(event) => event,
-        };
-        if event.window_id != state.window.id() {
-            return;
-        }
-        let was_marked = state.view.editor.marked_range().is_some();
-        let result = match event.window_event {
-            accesskit_winit::WindowEvent::InitialTreeRequested => {
-                state.deactivate_accessibility();
-                state.update_accessibility(true)
-            }
-            accesskit_winit::WindowEvent::ActionRequested(request) => state.access_action(request),
-            accesskit_winit::WindowEvent::AccessibilityDeactivated => {
-                state.deactivate_accessibility();
-                Ok(())
-            }
-        };
-        if was_marked && state.view.editor.marked_range().is_none() {
-            platform::clear_marked_text(&state.window);
-        }
-        if let Err(error) = result {
-            eprintln!("{error}");
+        match event {
+            UserEvent::Quit | UserEvent::Replay(Replay::Quit) => self.close(event_loop),
+            event => state.user_event(event),
         }
     }
 
@@ -5810,8 +5855,8 @@ impl ApplicationHandler<UserEvent> for App {
 
 fn write_png(path: &Path, size: [u32; 2], pixels: &[u8]) -> Result<(), Box<dyn Error>> {
     let partial = path.with_extension("partial");
-    std::fs::write(&partial, paste::png(size, pixels)?)?;
-    std::fs::rename(partial, path)?;
+    notebook::fs::write(&partial, paste::png(size, pixels)?)?;
+    notebook::fs::rename(partial, path)?;
     Ok(())
 }
 
@@ -5820,6 +5865,7 @@ fn write_png(path: &Path, size: [u32; 2], pixels: &[u8]) -> Result<(), Box<dyn E
 /// `pressure LEVEL|none`, `pinch FACTOR`, `key NAME`, `type TEXT`, `modifiers [shift]
 /// [control] [command]`, `wait MILLISECONDS`, `snapshot PNG_PATH`, `accessibility TEXT_PATH`,
 /// `appearance light|dark`, `resize WIDTH HEIGHT` and `quit`.
+#[cfg(not(target_arch = "wasm32"))]
 fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dyn Error>> {
     let mut steps = Vec::new();
     for line in script.lines().filter(|line| !line.trim().is_empty()) {
@@ -5926,6 +5972,7 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "linux")]
     if std::env::args_os()
@@ -5947,6 +5994,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     platform::with_pool(launch)
 }
 
+/// The page starts the window through `web::start` once it has fetched the fonts.
+#[cfg(target_arch = "wasm32")]
+fn main() {}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn launch() -> Result<(), Box<dyn Error>> {
     let mut args = std::env::args_os().skip(1);
     if args.next().is_some_and(|arg| arg == update::FINISH) {
@@ -6014,7 +6066,7 @@ fn launch() -> Result<(), Box<dyn Error>> {
             let title = args
                 .next()
                 .ok_or("Provide a page title after the section file.")?;
-            let bytes = std::fs::read(path)?;
+            let bytes = notebook::fs::read(path)?;
             let store = onestore::Store::parse(&bytes)?;
             let index = onestore::RevisionIndex::parse(&store)?;
             reference = Some(Page::from_document(
@@ -6046,7 +6098,7 @@ fn launch() -> Result<(), Box<dyn Error>> {
     }
     let text = positional
         .first()
-        .map(std::fs::read_to_string)
+        .map(notebook::fs::read_to_string)
         .transpose()?
         .unwrap_or_default();
     let width = positional
@@ -6108,7 +6160,10 @@ fn launch() -> Result<(), Box<dyn Error>> {
         instance.serve(event_loop.create_proxy());
     }
     if let Some(script) = std::env::var_os("SNOWBOUND_REPLAY") {
-        replay(std::fs::read_to_string(script)?, event_loop.create_proxy())?;
+        replay(
+            notebook::fs::read_to_string(script)?,
+            event_loop.create_proxy(),
+        )?;
     }
     let mut app = App {
         proxy: event_loop.create_proxy(),
@@ -6164,10 +6219,10 @@ mod tests {
     fn recorded_ops_reach_the_section() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let directory = std::env::temp_dir().join(format!("snowbound-ops-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(directory.join("cache")).unwrap();
+        let _ = notebook::fs::remove_dir_all(&directory);
+        notebook::fs::create_dir_all(directory.join("cache")).unwrap();
         let file = directory.join("section.one");
-        std::fs::copy(
+        notebook::fs::copy(
             root.join("corpus/paragraph-edit/before/notebook/synthetic.one"),
             &file,
         )
@@ -6215,7 +6270,7 @@ mod tests {
                 .any(|event| matches!(event, notebook::session::Event::Rejected { .. }))
         );
         section.close().unwrap();
-        std::fs::remove_dir_all(&directory).unwrap();
+        notebook::fs::remove_dir_all(&directory).unwrap();
     }
 
     use notebook::session::{Event, Section};
@@ -6267,10 +6322,10 @@ mod tests {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let directory =
             std::env::temp_dir().join(format!("snowbound-changed-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).unwrap();
+        let _ = notebook::fs::remove_dir_all(&directory);
+        notebook::fs::create_dir_all(&directory).unwrap();
         let file = directory.join("section.one");
-        std::fs::copy(
+        notebook::fs::copy(
             root.join("corpus/paragraph-edit/before/notebook/synthetic.one"),
             &file,
         )
@@ -6345,7 +6400,7 @@ mod tests {
         );
         ours.close().unwrap();
         theirs.close().unwrap();
-        std::fs::remove_dir_all(&directory).unwrap();
+        notebook::fs::remove_dir_all(&directory).unwrap();
     }
 
     /// Times opening each section of a notebook and each of its pages, phase by phase, as a
@@ -6356,7 +6411,7 @@ mod tests {
     #[ignore = "measures a notebook named by the environment"]
     fn switch_timings() {
         let cache = std::env::temp_dir().join(format!("snowbound-switch-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&cache);
+        let _ = notebook::fs::remove_dir_all(&cache);
         let open = || match std::env::var("SNOWBOUND_SWITCH_NOTEBOOK") {
             Ok(folder) => Library::notebook(&folder, &cache),
             Err(_) => {
@@ -6421,6 +6476,6 @@ mod tests {
                 session.section.close().unwrap();
             }
         }
-        let _ = std::fs::remove_dir_all(&cache);
+        let _ = notebook::fs::remove_dir_all(&cache);
     }
 }

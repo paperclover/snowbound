@@ -4,6 +4,7 @@ use canvas::{editor::NoteTag, gpu::TagArt};
 use notebook::discover::{Folder, SectionState};
 use notebook::session::{Background, Notebook, Section};
 use notebook::sidecar::themes::Themes;
+#[cfg(not(target_arch = "wasm32"))]
 use notebook::smb::{Client, Credentials};
 use onestore::protected::Key;
 use std::{
@@ -14,8 +15,9 @@ use std::{
         Arc, Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
+use web_time::Instant;
 
 /// OneNote's Work Offline, which like OneNote's holds for every notebook.
 static OFFLINE: AtomicBool = AtomicBool::new(false);
@@ -63,7 +65,7 @@ pub struct Mount {
 /// the system reports mount points with symlinks (`/tmp`, `/var`) resolved.
 #[cfg(unix)]
 pub fn within_mount(path: &std::path::Path, point: &str) -> Option<String> {
-    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
+    let path = notebook::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned());
     Some(
         path.strip_prefix(point)
             .ok()?
@@ -271,6 +273,7 @@ struct Server {
     login: Login,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Server {
     fn connect(&self) -> io::Result<Client> {
         Client::connect(
@@ -398,8 +401,15 @@ impl Library {
         }
     }
 
+    /// No server is in reach of the browser until a relay carries SMB to it.
+    #[cfg(target_arch = "wasm32")]
+    pub fn on_share(_: &str, _: Mount, _: Login, _: &Path) -> Result<Self, String> {
+        Err(crate::platform::smb::Refusal::Unreachable.to_string())
+    }
+
     /// The notebook at `location`, which `mount` names on its server, opened through the
     /// embedded client signed in as `login`.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn on_share(
         location: &str,
         mount: Mount,
@@ -443,8 +453,8 @@ impl Library {
         let mut names = read_display_names(&file);
         names.insert(self.location.clone(), name.to_owned());
         let partial = file.with_extension("partial");
-        std::fs::write(&partial, serde_json::to_vec_pretty(&names)?)?;
-        std::fs::rename(partial, file)
+        notebook::fs::write(&partial, serde_json::to_vec_pretty(&names)?)?;
+        notebook::fs::rename(partial, file)
     }
 
     /// The art the notebook's tags draw with.
@@ -478,7 +488,7 @@ impl Library {
         }
         let extension = art.rsplit('.').next().unwrap_or_default().to_owned();
         let (library, tag) = (Arc::clone(self), tag.clone());
-        std::thread::spawn(move || {
+        crate::spawn(move || {
             let kept = library.reopen().and_then(|notebook| {
                 Ok(notebook.map_tag_art(&tag.label, tag.shape, &bytes, &extension)?)
             });
@@ -529,7 +539,7 @@ impl Library {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) =
             Some((Instant::now(), Arc::new(themes)));
         let library = Arc::clone(self);
-        std::thread::spawn(move || {
+        crate::spawn(move || {
             let kept = library
                 .reopen()
                 .and_then(|notebook| Ok(notebook.save_themes(change)?));
@@ -546,9 +556,9 @@ impl Library {
             return;
         }
         let library = Arc::clone(self);
-        std::thread::spawn(move || {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+        crate::spawn(move || {
+            let now = web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .map_or(0, |unix| unix.as_secs())
                 // Time32 counts from 1980.
                 .saturating_sub(315_532_800);
@@ -567,9 +577,12 @@ impl Library {
     /// This notebook read again, the way it was opened, for changing its structure.
     pub fn reopen(&self) -> Result<Notebook, Box<dyn Error>> {
         Ok(match &self.server {
+            #[cfg(not(target_arch = "wasm32"))]
             Some(server) => {
                 Notebook::open_smb(Arc::new(server.connect()?), &server.mount.root, &self.cache)?
             }
+            #[cfg(target_arch = "wasm32")]
+            Some(_) => unreachable!("The browser opens no notebook on a server"),
             None => Notebook::open(&self.location, &self.cache)?,
         })
     }
@@ -665,13 +678,16 @@ impl Library {
                 return Ok(kept);
             }
             let opened = match (&self.notebook, &self.server) {
+                #[cfg(target_arch = "wasm32")]
+                (Ok(Some(_)), Some(_)) => unreachable!("The browser opens no notebook on a server"),
+                #[cfg(not(target_arch = "wasm32"))]
                 (Ok(Some(notebook)), Some(server)) => {
                     let file = match server.mount.root.as_str() {
                         "" => path.to_owned(),
                         root => format!("{root}/{path}"),
                     };
                     let cache = notebook.replica_path(path)?;
-                    std::fs::create_dir_all(cache.parent().unwrap_or(&self.cache))?;
+                    notebook::fs::create_dir_all(cache.parent().unwrap_or(&self.cache))?;
                     let replica = notebook::Replica::open_or_create(&cache, key.as_ref(), || {
                         Ok(server.connect()?.read_storage(&file, LIMIT)?)
                     });
@@ -735,7 +751,7 @@ impl Library {
             Err(_) => vec![section],
         };
         if !gone.is_empty() {
-            std::thread::spawn(move || close(gone));
+            crate::spawn(move || close(gone));
         }
     }
 
@@ -984,7 +1000,7 @@ impl Library {
         if let Ok(mut kept) = self.kept.lock() {
             for path in &locked {
                 if let Some(section) = kept.take(path) {
-                    std::thread::spawn(move || close(vec![section]));
+                    crate::spawn(move || close(vec![section]));
                 }
             }
         }
@@ -1013,7 +1029,7 @@ fn display_names(cache: &Path) -> PathBuf {
 }
 
 fn read_display_names(file: &Path) -> std::collections::BTreeMap<String, String> {
-    std::fs::read(file)
+    notebook::fs::read(file)
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
@@ -1119,7 +1135,7 @@ fn close(sections: Vec<Section>) {
 }
 
 pub fn file_name(path: &Path) -> String {
-    path.canonicalize()
+    notebook::fs::canonicalize(path)
         .ok()
         .as_deref()
         .and_then(Path::file_name)
@@ -1181,7 +1197,7 @@ pub enum Located {
 
 /// Whether `folder` holds a table of contents, as a notebook's or a section group's does.
 fn has_toc(folder: &Path) -> bool {
-    std::fs::read_dir(folder).is_ok_and(|entries| {
+    notebook::fs::read_dir(folder).is_ok_and(|entries| {
         entries.flatten().any(|entry| {
             entry
                 .path()
@@ -1199,10 +1215,12 @@ pub fn locate(path: &Path) -> Located {
         .extension()
         .map(|extension| extension.to_string_lossy().to_ascii_lowercase());
     match extension.as_deref() {
-        _ if path.is_dir() => Located::Notebook {
-            root: path.to_owned(),
-            section: None,
-        },
+        _ if notebook::fs::metadata(path).is_ok_and(|metadata| metadata.is_dir()) => {
+            Located::Notebook {
+                root: path.to_owned(),
+                section: None,
+            }
+        }
         Some("onepkg") => Located::Package(path.to_owned()),
         Some("onetoc2") => match path.parent() {
             Some(root) => Located::Notebook {
@@ -1245,14 +1263,14 @@ mod tests {
     #[test]
     fn kept_sections_open_at_once() {
         let root = std::env::temp_dir().join(format!("snowbound-kept-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = notebook::fs::remove_dir_all(&root);
         let notebook = root.join("Personal");
-        std::fs::create_dir_all(&notebook).unwrap();
+        notebook::fs::create_dir_all(&notebook).unwrap();
         let sample =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/sample-notebook/Personal");
-        for entry in std::fs::read_dir(sample).unwrap() {
+        for entry in notebook::fs::read_dir(sample).unwrap() {
             let entry = entry.unwrap();
-            std::fs::copy(entry.path(), notebook.join(entry.file_name())).unwrap();
+            notebook::fs::copy(entry.path(), notebook.join(entry.file_name())).unwrap();
         }
         let library = Library::notebook(notebook.to_str().unwrap(), &root.join("cache"));
         let [first, second] = [0, 1].map(|tab| library.tabs("")[tab].path.clone());
@@ -1268,7 +1286,7 @@ mod tests {
         library.close_kept();
         library.open(&first, || {}).unwrap().close().unwrap();
         drop(library);
-        std::fs::remove_dir_all(&root).unwrap();
+        notebook::fs::remove_dir_all(&root).unwrap();
     }
 
     #[cfg(unix)]
@@ -1276,13 +1294,13 @@ mod tests {
     fn within_mount_resolves_symlinks() {
         let base = std::env::temp_dir().join(format!("snowbound-within-{}", std::process::id()));
         let point = base.join("point");
-        std::fs::create_dir_all(point.join("notes")).unwrap();
+        notebook::fs::create_dir_all(point.join("notes")).unwrap();
         std::os::unix::fs::symlink(&point, base.join("link")).unwrap();
-        let point = std::fs::canonicalize(&point).unwrap();
+        let point = notebook::fs::canonicalize(&point).unwrap();
         let point = point.to_str().unwrap();
         let found = within_mount(&base.join("link/notes"), point);
         let missing = within_mount(&base.join("link/gone"), point);
-        std::fs::remove_dir_all(&base).unwrap();
+        notebook::fs::remove_dir_all(&base).unwrap();
         assert_eq!(found.as_deref(), Some("notes"));
         assert_eq!(missing, None);
     }
@@ -1310,8 +1328,8 @@ mod tests {
     fn a_notebook_on_a_share_opens_through_the_embedded_client() {
         let address = std::env::var("ONESTORE_SMB_LAB").unwrap();
         let root = std::env::var("ONESTORE_SMB_LAB_ROOT").unwrap_or_else(|_| {
-            let nanos = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            let nanos = web_time::SystemTime::now()
+                .duration_since(web_time::UNIX_EPOCH)
                 .unwrap()
                 .subsec_nanos();
             format!("snowbound-{}-{nanos}", std::process::id())
@@ -1400,7 +1418,7 @@ mod tests {
         }
         section.close().unwrap();
         drop(library);
-        let _ = std::fs::remove_dir_all(&cache);
+        let _ = notebook::fs::remove_dir_all(&cache);
         if std::env::var_os("ONESTORE_SMB_LAB_KEEP").is_none() {
             remove_tree(&client, &root);
             assert!(client.read_dir(&root, 1).is_err(), "the folder is gone");
@@ -1488,18 +1506,18 @@ mod tests {
     #[test]
     fn chosen_paths_open_their_notebook_or_section() {
         let root = std::env::temp_dir().join(format!("snowbound-locate-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let _ = notebook::fs::remove_dir_all(&root);
         let notebook = root.join("Notebook");
-        std::fs::create_dir_all(notebook.join("Group")).unwrap();
+        notebook::fs::create_dir_all(notebook.join("Group")).unwrap();
         for file in [
             "Open Notebook.onetoc2",
             "Group/Open Notebook.onetoc2",
             "Group/Inner.one",
             "Top.one",
         ] {
-            std::fs::write(notebook.join(file), b"").unwrap();
+            notebook::fs::write(notebook.join(file), b"").unwrap();
         }
-        std::fs::write(root.join("Loose.one"), b"").unwrap();
+        notebook::fs::write(root.join("Loose.one"), b"").unwrap();
         let at = |root: &Path, section: Option<&str>| Located::Notebook {
             root: root.to_owned(),
             section: section.map(str::to_owned),
@@ -1526,6 +1544,6 @@ mod tests {
             Located::Package(root.join("Shared.onepkg"))
         );
         assert_eq!(locate(&root.join("missing.txt")), Located::Nothing);
-        std::fs::remove_dir_all(&root).unwrap();
+        notebook::fs::remove_dir_all(&root).unwrap();
     }
 }

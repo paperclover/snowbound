@@ -2,6 +2,7 @@
 //! keeps every section of an open notebook: queued edits publish and other clients' changes
 //! are noticed without the section being open.
 
+use crate::fs;
 use crate::{
     EditStatus, Error, Remote, Replica, Result,
     discover::{Entry, Listed},
@@ -17,9 +18,9 @@ use std::{
         Arc, Mutex, Weak,
         atomic::{AtomicBool, Ordering},
     },
-    thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
+use web_time::Instant;
 
 /// How long a section that could not be reached waits to be tried again; OneNote 2010
 /// retries a failing section about every 31 seconds.
@@ -137,168 +138,163 @@ impl Background {
         });
         let weak = Arc::downgrade(&shared);
         let owner = Arc::clone(&shared);
-        thread::Builder::new()
-            .name("onestore-background".into())
-            .spawn(move || {
-                let signal = &owner.signal;
-                let mut bound: Option<(B, L)> = None;
-                let mut news = false;
-                while !signal.stopped.load(Ordering::Acquire) {
-                    if signal.offline.load(Ordering::Acquire)
-                        && !signal.requested.load(Ordering::Acquire)
-                    {
-                        // Working online again lists every folder again.
-                        if let Ok(mut watched) = owner.watched.lock() {
-                            watched.watching(false);
-                            watched.lost = true;
-                        }
-                        bound = None;
-                        let _ = receiver.recv();
-                        continue;
+        crate::task::spawn("onestore-background", move || async move {
+            let signal = &owner.signal;
+            let mut bound: Option<(B, L)> = None;
+            let mut news = false;
+            while !signal.stopped.load(Ordering::Acquire) {
+                if signal.offline.load(Ordering::Acquire)
+                    && !signal.requested.load(Ordering::Acquire)
+                {
+                    // Working online again lists every folder again.
+                    if let Ok(mut watched) = owner.watched.lock() {
+                        watched.watching(false);
+                        watched.lost = true;
                     }
-                    let now = Instant::now();
-                    let next = {
-                        let Ok(mut watched) = owner.watched.lock() else {
-                            return;
-                        };
-                        if std::mem::take(&mut watched.lost) {
-                            bound = None;
-                            watched.watching(false);
-                            for watch in &mut watched.sections {
-                                watch.due = now;
-                            }
-                        }
-                        watched.next(now, bound.is_some())
-                    };
-                    let (path, replica, seen, current, image) = match next {
-                        Next::Wait(wait) => {
-                            signal.requested.store(false, Ordering::Release);
-                            if std::mem::take(&mut news) {
-                                notify();
-                            }
-                            let _ = match wait {
-                                Some(wait) => receiver.recv_timeout(wait).ok(),
-                                None => receiver.recv().ok(),
-                            };
-                            continue;
-                        }
-                        Next::Connect(connection) => {
-                            let reports = Reports {
-                                shared: weak.clone(),
-                                connection: connection + 1,
-                            };
-                            let connected = connect(reports);
-                            let Ok(mut watched) = owner.watched.lock() else {
-                                return;
-                            };
-                            // Whatever ended before now ended with the last connection.
-                            watched.connection += 1;
-                            watched.lost = false;
-                            match connected {
-                                Ok((mut files, reported)) => {
-                                    watched.watching(reported);
-                                    let folders = watched.rescanning();
-                                    drop(watched);
-                                    let listings = list(&mut files.1, folders);
-                                    let Ok(mut watched) = owner.watched.lock() else {
-                                        return;
-                                    };
-                                    watched.listed(&listings, Some(copies), Instant::now());
-                                    bound = Some(files);
-                                }
-                                Err(error) => {
-                                    let error = Error::RemoteIo(error);
-                                    let retry = now + RETRY;
-                                    for watch in &mut watched.sections {
-                                        news |= watch.fail(&error, None);
-                                        watch.due = watch.due.max(retry);
-                                    }
-                                    watched.relist = watched.relist.map(|due| due.max(retry));
-                                }
-                            }
-                            continue;
-                        }
-                        Next::List(folders) => {
-                            let Some((_, list_folder)) = &mut bound else {
-                                continue;
-                            };
-                            let listings = list(list_folder, folders);
-                            let Ok(mut watched) = owner.watched.lock() else {
-                                return;
-                            };
-                            watched.listed(&listings, None, Instant::now());
-                            continue;
-                        }
-                        Next::Check {
-                            path,
-                            replica,
-                            seen,
-                            current,
-                            image,
-                        } => (path, replica, seen, current, image),
-                    };
-                    let Some((bind, _)) = &mut bound else {
-                        continue;
-                    };
-                    let (queued, outcome) = step(
-                        &mut bind(&path),
-                        replica.as_deref(),
-                        seen.as_deref(),
-                        current,
-                        image,
-                        copies,
-                    );
-                    if outcome.as_ref().is_err_and(disconnected) {
-                        bound = None;
-                    }
+                    bound = None;
+                    crate::task::wait(&receiver, None).await;
+                    continue;
+                }
+                let now = Instant::now();
+                let next = {
                     let Ok(mut watched) = owner.watched.lock() else {
                         return;
                     };
-                    let interval = watched.interval();
-                    let Watched {
-                        sections, changed, ..
-                    } = &mut *watched;
-                    let Some(watch) = sections.iter_mut().find(|watch| watch.path == path) else {
-                        continue;
-                    };
-                    let now = Instant::now();
-                    watch.current = false;
-                    news |= match outcome {
-                        Ok((stamp, moved)) => {
-                            watch.stamp = Some(stamp);
-                            watch.due = now + interval;
-                            if moved {
-                                changed.push(path);
-                            }
-                            let before = summary(&watch.status);
-                            if let Some(queued) = queued {
-                                watch.status = SyncStatus {
-                                    synced: Some(crate::now()),
-                                    error: None,
-                                    queued,
-                                };
-                            }
-                            moved || before != summary(&watch.status)
-                        }
-                        Err(error) => {
-                            watch.due = now + RETRY;
-                            watch.fail(&error, queued)
-                        }
-                    };
-                }
-                if let Ok(mut watched) = owner.watched.lock() {
-                    watched.watching(false);
-                    if owner.discard.load(Ordering::Acquire) {
-                        for replica in watched
-                            .sections
-                            .iter()
-                            .filter_map(|watch| watch.replica.as_ref())
-                        {
-                            discard(replica);
+                    if std::mem::take(&mut watched.lost) {
+                        bound = None;
+                        watched.watching(false);
+                        for watch in &mut watched.sections {
+                            watch.due = now;
                         }
                     }
+                    watched.next(now, bound.is_some())
+                };
+                let (path, replica, seen, current, image) = match next {
+                    Next::Wait(wait) => {
+                        signal.requested.store(false, Ordering::Release);
+                        if std::mem::take(&mut news) {
+                            notify();
+                        }
+                        crate::task::wait(&receiver, wait).await;
+                        continue;
+                    }
+                    Next::Connect(connection) => {
+                        let reports = Reports {
+                            shared: weak.clone(),
+                            connection: connection + 1,
+                        };
+                        let connected = connect(reports);
+                        let Ok(mut watched) = owner.watched.lock() else {
+                            return;
+                        };
+                        // Whatever ended before now ended with the last connection.
+                        watched.connection += 1;
+                        watched.lost = false;
+                        match connected {
+                            Ok((mut files, reported)) => {
+                                watched.watching(reported);
+                                let folders = watched.rescanning();
+                                drop(watched);
+                                let listings = list(&mut files.1, folders);
+                                let Ok(mut watched) = owner.watched.lock() else {
+                                    return;
+                                };
+                                watched.listed(&listings, Some(copies), Instant::now());
+                                bound = Some(files);
+                            }
+                            Err(error) => {
+                                let error = Error::RemoteIo(error);
+                                let retry = now + RETRY;
+                                for watch in &mut watched.sections {
+                                    news |= watch.fail(&error, None);
+                                    watch.due = watch.due.max(retry);
+                                }
+                                watched.relist = watched.relist.map(|due| due.max(retry));
+                            }
+                        }
+                        continue;
+                    }
+                    Next::List(folders) => {
+                        let Some((_, list_folder)) = &mut bound else {
+                            continue;
+                        };
+                        let listings = list(list_folder, folders);
+                        let Ok(mut watched) = owner.watched.lock() else {
+                            return;
+                        };
+                        watched.listed(&listings, None, Instant::now());
+                        continue;
+                    }
+                    Next::Check {
+                        path,
+                        replica,
+                        seen,
+                        current,
+                        image,
+                    } => (path, replica, seen, current, image),
+                };
+                let Some((bind, _)) = &mut bound else {
+                    continue;
+                };
+                let (queued, outcome) = step(
+                    &mut bind(&path),
+                    replica.as_deref(),
+                    seen.as_deref(),
+                    current,
+                    image,
+                    copies,
+                );
+                if outcome.as_ref().is_err_and(disconnected) {
+                    bound = None;
                 }
-            })?;
+                let Ok(mut watched) = owner.watched.lock() else {
+                    return;
+                };
+                let interval = watched.interval();
+                let Watched {
+                    sections, changed, ..
+                } = &mut *watched;
+                let Some(watch) = sections.iter_mut().find(|watch| watch.path == path) else {
+                    continue;
+                };
+                let now = Instant::now();
+                watch.current = false;
+                news |= match outcome {
+                    Ok((stamp, moved)) => {
+                        watch.stamp = Some(stamp);
+                        watch.due = now + interval;
+                        if moved {
+                            changed.push(path);
+                        }
+                        let before = summary(&watch.status);
+                        if let Some(queued) = queued {
+                            watch.status = SyncStatus {
+                                synced: Some(crate::now()),
+                                error: None,
+                                queued,
+                            };
+                        }
+                        moved || before != summary(&watch.status)
+                    }
+                    Err(error) => {
+                        watch.due = now + RETRY;
+                        watch.fail(&error, queued)
+                    }
+                };
+            }
+            if let Ok(mut watched) = owner.watched.lock() {
+                watched.watching(false);
+                if owner.discard.load(Ordering::Acquire) {
+                    for replica in watched
+                        .sections
+                        .iter()
+                        .filter_map(|watch| watch.replica.as_ref())
+                    {
+                        discard(replica);
+                    }
+                }
+            }
+        })?;
         Ok(Self(shared))
     }
 
@@ -668,7 +664,7 @@ impl Watched {
                             && watch
                                 .replica
                                 .as_ref()
-                                .is_some_and(|replica| !replica.exists());
+                                .is_some_and(|replica| fs::metadata(replica).is_err());
                     watch.due = if read {
                         staggered += 1;
                         now + STAGGER * (staggered - 1)
@@ -750,7 +746,7 @@ fn discard(replica: &Path) {
         for suffix in ["-wal", "-shm", ""] {
             let mut file = replica.as_os_str().to_owned();
             file.push(suffix);
-            let _ = std::fs::remove_file(file);
+            let _ = fs::remove_file(file);
         }
     }
 }
@@ -833,14 +829,14 @@ fn step<R: Remote>(
     let Some(replica) = replica else {
         return (Some(0), Ok((stamp, moved)));
     };
-    if !replica.exists() {
+    if fs::metadata(replica).is_err() {
         if !copies {
             return (Some(0), Ok((stamp, moved)));
         }
         let copied = (|| {
             let image = remote.read().map_err(Error::RemoteIo)?;
             if let Some(folder) = replica.parent() {
-                std::fs::create_dir_all(folder)?;
+                fs::create_dir_all(folder)?;
             }
             Replica::seed(replica, &image, None)?;
             Ok(Stamp::of(&image)?)

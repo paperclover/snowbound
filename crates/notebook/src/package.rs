@@ -7,7 +7,7 @@
 //! MSZIP, which every cabinet reader takes, and reads either.
 
 use crate::{
-    Error, Result,
+    Error, Result, fs,
     session::{Notebook, lists, moved},
 };
 use onestore::{TocEdit, op::Edit, page::Page};
@@ -196,13 +196,13 @@ pub fn unpack(mut files: Files, root: &Path) -> Result<()> {
             transaction.apply(image)?;
         }
     }
-    std::fs::create_dir(root)?;
+    fs::create_dir(root)?;
     for (path, bytes) in &files {
         let file = root.join(path);
         if let Some(parent) = file.parent() {
-            std::fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent)?;
         }
-        std::fs::File::create_new(file)?.write_all(bytes)?;
+        fs::File::create_new(file)?.write_all(bytes)?;
     }
     Ok(())
 }

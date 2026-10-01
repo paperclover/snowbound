@@ -16,10 +16,11 @@ use onestore::page::Page;
 use picture::Picture;
 use std::{
     fmt,
-    sync::{Arc, Mutex, OnceLock, mpsc},
+    sync::{Arc, Mutex},
     task::Waker,
-    time::{Duration, Instant},
+    time::Duration,
 };
+use web_time::Instant;
 
 /// Retained drawing data in the source page's coordinate system.
 pub struct PageScene {
@@ -40,11 +41,13 @@ type Slot<T> = Arc<Mutex<Option<T>>>;
 
 /// Runs `work` on the scenes' one raster thread once `start` has passed, unless the slot
 /// returned has been dropped by then; the result lands in the slot and wakes `waker`.
+#[cfg(not(target_arch = "wasm32"))]
 fn queue<T: Send + 'static>(
     start: Instant,
     waker: &Waker,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Slot<T> {
+    use std::sync::{OnceLock, mpsc};
     static WORKER: OnceLock<mpsc::Sender<Box<dyn FnOnce() + Send>>> = OnceLock::new();
     let slot = Slot::default();
     let requester = Arc::downgrade(&slot);
@@ -67,6 +70,17 @@ fn queue<T: Send + 'static>(
         }))
         .expect("The picture thread outlives its jobs");
     slot
+}
+
+/// `queue` without threads, as in the browser: `work` runs now.
+#[cfg(target_arch = "wasm32")]
+fn queue<T: Send + 'static>(
+    _: Instant,
+    waker: &Waker,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Slot<T> {
+    waker.wake_by_ref();
+    Arc::new(Mutex::new(Some(work())))
 }
 
 /// Device pixels per point a raster is made at for `scale`: the next half power of two,
@@ -793,6 +807,7 @@ impl PageScene {
     /// Where the page read without an editor lies, in page coordinates: the rectangle all
     /// its content covers, and the top and bottom of each line of text and each picture, which
     /// a sheet of paper does not cut through where it can help it.
+    #[cfg(feature = "pdf")]
     pub(crate) fn printed_extent(&self) -> Result<([f32; 4], Vec<[f32; 2]>), SceneError> {
         let mut bounds = [
             f32::INFINITY,

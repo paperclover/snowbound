@@ -109,6 +109,10 @@ impl Prefetch {
         let scenes = Scenes::new(Mutex::new(Recent::new(SCENES)));
         let (jobs, queue) = mpsc::channel();
         let kept = Arc::clone(&scenes);
+        // With one thread the browser lays a page out as it opens rather than ahead of time.
+        #[cfg(target_arch = "wasm32")]
+        drop((queue, layouts, kept, redraw));
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::Builder::new()
             .name("prefetch".into())
             .spawn(move || {

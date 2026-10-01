@@ -189,7 +189,7 @@ impl State {
         if create && !valid {
             return platform::alert("Couldn't unpack the notebook", "Give the notebook a name.");
         }
-        if create && root.exists() {
+        if create && notebook::fs::metadata(&root).is_ok() {
             return platform::alert(
                 "Couldn't unpack the notebook",
                 &format!(
@@ -212,11 +212,13 @@ impl State {
     /// `color` where one was picked, and opens it.
     fn unpack(&mut self, package: PathBuf, root: PathBuf, color: Option<u32>) {
         let (cache, proxy) = (self.cache.clone(), self.proxy.clone());
-        std::thread::spawn(move || {
+        crate::spawn(move || {
             let unpacked = (|| -> Result<String, Box<dyn std::error::Error>> {
-                let files = notebook::package::read(&std::fs::read(&package)?, LIMIT)?;
+                let files = notebook::package::read(&notebook::fs::read(&package)?, LIMIT)?;
                 notebook::package::unpack(files, &root)?;
-                let location = std::path::absolute(&root)?.to_string_lossy().into_owned();
+                let location = notebook::fs::absolute(&root)?
+                    .to_string_lossy()
+                    .into_owned();
                 if let Some(color) = color {
                     Notebook::open(&location, &cache)?.set_color(color)?;
                 }

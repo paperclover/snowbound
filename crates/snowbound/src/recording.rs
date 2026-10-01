@@ -73,7 +73,7 @@ impl State {
             _ => self.media = Media::Idle,
         }
         let folder = std::env::temp_dir().join("Snowbound Recordings");
-        std::fs::create_dir_all(&folder)?;
+        notebook::fs::create_dir_all(&folder)?;
         let extension = if video { "avi" } else { "wav" };
         let path = folder.join(format!("{}.{extension}", std::process::id()));
         let recorder = if video {
@@ -131,7 +131,8 @@ impl State {
                 let recorded = path.clone();
                 let job = std::thread::spawn(move || {
                     finish()?;
-                    let recorded = std::fs::read(&recorded).map_err(|error| error.to_string())?;
+                    let recorded =
+                        notebook::fs::read(&recorded).map_err(|error| error.to_string())?;
                     Ok(if video {
                         recorded
                     } else {
@@ -168,7 +169,7 @@ impl State {
             Wave::parse(&bytes).map(|wave| wave.duration_ms())
         };
         let preview = platform::file_icon(&path);
-        std::fs::remove_file(&path)?;
+        notebook::fs::remove_file(&path)?;
         let title = self.view.editor.page()?.title;
         let name: String = title
             .chars()
@@ -1042,10 +1043,10 @@ pub(crate) mod tests {
 
         if let Some(directory) = std::env::var_os(export) {
             let directory = PathBuf::from(directory);
-            std::fs::create_dir_all(&directory).unwrap();
-            std::fs::write(directory.join("Recorded.one"), &image).unwrap();
+            notebook::fs::create_dir_all(&directory).unwrap();
+            notebook::fs::write(directory.join("Recorded.one"), &image).unwrap();
             let file_id = Store::parse(&image).unwrap().header.file_id;
-            std::fs::write(
+            notebook::fs::write(
                 directory.join("Open Notebook.onetoc2"),
                 onestore::create_table_of_contents(
                     "Open Notebook.onetoc2",

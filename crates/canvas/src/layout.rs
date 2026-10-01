@@ -96,7 +96,10 @@ impl fmt::Display for LayoutError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnsupportedSubstituteFont => {
-                write!(f, "Choose an Arimo, Carlito, Tinos or Cousine font file.")
+                write!(
+                    f,
+                    "Choose an Arimo, Carlito, Caladea, Tinos or Cousine font file."
+                )
             }
             _ => write!(f, "Text layout failed: {self:?}"),
         }
@@ -110,7 +113,9 @@ pub(crate) const DEFAULT_FONT: &str = "Arial";
 pub(crate) const DEFAULT_FONT_SIZE: f32 = 11.0;
 
 /// Metric-compatible faces for the fonts OneNote pages use most, under the SIL Open Font
-/// Licence files beside them, by the family each stands in for.
+/// Licence files beside them, by the family each stands in for. The browser fetches them
+/// beside the module instead (`register_substitute`), keeping them out of it.
+#[cfg(not(target_arch = "wasm32"))]
 const BUNDLED: [(&str, &[&[u8]]); 4] = [
     (
         "Calibri",
@@ -151,6 +156,7 @@ const BUNDLED: [(&str, &[&[u8]]); 4] = [
 impl Default for TextEngine {
     /// An engine that lays out each bundled family in its substitute where it is missing.
     fn default() -> Self {
+        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
         let mut engine = Self {
             // Clones share loaded font files, so glyphs one lays out draw from the same cache.
             fonts: FontContext {
@@ -161,6 +167,7 @@ impl Default for TextEngine {
             arial_substitutes: BTreeSet::new(),
             substitutes: BTreeMap::new(),
         };
+        #[cfg(not(target_arch = "wasm32"))]
         for (family, faces) in BUNDLED {
             if engine.fonts.collection.family_id(family).is_none() {
                 for face in faces {
@@ -187,8 +194,9 @@ impl Clone for TextEngine {
 }
 
 impl TextEngine {
-    /// Register Arimo as Arial, Carlito as Calibri, Tinos as Times New Roman or Cousine as
-    /// Courier New before creating layouts, in place of the bundled substitute.
+    /// Register Arimo as Arial, Carlito as Calibri, Caladea as Cambria, Tinos as Times New
+    /// Roman or Cousine as Courier New before creating layouts, in place of the bundled
+    /// substitute.
     pub fn register_substitute(&mut self, data: Blob<u8>) -> Result<&'static str, LayoutError> {
         self.register(data, false)
     }
@@ -208,6 +216,7 @@ impl TextEngine {
         let (substitute, target) = match family.as_str() {
             "Arimo" => ("Arimo", "Arial"),
             "Carlito" => ("Carlito", "Calibri"),
+            "Caladea" => ("Caladea", "Cambria"),
             "Tinos" => ("Tinos", "Times New Roman"),
             "Cousine" => ("Cousine", "Courier New"),
             _ => return Err(LayoutError::UnsupportedSubstituteFont),

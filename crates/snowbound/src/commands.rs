@@ -1562,7 +1562,7 @@ impl State {
                 else {
                     return Ok(());
                 };
-                return self.insert_picture(std::fs::read(path)?, None);
+                return self.insert_picture(notebook::fs::read(path)?, None);
             }
             Id::Attachment => {
                 let Some(path) = platform::pick_file("Attach File", &[]) else {

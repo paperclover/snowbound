@@ -1,9 +1,8 @@
 //! Frames reach the window through wgpu.
 
-use crate::{platform, trace_input};
+use crate::{Window, platform, trace_input};
 use draw::Renderer;
 use std::{error::Error, sync::Arc};
-use winit::window::Window;
 
 pub struct Surface {
     /// Device pixels frames and snapshots are drawn at; `configure` gives the window it.
@@ -14,6 +13,9 @@ pub struct Surface {
     instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
     config: wgpu::SurfaceConfiguration,
+    /// The sRGB view of the surface's format, which the renderer blends in, where the surface
+    /// itself is not sRGB, as a browser's canvas is not.
+    view_format: wgpu::TextureFormat,
     /// Carries frames to the window where the system's backdrop shows through the strip.
     translucent: Option<draw::Translucent>,
 }
@@ -36,6 +38,13 @@ impl Surface {
         window: Arc<Window>,
         backdrop: bool,
     ) -> Result<(Self, Renderer), Box<dyn Error>> {
+        #[cfg(target_arch = "wasm32")]
+        let instance = {
+            let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
+            descriptor.backends = wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL;
+            wgpu::util::new_instance_with_webgpu_detection(descriptor).await
+        };
+        #[cfg(not(target_arch = "wasm32"))]
         #[cfg_attr(not(any(windows, target_os = "linux")), expect(unused_mut))]
         let mut descriptor =
             wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone()));
@@ -61,8 +70,9 @@ impl Surface {
                     wgpu::Dx12SwapchainKind::DxgiFromVisual;
             }
         }
+        #[cfg(not(target_arch = "wasm32"))]
         let instance = wgpu::Instance::new(descriptor);
-        let surface = instance.create_surface(window.clone())?;
+        let surface = instance.create_surface(target(&window))?;
         platform::configure_presentation(&surface);
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -70,7 +80,18 @@ impl Surface {
                 ..Default::default()
             })
             .await?;
-        let (device, queue) = adapter.request_device(&Default::default()).await?;
+        // A browser without WebGPU draws through WebGL2, whose limits are lower.
+        #[cfg(target_arch = "wasm32")]
+        let required_limits =
+            wgpu::Limits::downlevel_webgl2_defaults().using_resolution(adapter.limits());
+        #[cfg(not(target_arch = "wasm32"))]
+        let required_limits = wgpu::Limits::default();
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                required_limits,
+                ..Default::default()
+            })
+            .await?;
         let size = window.inner_size();
         let mut config = surface
             .get_default_config(&adapter, size.width, size.height)
@@ -92,9 +113,16 @@ impl Surface {
         if platform::cuts_corners() && alpha.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
             config.alpha_mode = wgpu::CompositeAlphaMode::PreMultiplied;
         }
+        #[cfg(target_arch = "wasm32")]
+        let view_format = config.format.add_srgb_suffix();
+        #[cfg(not(target_arch = "wasm32"))]
+        let view_format = config.format;
+        if view_format != config.format {
+            config.view_formats.push(view_format);
+        }
         surface.configure(&device, &config);
         eprintln!("Canvas GPU: {:?}", adapter.get_info());
-        let renderer = Renderer::new(device.clone(), queue.clone(), config.format);
+        let renderer = Renderer::new(device.clone(), queue.clone(), view_format);
         Ok((
             Self {
                 size: [config.width, config.height],
@@ -104,6 +132,7 @@ impl Surface {
                 instance,
                 surface,
                 config,
+                view_format,
                 translucent,
             },
             renderer,
@@ -134,7 +163,7 @@ impl Surface {
                 return Ok(None);
             }
             wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface = self.instance.create_surface(self.window.clone())?;
+                self.surface = self.instance.create_surface(target(&self.window))?;
                 platform::configure_presentation(&self.surface);
                 self.configure(renderer);
                 self.window.request_redraw();
@@ -154,7 +183,10 @@ impl Surface {
         };
         let target = match &mut self.translucent {
             Some(translucent) => translucent.target(&self.device, self.size),
-            None => texture.texture.create_view(&Default::default()),
+            None => texture.texture.create_view(&wgpu::TextureViewDescriptor {
+                format: Some(self.view_format),
+                ..Default::default()
+            }),
         };
         let target = target_of(target);
         Ok(Some(Frame {
@@ -195,7 +227,7 @@ impl Surface {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: self.config.format,
+            format: self.view_format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
@@ -235,7 +267,7 @@ impl Surface {
             timeout: Some(std::time::Duration::from_secs(5)),
         })?;
         let bgra = matches!(
-            self.config.format,
+            self.view_format,
             wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
         );
         let mut pixels = Vec::with_capacity(size[0] as usize * size[1] as usize * 4);
@@ -249,6 +281,17 @@ impl Surface {
         }
         Ok(pixels)
     }
+}
+
+/// What the surface presents to: the window, or in the browser the page's canvas.
+fn target(window: &Arc<Window>) -> wgpu::SurfaceTarget<'static> {
+    #[cfg(target_arch = "wasm32")]
+    return {
+        let _ = window;
+        wgpu::SurfaceTarget::Canvas(platform::canvas())
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    window.clone().into()
 }
 
 /// `view` as what the renderer draws into, which is the view itself unless `draw` also

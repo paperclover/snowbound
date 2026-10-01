@@ -565,8 +565,8 @@ fn followed(format: &Format, old: &Format, new: &Format) -> Format {
 
 /// Seconds since 1980, as note tags date themselves.
 fn time32() -> Option<u32> {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let now = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .ok()?
         .as_secs();
     u32::try_from(now.checked_sub(315_532_800)?).ok()

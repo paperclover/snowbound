@@ -75,6 +75,15 @@ def lanes():
             commands=[cross(linux, arch, *cross_clippy), cross(linux, arch, 'build', '-p', 'snowbound')],
             environment={'CARGO_TARGET_DIR': str(TARGET / 'linux')},
             missing=None if shutil.which('zig') else 'needs zig'))
+    targets = subprocess.run(['rustup', 'target', 'list', '--installed'], capture_output=True, text=True).stdout
+    wasm = web_environment()
+    result.append(dict(
+        name='web', minutes=20, packages=['snowbound'], paths=('crates/snowbound/web/', 'tools/release_web.py'),
+        # Clippy builds it; the module itself is linked by release_web.py.
+        commands=[cargo('clippy', '-p', 'snowbound', '--target', 'wasm32-unknown-unknown', '--', '-D', 'warnings')],
+        environment={**(wasm or {}), 'CARGO_TARGET_DIR': str(TARGET / 'wasm')},
+        missing='needs the wasm32-unknown-unknown target' if 'wasm32-unknown-unknown' not in targets.split()
+        else None if wasm else 'needs nix for a clang that builds for wasm32'))
     result.append(dict(
         name='ios', minutes=30, packages=['mobile'], paths=('apps/ios/',),
         # build-rust.sh builds the Rust half into target/ios.
@@ -90,6 +99,17 @@ def lanes():
         missing=('needs nightly with rust-src' if 'rust-src' not in nightly else
                  None if sdk.exists() else 'needs the 10.6 SDK from platform/snow-leopard/remote.sh sdk')))
     return result
+
+
+def web_environment():
+    """A clang and llvm-ar that build SQLite for wasm32, as release_web.py finds them; none
+    where it finds none."""
+    import release_web
+    try:
+        environment = release_web.environment()
+    except SystemExit:
+        return None
+    return {key: environment[key] for key in ('CC_wasm32_unknown_unknown', 'AR_wasm32_unknown_unknown')}
 
 
 def jj(*args, cwd=ROOT):

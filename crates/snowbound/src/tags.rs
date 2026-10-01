@@ -104,7 +104,7 @@ fn pictures() -> Option<std::path::PathBuf> {
 pub(crate) fn art_bytes(art: &str) -> Option<Vec<u8>> {
     match extra_art().iter().position(|name| name == art) {
         Some(extra) => Some(EXTRAS[extra].2.as_bytes().to_vec()),
-        None => std::fs::read(pictures()?.join(art)).ok(),
+        None => notebook::fs::read(pictures()?.join(art)).ok(),
     }
 }
 
@@ -595,7 +595,7 @@ impl State {
         let Some(path) = platform::pick_file("Custom Image", &["png", "svg"]) else {
             return;
         };
-        let kept = std::fs::read(&path)
+        let kept = notebook::fs::read(&path)
             .ok()
             .and_then(|bytes| canvas::gpu::import_tag_art(&bytes));
         let Some((bytes, extension)) = kept else {
@@ -608,8 +608,8 @@ impl State {
         let written = pictures()
             .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))
             .and_then(|folder| {
-                std::fs::create_dir_all(&folder)?;
-                match std::fs::File::create_new(folder.join(&art)) {
+                notebook::fs::create_dir_all(&folder)?;
+                match notebook::fs::File::create_new(folder.join(&art)) {
                     Ok(mut file) => std::io::Write::write_all(&mut file, &bytes),
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
                     Err(error) => Err(error),
@@ -1185,16 +1185,16 @@ mod tests {
         let written = section.image();
         let temporary =
             std::env::temp_dir().join(format!("snowbound-custom-art-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temporary);
+        let _ = notebook::fs::remove_dir_all(&temporary);
         let root = temporary.join("Custom Art");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("Custom art.one"), &written).unwrap();
+        notebook::fs::create_dir_all(&root).unwrap();
+        notebook::fs::write(root.join("Custom art.one"), &written).unwrap();
         let file_id = Store::parse(&written).unwrap().header.file_id;
         let toc = onestore::create_table_of_contents(
             "Open Notebook.onetoc2",
             &[("Custom art.one", file_id)],
         );
-        std::fs::write(root.join("Open Notebook.onetoc2"), toc.unwrap()).unwrap();
+        notebook::fs::write(root.join("Open Notebook.onetoc2"), toc.unwrap()).unwrap();
         let notebook = notebook::session::Notebook::open(&root, temporary.join("cache"));
         let notebook = notebook.unwrap();
         for tag in &list[..3] {
@@ -1242,7 +1242,7 @@ mod tests {
                 .unwrap();
             assert!(status.success());
         }
-        std::fs::remove_dir_all(&temporary).unwrap();
+        notebook::fs::remove_dir_all(&temporary).unwrap();
     }
 
     /// The gallery offers each symbol OneNote 2010's does once: every one MS-ONE lists but
@@ -1267,8 +1267,8 @@ mod tests {
             let sources = canvas::gpu::art_sources(&mapping.art, bytes).unwrap();
             art.map(&mapping.name, mapping.shape, &mapping.art, sources);
         }
-        std::fs::remove_dir_all(&cache).unwrap();
-        let bytes = std::fs::read(corpus.join("cold/notebook/Custom art.one")).unwrap();
+        notebook::fs::remove_dir_all(&cache).unwrap();
+        let bytes = notebook::fs::read(corpus.join("cold/notebook/Custom art.one")).unwrap();
         let store = Store::parse(&bytes).unwrap();
         let index = RevisionIndex::parse(&store).unwrap();
         let document = Document::parse(&index).unwrap();

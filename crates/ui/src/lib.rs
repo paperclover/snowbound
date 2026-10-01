@@ -29,9 +29,10 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     ops::BitOr,
     rc::Rc,
-    time::{Duration, Instant},
+    time::Duration,
 };
 use text::{Label, Texts};
+use web_time::Instant;
 use winit::{
     event::{Ime, MouseButton},
     keyboard::{Key, ModifiersState, NamedKey},

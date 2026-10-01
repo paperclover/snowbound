@@ -1,4 +1,5 @@
 use super::{Entry, EntryKind, Listed, Source, component};
+use crate::fs;
 use std::{
     collections::BTreeSet,
     io,
@@ -14,7 +15,7 @@ fn evicted(name: &str) -> Option<&str> {
 
 /// Whether the system keeps the file's contents elsewhere until it is read, as macOS 14 and
 /// later list a file iCloud Drive evicted (`SF_DATALESS`).
-fn dataless(metadata: &std::fs::Metadata) -> bool {
+fn dataless(metadata: &fs::Metadata) -> bool {
     const SF_DATALESS: u32 = 0x4000_0000;
     #[cfg(target_os = "macos")]
     let flags = std::os::macos::fs::MetadataExt::st_flags(metadata);
@@ -41,8 +42,8 @@ pub struct Local {
 
 impl Local {
     pub fn open(root: impl AsRef<Path>) -> io::Result<Self> {
-        let root = root.as_ref().canonicalize()?;
-        if !root.is_dir() {
+        let root = fs::canonicalize(root)?;
+        if !fs::metadata(&root)?.is_dir() {
             return Err(io::ErrorKind::NotADirectory.into());
         }
         Ok(Self { root })
@@ -52,7 +53,7 @@ impl Local {
         if !relative.is_empty() && !relative.split('/').all(component) {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let path = self.root.join(relative).canonicalize()?;
+        let path = fs::canonicalize(self.root.join(relative))?;
         if !path.starts_with(&self.root) {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
@@ -63,7 +64,7 @@ impl Local {
 impl Source for Local {
     fn entries(&mut self, path: &str, limit: usize) -> io::Result<Vec<Entry>> {
         let mut entries = Vec::new();
-        for entry in std::fs::read_dir(self.path(path)?)? {
+        for entry in fs::read_dir(self.path(path)?)? {
             let entry = entry?;
             if entries.len() == limit {
                 return Err(io::ErrorKind::FileTooLarge.into());
@@ -108,7 +109,7 @@ impl Source for Local {
     }
 
     fn read(&mut self, path: &str, limit: usize) -> io::Result<Vec<u8>> {
-        onestore::read_file_limited(self.path(path)?, limit)
+        fs::read_file_limited(self.path(path)?, limit)
     }
 }
 
@@ -190,7 +191,7 @@ impl Source for Smb<'_> {
     /// Reads the file's stamp, then its replica's base if that has the same.
     fn copy(&mut self, path: &str, known: [u8; 16]) -> Option<Vec<u8>> {
         let replica = crate::session::replica_file(self.copies.as_ref()?, &known);
-        if !replica.exists() {
+        if fs::metadata(&replica).is_err() {
             return None;
         }
         let stamp = self.client.stamp(&self.path(path).ok()?).ok()?;

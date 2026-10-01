@@ -19,6 +19,7 @@ another, and the exit status is the result.
 | `windows-x86_64` | `platform/windows/cargo.sh` build of `snowbound` (nightly's win7 target) |
 | `windows-aarch64`, `linux-*` | Clippy `-D warnings` on what ships (libraries and binaries but `mobile`), then the `snowbound` build; Linux through `platform/linux/cargo.sh`, which links with zig against glibc 2.17 |
 | `ios` | `xcodebuild` of the simulator app, unsigned |
+| `web` | Clippy `-D warnings` on `snowbound` for `wasm32-unknown-unknown`, SQLite built by nixpkgs' clang; `release_web.py` links, optimizes and publishes the static folder |
 | `macos-10.6` | `platform/snow-leopard/cargo.sh` build of `snowbound`; skipped, saying why, without the SDK or nightly `rust-src` |
 
 ```sh

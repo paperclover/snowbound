@@ -21,7 +21,7 @@ impl State {
         }
         let (Some(name), Ok(bytes)) = (
             path.file_name().and_then(|name| name.to_str()),
-            std::fs::read(path),
+            notebook::fs::read(path),
         ) else {
             platform::alert("Couldn't attach the file", "Choose a file you can open.");
             return Ok(());
@@ -68,14 +68,14 @@ impl State {
             return Ok(None);
         };
         let root = std::env::temp_dir().join("Snowbound Attachments");
-        std::fs::create_dir_all(&root)?;
+        notebook::fs::create_dir_all(&root)?;
         // A copy opened earlier may still be open, edited, in its application.
         let folder = (0..1000)
             .map(|index| root.join(index.to_string()))
-            .find(|folder| std::fs::create_dir(folder).is_ok())
+            .find(|folder| notebook::fs::create_dir(folder).is_ok())
             .ok_or("No folder is free for a copy of the file")?;
         let path = folder.join(&file.filename);
-        std::fs::write(&path, bytes)?;
+        notebook::fs::write(&path, bytes)?;
         Ok(Some(path))
     }
 
@@ -86,7 +86,7 @@ impl State {
             return Ok(());
         };
         if let Some(path) = platform::pick_new("Save As", &file.filename, "Save", None) {
-            std::fs::write(path, bytes)?;
+            notebook::fs::write(path, bytes)?;
         }
         Ok(())
     }

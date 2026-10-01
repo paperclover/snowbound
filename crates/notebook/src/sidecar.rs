@@ -158,7 +158,7 @@ pub(crate) fn map(
 /// A name beside `path` no other writer picks.
 fn temporary(path: &str) -> String {
     use std::hash::{BuildHasher, RandomState};
-    let unique = RandomState::new().hash_one((std::process::id(), crate::now()));
+    let unique = RandomState::new().hash_one((crate::fs::process_id(), crate::now()));
     format!("{path}.{unique:016x}.tmp")
 }
 

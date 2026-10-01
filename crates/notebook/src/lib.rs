@@ -3,9 +3,11 @@
 #![doc = include_str!("../README.md")]
 
 pub mod discover;
+pub mod fs;
 #[cfg(feature = "smb")]
 pub mod smb;
 
+use fs::OpenOptions;
 use onestore::{
     ExGuid,
     op::{Edit, OpError},
@@ -14,7 +16,6 @@ use onestore::{
 };
 use rusqlite::{Connection, OpenFlags, TransactionBehavior, params};
 use std::{
-    fs::OpenOptions,
     io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, MutexGuard, mpsc},
@@ -38,6 +39,7 @@ pub use recovery::{Recovery, RecoverySummary};
 pub mod sidecar;
 mod sync;
 pub use sync::{EditStatus, Remote, Synced};
+mod task;
 mod worker;
 mod working;
 #[cfg(feature = "smb")]
@@ -137,7 +139,7 @@ impl Replica {
         source: impl FnOnce() -> Result<Vec<u8>>,
     ) -> Result<Self> {
         let path = path.as_ref();
-        if !path.exists() {
+        if fs::metadata(path).is_err() {
             match Self::seed(path, &source()?, key) {
                 Err(Error::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 seeded => seeded?,
@@ -154,14 +156,14 @@ impl Replica {
         static BUILDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let build = BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut building = path.as_os_str().to_owned();
-        building.push(format!(".creating-{}-{build}", std::process::id()));
+        building.push(format!(".creating-{}-{build}", fs::process_id()));
         let building = PathBuf::from(building);
         let built = Self::build(&building, source);
-        let linked = built.and_then(|()| Ok(std::fs::hard_link(&building, path)?));
+        let linked = built.and_then(|()| Ok(fs::hard_link(&building, path)?));
         for suffix in ["", "-wal", "-shm"] {
             let mut file = building.as_os_str().to_owned();
             file.push(suffix);
-            let _ = std::fs::remove_file(file);
+            let _ = fs::remove_file(file);
         }
         linked
     }
@@ -463,6 +465,8 @@ fn signed(value: u64) -> Result<i64> {
 /// Opens a cache without writing to it: exclusive locking, a full sync of every commit
 /// (`F_FULLFSYNC` on macOS, the WAL's syncs included) and foreign keys, each queried back.
 fn cache_connection(path: &Path) -> Result<Connection> {
+    #[cfg(target_arch = "wasm32")]
+    fs::install_sqlite();
     let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     connection.busy_timeout(Duration::ZERO)?;
     connection.execute_batch(
@@ -512,8 +516,8 @@ fn write_ahead(connection: &Connection) -> Result<()> {
 pub(crate) fn now() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
     static LAST: AtomicU64 = AtomicU64::new(0);
-    let unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let unix = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .unwrap_or_default();
     let clock =
         (unix.as_secs() + 11_644_473_600) * 10_000_000 + u64::from(unix.subsec_nanos() / 100);

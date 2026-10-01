@@ -1124,8 +1124,8 @@ mod tests {
         fn new(name: &str, titles: &[&str]) -> Self {
             let folder =
                 std::env::temp_dir().join(format!("snowbound-undo-{name}-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&folder);
-            std::fs::create_dir_all(&folder).unwrap();
+            let _ = notebook::fs::remove_dir_all(&folder);
+            notebook::fs::create_dir_all(&folder).unwrap();
             let root = folder.join("Notebook");
             let mut notebook =
                 Notebook::create(&root, folder.join("cache"), Notebook::NEW_COLOR, &dated())
@@ -1211,7 +1211,7 @@ mod tests {
             let file = self
                 .folder
                 .join("Notebook/OneNote_RecycleBin/OneNote_DeletedPages.one");
-            std::fs::read(file).map_or_else(
+            notebook::fs::read(file).map_or_else(
                 |_| Vec::new(),
                 |bytes| {
                     notebook::session::stored_pages(&bytes)
@@ -1235,7 +1235,7 @@ mod tests {
             if let Some(section) = self.section.take() {
                 let _ = section.close();
             }
-            let _ = std::fs::remove_dir_all(&self.folder);
+            let _ = notebook::fs::remove_dir_all(&self.folder);
         }
     }
 
@@ -1434,8 +1434,8 @@ mod tests {
         use crate::manage::Structure;
         let folder =
             std::env::temp_dir().join(format!("snowbound-undo-sections-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&folder);
-        std::fs::create_dir_all(&folder).unwrap();
+        let _ = notebook::fs::remove_dir_all(&folder);
+        notebook::fs::create_dir_all(&folder).unwrap();
         let root = folder.join("Notebook");
         let mut notebook =
             Notebook::create(&root, folder.join("cache"), Notebook::NEW_COLOR, &dated()).unwrap();
@@ -1495,7 +1495,7 @@ mod tests {
         carry(&mut notebook, structure);
         notebook.rename("Kitchen.one", "Pantry").unwrap();
         assert!(restructuring(&library(notebook), &undo.change).is_none());
-        let _ = std::fs::remove_dir_all(&folder);
+        let _ = notebook::fs::remove_dir_all(&folder);
     }
 
     /// Every kind of step taken back and redone in one notebook, written as the app writes
@@ -1596,13 +1596,13 @@ mod tests {
     }
 
     fn copy(from: &std::path::Path, to: &std::path::Path) {
-        std::fs::create_dir_all(to).unwrap();
-        for entry in std::fs::read_dir(from).unwrap().flatten() {
+        notebook::fs::create_dir_all(to).unwrap();
+        for entry in notebook::fs::read_dir(from).unwrap().flatten() {
             let target = to.join(entry.file_name());
             if entry.file_type().unwrap().is_dir() {
                 copy(&entry.path(), &target);
             } else {
-                std::fs::copy(entry.path(), target).unwrap();
+                notebook::fs::copy(entry.path(), target).unwrap();
             }
         }
     }

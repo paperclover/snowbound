@@ -775,9 +775,9 @@ mod tests {
     fn themed_pages_hold_their_theme_under_onenote_s_names() {
         let temporary =
             std::env::temp_dir().join(format!("snowbound-styles-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temporary);
+        let _ = notebook::fs::remove_dir_all(&temporary);
         let root = temporary.join("Styles");
-        std::fs::create_dir_all(&root).unwrap();
+        notebook::fs::create_dir_all(&root).unwrap();
         let mut engine = TextEngine::default();
         let mut sections = Vec::new();
         for theme in built_in() {
@@ -880,7 +880,7 @@ mod tests {
                 }
                 assert_eq!(definition, other[&name], "{} to modern {name}", theme.name);
             }
-            std::fs::write(root.join(&file), &written).unwrap();
+            notebook::fs::write(root.join(&file), &written).unwrap();
             let file_id = Store::parse(&written).unwrap().header.file_id;
             sections.push((file, file_id, theme.id));
         }
@@ -889,7 +889,7 @@ mod tests {
             .map(|(file, id, _)| (file.as_str(), *id))
             .collect();
         let toc = onestore::create_table_of_contents("Open Notebook.onetoc2", &listed).unwrap();
-        std::fs::write(root.join("Open Notebook.onetoc2"), toc).unwrap();
+        notebook::fs::write(root.join("Open Notebook.onetoc2"), toc).unwrap();
         let notebook = notebook::session::Notebook::open(&root, temporary.join("cache")).unwrap();
         let themes = notebook
             .save_themes(Themes {
@@ -916,6 +916,6 @@ mod tests {
                 .unwrap();
             assert!(status.success());
         }
-        std::fs::remove_dir_all(&temporary).unwrap();
+        notebook::fs::remove_dir_all(&temporary).unwrap();
     }
 }

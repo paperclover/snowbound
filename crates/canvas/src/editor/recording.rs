@@ -5,7 +5,7 @@
 
 use super::*;
 use onestore::page::{Attachment, MediaIndex};
-use std::time::Instant;
+use web_time::Instant;
 
 /// A recording in progress.
 pub(super) struct Live {

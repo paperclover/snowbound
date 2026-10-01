@@ -211,7 +211,7 @@ impl State {
         };
         let space = self.session.as_ref().ok_or("No section is open")?.space;
         let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
+        crate::spawn(move || {
             let art = template.pictures().map_err(|error| error.to_string());
             let _ = proxy.send_event(crate::UserEvent::Then(Box::new(move |state| {
                 if state
@@ -399,9 +399,9 @@ impl State {
     pub(crate) fn list_icloud(&mut self) {
         let proxy = self.proxy.clone();
         // Listing a folder iCloud Drive has not brought down yet waits for it.
-        std::thread::spawn(move || {
+        crate::spawn(move || {
             let listed = crate::icloud::folder().and_then(|root| {
-                let mut listed: Vec<String> = std::fs::read_dir(&root)
+                let mut listed: Vec<String> = notebook::fs::read_dir(&root)
                     .ok()?
                     .flatten()
                     .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
@@ -446,7 +446,7 @@ impl State {
                 continue;
             }
             let (cache, proxy) = (self.cache.clone(), self.proxy.clone());
-            std::thread::spawn(move || {
+            crate::spawn(move || {
                 let library = Arc::new(Library::notebook(&location, &cache));
                 let _ = proxy.send_event(crate::UserEvent::Then(Box::new(move |state| {
                     state.icloud_reading.remove(&location);
@@ -494,7 +494,7 @@ impl State {
             return;
         }
         let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
+        crate::spawn(move || {
             if missing.is_some() {
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }
@@ -544,11 +544,16 @@ impl State {
     }
 
     /// Creates a notebook in the new folder `root` and opens it.
-    fn create_notebook(&mut self, root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn create_notebook(
+        &mut self,
+        root: std::path::PathBuf,
+    ) -> Result<(), Box<dyn Error>> {
         let page = self.dated_page(None)?;
         let (cache, notify) = (self.cache.clone(), notify(self.proxy.clone()));
         self.load(move || {
-            let location = std::path::absolute(&root)?.to_string_lossy().into_owned();
+            let location = notebook::fs::absolute(&root)?
+                .to_string_lossy()
+                .into_owned();
             let notebook = Notebook::create(&location, &cache, Notebook::NEW_COLOR, &page)?;
             let library = Arc::new(Library::created(&location, notebook, &cache));
             let path = library
@@ -584,7 +589,7 @@ impl State {
                 session.library.name,
                 crate::filetime()
             ));
-            let exported = std::fs::create_dir_all(&folder)
+            let exported = notebook::fs::create_dir_all(&folder)
                 .map_err(notebook::Error::from)
                 .and_then(|()| session.section.export_recovery(&archive));
             if let Err(error) = exported {
@@ -936,13 +941,13 @@ mod tests {
     }
 
     fn copy(from: &Path, to: &Path) {
-        std::fs::create_dir_all(to).unwrap();
-        for entry in std::fs::read_dir(from).unwrap().flatten() {
+        notebook::fs::create_dir_all(to).unwrap();
+        for entry in notebook::fs::read_dir(from).unwrap().flatten() {
             let target = to.join(entry.file_name());
             if entry.file_type().unwrap().is_dir() {
                 copy(&entry.path(), &target);
             } else {
-                std::fs::copy(entry.path(), target).unwrap();
+                notebook::fs::copy(entry.path(), target).unwrap();
             }
         }
     }
@@ -956,8 +961,8 @@ mod tests {
     fn a_notebook_is_managed_as_onenote_manages_one() {
         let temporary =
             std::env::temp_dir().join(format!("snowbound-manage-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temporary);
-        std::fs::create_dir_all(&temporary).unwrap();
+        let _ = notebook::fs::remove_dir_all(&temporary);
+        notebook::fs::create_dir_all(&temporary).unwrap();
         let root = temporary.join("Managed");
         let cache = temporary.join("cache");
         let mut notebook = Notebook::create(&root, &cache, Notebook::NEW_COLOR, &dated()).unwrap();
@@ -1182,7 +1187,7 @@ mod tests {
         if let Some(directory) = std::env::var_os("SNOWBOUND_MANAGEMENT_EXPORT") {
             copy(&root, Path::new(&directory));
         }
-        std::fs::remove_dir_all(&temporary).unwrap();
+        notebook::fs::remove_dir_all(&temporary).unwrap();
     }
 
     /// Deleting a group's last section shows the notebook's other one; deleting that too
@@ -1191,8 +1196,8 @@ mod tests {
     fn deleting_every_section_leaves_the_notebook_showing_none() {
         let temporary =
             std::env::temp_dir().join(format!("snowbound-empty-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temporary);
-        std::fs::create_dir_all(&temporary).unwrap();
+        let _ = notebook::fs::remove_dir_all(&temporary);
+        notebook::fs::create_dir_all(&temporary).unwrap();
         let root = temporary.join("Emptied");
         let location = root.to_str().unwrap();
         let cache = temporary.join("cache");
@@ -1213,7 +1218,7 @@ mod tests {
         let library = library.with(notebook);
         assert_eq!(shown(&library, Some("New Section 1.one".into())), None);
         assert!(library.tabs("").is_empty());
-        std::fs::remove_dir_all(&temporary).unwrap();
+        notebook::fs::remove_dir_all(&temporary).unwrap();
     }
 
     #[test]
@@ -1243,7 +1248,7 @@ mod tests {
     fn backgrounds_go_on_and_off_pages_that_have_content() {
         let temporary =
             std::env::temp_dir().join(format!("snowbound-background-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temporary);
+        let _ = notebook::fs::remove_dir_all(&temporary);
         copy(
             Path::new(concat!(
                 env!("CARGO_MANIFEST_DIR"),
@@ -1329,6 +1334,6 @@ mod tests {
         if let Some(directory) = std::env::var_os("SNOWBOUND_BACKGROUND_EXPORT") {
             copy(&temporary, Path::new(&directory));
         }
-        std::fs::remove_dir_all(&temporary).unwrap();
+        notebook::fs::remove_dir_all(&temporary).unwrap();
     }
 }

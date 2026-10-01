@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+<title>Snowbound</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #f3f3f3; }
+  @media (prefers-color-scheme: dark) { html, body { background: #202022; } }
+  #page { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; outline: none; }
+  /* The text area takes keys and input methods at the caret, unseen. */
+  #input {
+    position: fixed; left: 0; top: 0; width: 1px; height: 16px; padding: 0; border: 0;
+    opacity: 0; resize: none; overflow: hidden; white-space: pre; font-size: 16px;
+    caret-color: transparent; pointer-events: none;
+  }
+  #status {
+    position: fixed; inset: 0; display: grid; place-items: center;
+    font: 15px system-ui, sans-serif; color: #666; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="page"></canvas>
+<textarea id="input" autocapitalize="off" autocomplete="off" spellcheck="false" aria-label="Page"></textarea>
+<input id="files" type="file" hidden>
+<div id="status">Loading Snowbound…</div>
+<script type="module">
+  import init, * as snowbound from "./snowbound_web.js";
+
+  // Open, metric-compatible faces for the fonts OneNote pages use, fetched beside the module.
+  const FONTS = [
+    "Carlito-Regular", "Carlito-Bold", "Carlito-Italic", "Carlito-BoldItalic",
+    "Caladea-Regular", "Caladea-Bold", "Caladea-Italic", "Caladea-BoldItalic",
+    "Arimo", "Arimo-Italic",
+    "Tinos-Regular", "Tinos-Bold", "Tinos-Italic", "Tinos-BoldItalic",
+    "Cousine-Regular", "Cousine-Bold", "Cousine-Italic", "Cousine-BoldItalic",
+  ];
+  const bytes = (url) =>
+    fetch(url).then((response) => {
+      if (!response.ok) throw new Error(`${url}: ${response.status}`);
+      return response.arrayBuffer();
+    });
+  // Servers that don't type .wasm as application/wasm can't stream it.
+  const module = fetch("snowbound_web_bg.wasm").then((response) =>
+    response.headers.get("Content-Type")?.startsWith("application/wasm")
+      ? response
+      : response.arrayBuffer(),
+  );
+  const status = document.getElementById("status");
+  // One tab at a time writes the notebooks this browser keeps; the lock lasts as long as the tab.
+  const owned = await new Promise((resolve) => {
+    if (!navigator.locks) return resolve(true);
+    navigator.locks.request("snowbound", { ifAvailable: true }, (lock) => {
+      resolve(Boolean(lock));
+      return lock && new Promise(() => {});
+    });
+  });
+  if (!owned) {
+    status.textContent = "Snowbound is open in another tab. Close it, then reload this one.";
+    throw new Error("Snowbound is open in another tab");
+  }
+  try {
+    const [, fonts] = await Promise.all([
+      init({ module_or_path: module }),
+      Promise.all(FONTS.map((name) => bytes(`fonts/${name}.ttf`).then((data) => new Uint8Array(data)))),
+    ]);
+    await snowbound.start(snowbound, fonts);
+    status.remove();
+    console.info(`Snowbound loaded in ${Math.round(performance.now())} ms`);
+  } catch (error) {
+    status.textContent = `Snowbound could not start: ${error.message ?? error}`;
+    throw error;
+  }
+</script>
+</body>
+</html>

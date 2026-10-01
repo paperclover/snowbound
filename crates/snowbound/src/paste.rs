@@ -5,7 +5,6 @@ use canvas::editor::Piece;
 use std::{
     error::Error,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 /// What Paste takes from the clipboard. Files come first, as Finder also offers their names
@@ -45,7 +44,7 @@ impl State {
                 self.respond(response);
                 for (place, (source, css)) in places.into_iter().zip(fetched) {
                     let proxy = self.proxy.clone();
-                    std::thread::spawn(move || {
+                    crate::spawn(move || {
                         let Some(bytes) = fetch(&source) else {
                             return;
                         };
@@ -78,7 +77,7 @@ impl State {
         path: &Path,
         at: Option<[f32; 2]>,
     ) -> Result<(), Box<dyn Error>> {
-        match std::fs::read(path) {
+        match notebook::fs::read(path) {
             Ok(bytes) if draw::RasterImage::measure(&bytes).is_ok() => {
                 self.insert_picture(bytes, at)
             }
@@ -315,15 +314,22 @@ fn load(source: &str) -> Option<Vec<u8>> {
             Some(drive) if cfg!(windows) => drive.to_owned(),
             _ => path,
         };
-        return std::fs::read(path).ok();
+        return notebook::fs::read(path).ok();
     }
     None
 }
 
+/// None in the browser, whose pages rarely let another site read their pictures.
+#[cfg(target_arch = "wasm32")]
+fn fetch(_: &str) -> Option<Vec<u8>> {
+    None
+}
+
 /// A web picture's bytes, on a thread of its own.
+#[cfg(not(target_arch = "wasm32"))]
 fn fetch(source: &str) -> Option<Vec<u8>> {
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(10)))
+        .timeout_global(Some(std::time::Duration::from_secs(10)))
         .build()
         .into();
     agent
@@ -512,7 +518,7 @@ fn exif_resolution(tiff: &[u8]) -> Option<[f32; 2]> {
 
 /// A bitmap from the clipboard as the PNG a page stores, without a resolution, so it takes
 /// 96 dpi as OneNote 2010 gives a pasted bitmap.
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_arch = "wasm32")))]
 pub(crate) fn bitmap(image: arboard::ImageData) -> Option<Vec<u8>> {
     png(
         [image.width, image.height].map(|side| side as u32),
@@ -667,12 +673,12 @@ mod tests {
         assert_eq!(load("relative/pic.png"), None);
         let directory =
             std::env::temp_dir().join(format!("snowbound-paste-{}", std::process::id()));
-        std::fs::create_dir_all(&directory).unwrap();
+        notebook::fs::create_dir_all(&directory).unwrap();
         let file = directory.join("a picture.png");
-        std::fs::write(&file, b"bytes").unwrap();
+        notebook::fs::write(&file, b"bytes").unwrap();
         let address = format!("file://{}", file.to_str().unwrap().replace(' ', "%20"));
         assert_eq!(load(&address).unwrap(), b"bytes");
-        std::fs::remove_dir_all(&directory).unwrap();
+        notebook::fs::remove_dir_all(&directory).unwrap();
     }
 
     fn close(size: [f32; 2], expected: [f32; 2]) -> bool {

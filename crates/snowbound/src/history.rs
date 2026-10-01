@@ -226,7 +226,7 @@ impl State {
         };
         let library = Arc::clone(&session.library);
         let proxy = self.proxy.clone();
-        std::thread::spawn(move || {
+        crate::spawn(move || {
             for path in sections(&library, &folder) {
                 if path == open {
                     continue;

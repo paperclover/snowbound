@@ -1285,7 +1285,7 @@ mod tests {
                 .flat_map(|line| &line[..size[0] as usize * 4])
                 .copied()
                 .collect();
-            let file = std::fs::File::create(path).unwrap();
+            let file = notebook::fs::File::create(path).unwrap();
             let mut encoder = png::Encoder::new(file, size[0], height);
             encoder.set_color(png::ColorType::Rgba);
             encoder.set_depth(png::BitDepth::Eight);
@@ -1458,7 +1458,7 @@ mod tests {
     fn popup_renders_each_state() {
         let output = std::env::var_os("SNOWBOUND_SYNC_RENDER").map(std::path::PathBuf::from);
         let mut gpu = output.as_ref().map(|output| {
-            std::fs::create_dir_all(output).unwrap();
+            notebook::fs::create_dir_all(output).unwrap();
             Gpu::new()
         });
         let states = states();
@@ -1479,7 +1479,7 @@ mod tests {
                 continue;
             };
             let frames = output.join(format!("frames-{theme}"));
-            std::fs::create_dir_all(&frames).unwrap();
+            notebook::fs::create_dir_all(&frames).unwrap();
             let mut ui = ui(appearance);
             let mut now = Instant::now();
             settle(
@@ -1511,7 +1511,7 @@ mod tests {
             }
             // Work offline on, an edit waiting, then off: the edit sends and nothing moves.
             let frames = output.join(format!("toggle-{theme}"));
-            std::fs::create_dir_all(&frames).unwrap();
+            notebook::fs::create_dir_all(&frames).unwrap();
             let mut ui = self::ui(appearance);
             let mut now = Instant::now();
             settle(

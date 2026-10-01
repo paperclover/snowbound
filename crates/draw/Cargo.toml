@@ -16,6 +16,8 @@ pdf = ["render", "dep:miniz_oxide", "dep:pdf-writer", "dep:subsetter"]
 
 [dependencies]
 parley.workspace = true
+# std's clock where there is one; the browser's on wasm32-unknown-unknown, whose std has none.
+web-time = "1.1"
 
 base64 = { version = "0.22.1", optional = true }
 bytemuck = { version = "1.25", features = ["derive"], optional = true }

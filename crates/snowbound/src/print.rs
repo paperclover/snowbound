@@ -343,7 +343,7 @@ impl State {
             footer: setup.footer,
         };
         let whole = matches!(setup.scope, Scope::Section | Scope::Notebook);
-        std::thread::spawn(move || {
+        crate::spawn(move || {
             let made = (|| -> Result<Vec<u8>, Box<dyn Error>> {
                 let mut open = Some(open);
                 let this = spaces
@@ -380,7 +380,9 @@ impl State {
                 Ok(canvas::print::pdf(sections, &mut engine, &layout)?)
             })();
             let done = made.and_then(|pdf| match &destination {
-                Some(path) => std::fs::write(path, pdf).map(|()| None).map_err(Into::into),
+                Some(path) => notebook::fs::write(path, pdf)
+                    .map(|()| None)
+                    .map_err(Into::into),
                 None => Ok(Some(pdf)),
             });
             let failed = if export {
@@ -468,9 +470,9 @@ pub(crate) fn spooled(pdf: &[u8], title: &str) -> Result<PathBuf, Box<dyn Error>
     let folder = platform::cache_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("Printing");
-    std::fs::create_dir_all(&folder)?;
+    notebook::fs::create_dir_all(&folder)?;
     let path = folder.join(format!("{}.pdf", file_name(title)));
-    std::fs::write(&path, pdf)?;
+    notebook::fs::write(&path, pdf)?;
     Ok(path)
 }
 
@@ -502,8 +504,8 @@ mod tests {
             PageCreation,
             op::{Edit, Op, SectionOp},
         };
-        let _ = std::fs::remove_dir_all(temporary);
-        std::fs::create_dir_all(temporary).unwrap();
+        let _ = notebook::fs::remove_dir_all(temporary);
+        notebook::fs::create_dir_all(temporary).unwrap();
         let root = temporary.join("Ordered");
         let cache = temporary.join("cache");
         let page = |title: &str| {
@@ -558,7 +560,7 @@ mod tests {
         let tabs = notebook_tabs(&library);
         library.close_kept();
         drop(library);
-        let _ = std::fs::remove_dir_all(&temporary);
+        let _ = notebook::fs::remove_dir_all(&temporary);
         let paths: Vec<&str> = tabs.iter().map(|(path, _)| path.as_str()).collect();
         assert_eq!(paths, ["A.one", "G/C.one", "B.one"]);
     }
@@ -576,7 +578,7 @@ mod tests {
             .collect();
         section.close().unwrap();
         drop(library);
-        let _ = std::fs::remove_dir_all(&temporary);
+        let _ = notebook::fs::remove_dir_all(&temporary);
         assert_eq!(pages.len(), 3);
         // A page's title as typed, which its title object holds.
         let typed = |page: &Page| {
@@ -607,8 +609,8 @@ mod tests {
         use notebook::session::Notebook;
         let temporary =
             std::env::temp_dir().join(format!("snowbound-print-bin-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temporary);
-        std::fs::create_dir_all(&temporary).unwrap();
+        let _ = notebook::fs::remove_dir_all(&temporary);
+        notebook::fs::create_dir_all(&temporary).unwrap();
         let root = temporary.join("Printed");
         let cache = temporary.join("cache");
         let page = || onestore::PageCreation::new(None, Some(""), "Author").unwrap();
@@ -622,7 +624,7 @@ mod tests {
             .into_iter()
             .map(|(path, _)| path)
             .collect();
-        std::fs::remove_dir_all(&temporary).unwrap();
+        notebook::fs::remove_dir_all(&temporary).unwrap();
         assert_eq!(paths, ["New Section 1.one", "Group/Inner.one"]);
     }
 }

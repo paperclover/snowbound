@@ -8,6 +8,7 @@ mod create;
 pub mod document;
 mod edit;
 mod files;
+#[cfg(any(unix, windows))]
 mod flush;
 mod formatting;
 mod identity;

@@ -1046,10 +1046,10 @@ mod tests {
     fn sections_and_the_notebook_take_onenotes_colours() {
         let temporary =
             std::env::temp_dir().join(format!("snowbound-colors-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temporary);
+        let _ = notebook::fs::remove_dir_all(&temporary);
         let root = temporary.join("Colors");
         let cache = temporary.join("cache");
-        std::fs::create_dir_all(&temporary).unwrap();
+        notebook::fs::create_dir_all(&temporary).unwrap();
         let page = || onestore::PageCreation::new(None, Some(""), "Author").unwrap();
         let mut notebook = Notebook::create(&root, &cache, Notebook::NEW_COLOR, &page()).unwrap();
         let named: Vec<(Option<u32>, &str)> = (SECTION_COLORS.iter())
@@ -1080,14 +1080,14 @@ mod tests {
         assert_eq!(colors, expected);
         if let Some(directory) = std::env::var_os("SNOWBOUND_SECTION_COLOR_EXPORT") {
             let directory = std::path::Path::new(&directory);
-            std::fs::create_dir_all(directory).unwrap();
-            for entry in std::fs::read_dir(&root).unwrap() {
+            notebook::fs::create_dir_all(directory).unwrap();
+            for entry in notebook::fs::read_dir(&root).unwrap() {
                 let entry = entry.unwrap();
                 if entry.file_type().unwrap().is_file() {
-                    std::fs::copy(entry.path(), directory.join(entry.file_name())).unwrap();
+                    notebook::fs::copy(entry.path(), directory.join(entry.file_name())).unwrap();
                 }
             }
         }
-        std::fs::remove_dir_all(&temporary).unwrap();
+        notebook::fs::remove_dir_all(&temporary).unwrap();
     }
 }

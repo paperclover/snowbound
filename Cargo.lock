@@ -664,6 +664,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "skrifa",
+ "web-time",
  "wgpu",
 ]
 
@@ -1010,6 +1011,7 @@ dependencies = [
  "roxmltree",
  "subsetter",
  "swash",
+ "web-time",
  "wgpu",
  "windows",
 ]
@@ -1316,9 +1318,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 6.0.0",
  "rand_core 0.10.1",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2079,9 +2083,11 @@ dependencies = [
  "cab",
  "getrandom 0.4.3",
  "hmac",
+ "js-sys",
  "libc",
  "nix",
  "onestore",
+ "rsqlite-vfs",
  "rusqlite",
  "serde",
  "serde_json",
@@ -2090,6 +2096,9 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-time",
  "windows-sys 0.61.2",
  "zeroize",
 ]
@@ -2471,6 +2480,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "subtle",
+ "web-time",
  "zeroize",
 ]
 
@@ -3500,7 +3510,9 @@ dependencies = [
  "canvas",
  "draw",
  "fontique",
+ "getrandom 0.4.3",
  "image",
+ "js-sys",
  "libc",
  "notebook",
  "objc2 0.5.2",
@@ -3519,9 +3531,13 @@ dependencies = [
  "ui",
  "unicode_names2",
  "ureq",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",
+ "web-sys",
+ "web-time",
  "wgpu",
  "windows-sys 0.61.2",
  "winit",
@@ -3923,6 +3939,7 @@ dependencies = [
  "parley",
  "png",
  "pollster",
+ "web-time",
  "wgpu",
  "winit",
 ]
@@ -4377,6 +4394,7 @@ dependencies = [
  "thiserror 2.0.20",
  "wgpu-core-deps-apple",
  "wgpu-core-deps-emscripten",
+ "wgpu-core-deps-wasm",
  "wgpu-core-deps-windows-linux-android",
  "wgpu-hal",
  "wgpu-naga-bridge",
@@ -4397,6 +4415,15 @@ name = "wgpu-core-deps-emscripten"
 version = "30.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d98b86cf4abf524a902dd35f18ca6a3f08fc2ae9847c8f10b48e30491b1f0b86"
+dependencies = [
+ "wgpu-hal",
+]
+
+[[package]]
+name = "wgpu-core-deps-wasm"
+version = "30.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d260ca2ca8adc654f513a869bf3cac0b47f5b8d3f87803d6942015f8de597aae"
 dependencies = [
  "wgpu-hal",
 ]

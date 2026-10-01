@@ -126,7 +126,7 @@ impl ColorScheme {
 impl Settings {
     /// The settings at `path`; missing or unreadable ones are the defaults, reported.
     pub fn load(path: &Path) -> Self {
-        match std::fs::read(path) {
+        match notebook::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
                 eprintln!("Ignoring the settings in {}: {error}", path.display());
                 Self::default()
@@ -142,11 +142,11 @@ impl Settings {
     /// Replaces the file at `path` whole, so a crash leaves the old settings or the new.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         if let Some(folder) = path.parent() {
-            std::fs::create_dir_all(folder)?;
+            notebook::fs::create_dir_all(folder)?;
         }
         let partial = path.with_extension("partial");
-        std::fs::write(&partial, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(partial, path)
+        notebook::fs::write(&partial, serde_json::to_vec_pretty(self)?)?;
+        notebook::fs::rename(partial, path)
     }
 }
 
@@ -277,7 +277,7 @@ mod tests {
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
-        std::fs::write(&path, br#"{"sidebar": true, "unknown": 1}"#).unwrap();
+        notebook::fs::write(&path, br#"{"sidebar": true, "unknown": 1}"#).unwrap();
         assert_eq!(
             Settings::load(&path),
             Settings {
@@ -286,10 +286,10 @@ mod tests {
             }
         );
         // A picked "No color" stays picked; what was never picked keeps Office's default.
-        std::fs::write(&path, br#"{"toolbar": {"highlight": null}}"#).unwrap();
+        notebook::fs::write(&path, br#"{"toolbar": {"highlight": null}}"#).unwrap();
         let toolbar = Settings::load(&path).toolbar;
         assert_eq!(toolbar.highlight, None);
         assert_eq!(toolbar.font_color, Toolbar::default().font_color);
-        std::fs::remove_dir_all(&directory).unwrap();
+        notebook::fs::remove_dir_all(&directory).unwrap();
     }
 }

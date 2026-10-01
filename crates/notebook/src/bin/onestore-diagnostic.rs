@@ -1,3 +1,4 @@
+use notebook::fs;
 use onestore::{
     Arena, ExGuid, Section, TextAttribute,
     document::{Format, Layout},
@@ -9,7 +10,7 @@ use onestore::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    env, fs,
+    env,
     io::{self, Write},
 };
 
@@ -96,7 +97,7 @@ fn run(args: &[std::ffi::OsString]) -> Result<Value, Box<dyn std::error::Error>>
         return Err("Usage: onestore-diagnostic catalog ROOT | snapshot FILE NEW_SNAPSHOT | check SNAPSHOT - | commit FILE SNAPSHOT; edits arrive as JSON on stdin".into());
     }
     if args[0] == "snapshot" {
-        let bytes = onestore::read_file(&args[1])?;
+        let bytes = fs::read_file(&args[1])?;
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -199,7 +200,7 @@ fn run(args: &[std::ffi::OsString]) -> Result<Value, Box<dyn std::error::Error>>
     let Some(transaction) = transaction else {
         return Ok(json!({"ok": true, "state": "Unchanged"}));
     };
-    Ok(match transaction.commit_file(&args[1]) {
+    Ok(match fs::commit_file(&transaction, &args[1]) {
         Ok(()) => json!({"ok": true, "state": "Committed"}),
         Err(error) => json!({"ok": false, "state": format!("{:?}", error.state),
             "kind": format!("{:?}", error.error.kind()), "error": error.error.to_string()}),

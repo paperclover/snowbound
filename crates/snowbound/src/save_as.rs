@@ -187,7 +187,7 @@ impl State {
             .into_iter())
         .find(|tab| tab.path == section)
         .and_then(|tab| tab.color);
-        std::thread::spawn(move || {
+        crate::spawn(move || {
             let written = (|| -> Result<(), Box<dyn Error>> {
                 let image = |path: &str| {
                     let (_, replica, _) = open.as_ref().filter(|(open, ..)| open == path)?;
@@ -212,7 +212,7 @@ impl State {
                         package::pack(package::notebook_files(&notebook, image)?)?
                     }
                 };
-                std::fs::write(&path, bytes)?;
+                notebook::fs::write(&path, bytes)?;
                 Ok(())
             })();
             let written = written.map_err(|error| error.to_string());

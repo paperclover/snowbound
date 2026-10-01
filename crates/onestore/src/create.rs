@@ -5,7 +5,7 @@ use crate::{
     write::{append, append_list, fresh_guid, node},
 };
 use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use web_time::{SystemTime, UNIX_EPOCH};
 
 type Result<T> = std::result::Result<T, Error>;
 

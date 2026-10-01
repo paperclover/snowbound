@@ -6,10 +6,8 @@ use crate::gpu::Paper;
 use draw::RasterImage;
 use resvg::{tiny_skia, usvg};
 use sha2::{Digest, Sha256};
-use std::{
-    task::Waker,
-    time::{Duration, Instant},
-};
+use std::{task::Waker, time::Duration};
+use web_time::Instant;
 
 /// One of OneNote 2010's page templates: its art recreated for white paper in `#rrggbb`
 /// colours over a view box the size in pixels of the picture OneNote stores, that picture's

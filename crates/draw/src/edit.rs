@@ -5,10 +5,8 @@ use parley::{
     Affinity, Brush, Layout,
     editing::{Cursor, Selection},
 };
-use std::{
-    collections::BTreeSet,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeSet, time::Duration};
+use web_time::Instant;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Key {

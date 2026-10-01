@@ -35,8 +35,8 @@ impl State {
     /// Opens the guide in the user's documents, copying it there first unless it is there.
     pub(crate) fn open_guide(&mut self) -> Result<(), Box<dyn Error>> {
         let documents = platform::documents_dir().ok_or("There is no Documents folder")?;
-        let folder = std::path::absolute(documents.join(NAME))?;
-        if !folder.exists() {
+        let folder = notebook::fs::absolute(documents.join(NAME))?;
+        if notebook::fs::metadata(&folder).is_err() {
             copy(&folder, &self.cache)?;
         }
         self.open_notebook(folder.to_string_lossy().into_owned(), None);
@@ -48,12 +48,12 @@ impl State {
 /// short never passes for the guide.
 fn copy(folder: &Path, cache: &Path) -> Result<(), Box<dyn Error>> {
     let partial = folder.with_file_name(format!("{NAME}.partial"));
-    if partial.exists() {
-        std::fs::remove_dir_all(&partial)?;
+    if notebook::fs::metadata(&partial).is_ok() {
+        notebook::fs::remove_dir_all(&partial)?;
     }
-    std::fs::create_dir_all(&partial)?;
+    notebook::fs::create_dir_all(&partial)?;
     for (name, bytes) in FILES {
-        std::fs::write(partial.join(name), bytes)?;
+        notebook::fs::write(partial.join(name), bytes)?;
     }
     // The snowflake tag's art, kept in the notebook as Customize Tags keeps it.
     Notebook::open(&partial, cache)?.map_tag_art(
@@ -62,7 +62,7 @@ fn copy(folder: &Path, cache: &Path) -> Result<(), Box<dyn Error>> {
         include_bytes!("../assets/tags/snowflake.svg"),
         "svg",
     )?;
-    std::fs::rename(&partial, folder)?;
+    notebook::fs::rename(&partial, folder)?;
     Ok(())
 }
 
@@ -75,7 +75,7 @@ mod tests {
     #[test]
     fn the_guide_copies_whole() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/guide-notebook");
-        let mut committed: Vec<String> = std::fs::read_dir(root.join(NAME))
+        let mut committed: Vec<String> = notebook::fs::read_dir(root.join(NAME))
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|name| !name.starts_with('.'))
@@ -87,7 +87,7 @@ mod tests {
 
         let temporary =
             std::env::temp_dir().join(format!("snowbound-guide-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temporary);
+        let _ = notebook::fs::remove_dir_all(&temporary);
         let folder = temporary.join(NAME);
         copy(&folder, &temporary.join("cache")).unwrap();
         let notebook = Notebook::open(&folder, temporary.join("cache")).unwrap();
@@ -99,8 +99,8 @@ mod tests {
                 .collect::<Vec<_>>(),
             [("Snowflake", 34)]
         );
-        let committed = std::fs::read_to_string(root.join(NAME).join(".snowbound/tags.json"));
+        let committed = notebook::fs::read_to_string(root.join(NAME).join(".snowbound/tags.json"));
         assert!(committed.unwrap().contains(&art[0].art));
-        std::fs::remove_dir_all(&temporary).unwrap();
+        notebook::fs::remove_dir_all(&temporary).unwrap();
     }
 }

@@ -51,8 +51,8 @@ fn hex(identity: [u8; 16]) -> String {
 }
 
 fn now() -> u32 {
-    let unix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let unix = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());
     u32::try_from(unix.saturating_sub(TIME32)).unwrap_or(u32::MAX)
 }
@@ -61,7 +61,7 @@ impl Reads {
     /// What the cache folder `cache` keeps.
     pub fn load(cache: &Path) -> Self {
         let file = cache.join("read.json");
-        let reads: Self = (std::fs::read(&file).ok())
+        let reads: Self = (notebook::fs::read(&file).ok())
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         Self { file, ..reads }
@@ -71,8 +71,8 @@ impl Reads {
         let partial = self.file.with_extension("partial");
         let saved = serde_json::to_vec(self)
             .map_err(std::io::Error::from)
-            .and_then(|bytes| std::fs::write(&partial, bytes))
-            .and_then(|()| std::fs::rename(&partial, &self.file));
+            .and_then(|bytes| notebook::fs::write(&partial, bytes))
+            .and_then(|()| notebook::fs::rename(&partial, &self.file));
         if let Err(error) = saved {
             eprintln!("Keeping what was read failed: {error}");
         }
@@ -254,7 +254,7 @@ impl State {
     /// pages are read on a thread of their own, those changed since unread.
     pub(crate) fn sections_changed(&self, library: &Arc<Library>, paths: Vec<String>) {
         let (library, proxy) = (Arc::clone(library), self.proxy.clone());
-        std::thread::spawn(move || {
+        crate::spawn(move || {
             let Ok(Some(notebook)) = &library.notebook else {
                 return;
             };
@@ -387,7 +387,7 @@ mod tests {
     #[test]
     fn pages_changed_elsewhere_stay_unread_until_read() {
         let folder = std::env::temp_dir().join(format!("snowbound-unread-{}", std::process::id()));
-        std::fs::create_dir_all(&folder).unwrap();
+        notebook::fs::create_dir_all(&folder).unwrap();
         let (notebook, section) = ("/notebook", [3; 16]);
         let mut reads = Reads::load(&folder);
         let known = reads.section_mut(notebook, section).read;
@@ -426,6 +426,6 @@ mod tests {
         );
         reads.notebooks.get_mut(notebook).unwrap().hidden = true;
         assert!(reads.pages(notebook, section).is_none() && !reads.shown(notebook));
-        std::fs::remove_dir_all(&folder).unwrap();
+        notebook::fs::remove_dir_all(&folder).unwrap();
     }
 }

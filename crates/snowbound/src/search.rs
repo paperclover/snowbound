@@ -17,9 +17,10 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
-    time::{Duration, Instant, SystemTime},
+    time::{Duration, SystemTime},
 };
 use ui::{Anchor, Axis, Flags, Id, Spec, Ui, children, fill, fit, px};
+use web_time::Instant;
 use winit::keyboard::NamedKey;
 
 /// Where a search looks, as OneNote's scope menu offers it.
@@ -116,6 +117,10 @@ pub struct Search {
     version: Arc<AtomicU64>,
     pub(crate) busy: Arc<AtomicBool>,
     jobs: mpsc::Sender<Job>,
+    /// The index's own state, which the browser, having no thread for it, keeps here to run
+    /// the jobs sent after each frame.
+    #[cfg(target_arch = "wasm32")]
+    indexing: Arc<Mutex<Indexing>>,
     pub(crate) found: Vec<Found>,
     found_for: Option<(Query, Scope, u64, String)>,
     pub(crate) selected: Option<u64>,
@@ -136,10 +141,18 @@ impl Search {
         let index = Arc::new(Mutex::new(Index::default()));
         let version = Arc::new(AtomicU64::new(0));
         let busy = Arc::new(AtomicBool::new(false));
-        let shared = (Arc::clone(&index), Arc::clone(&version), Arc::clone(&busy));
+        let indexing = Indexing {
+            jobs: receiver,
+            shared: (Arc::clone(&index), Arc::clone(&version), Arc::clone(&busy)),
+            redraw,
+            stamps: HashMap::new(),
+        };
+        #[cfg(target_arch = "wasm32")]
+        let indexing = Arc::new(Mutex::new(indexing));
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::Builder::new()
             .name("search-index".into())
-            .spawn(move || run(receiver, shared, redraw))
+            .spawn(move || indexing.run())
             .expect("the index thread starts");
         Self {
             query: String::new(),
@@ -152,6 +165,8 @@ impl Search {
             version,
             busy,
             jobs,
+            #[cfg(target_arch = "wasm32")]
+            indexing,
             found: Vec::new(),
             found_for: None,
             selected: None,
@@ -166,11 +181,26 @@ impl Search {
     /// Asks the index to read `spaces` of the open section again, as edits or another
     /// writer changed them, and its page list.
     pub fn changed(&self, key: String, replica: &Arc<Replica>, spaces: Vec<ExGuid>) {
-        let _ = self.jobs.send(Job::Pages {
+        self.send(Job::Pages {
             key,
             replica: Arc::downgrade(replica),
             spaces,
         });
+    }
+
+    fn send(&self, job: Job) {
+        let _ = self.jobs.send(job);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let indexing = Arc::clone(&self.indexing);
+            crate::spawn(move || {
+                if let Ok(mut indexing) = indexing.lock() {
+                    while let Ok(first) = indexing.jobs.try_recv() {
+                        indexing.answer(first);
+                    }
+                }
+            });
+        }
     }
 
     /// Pages of section `key` among the results, which the page list marks.
@@ -195,31 +225,45 @@ impl Search {
 type Stamp = Option<(u64, SystemTime)>;
 
 fn stamp(file: &Path) -> Stamp {
-    let metadata = std::fs::metadata(file).ok()?;
+    let metadata = notebook::fs::metadata(file).ok()?;
     Some((metadata.len(), metadata.modified().ok()?))
 }
 
 /// Now in Time32, seconds since 1980, as page modification times are kept.
 pub(crate) fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
+    web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map_or(0, |since| since.as_secs().saturating_sub(315_532_800))
 }
 
-/// The index thread: answers jobs, the newest notebooks first, then page changes, and
-/// wakes the window once the index changed.
-fn run(
+/// The index thread's jobs and what it keeps between them.
+struct Indexing {
     jobs: mpsc::Receiver<Job>,
-    (index, version, busy): (Arc<Mutex<Index>>, Arc<AtomicU64>, Arc<AtomicBool>),
+    shared: (Arc<Mutex<Index>>, Arc<AtomicU64>, Arc<AtomicBool>),
     redraw: std::task::Waker,
-) {
-    let mut stamps: HashMap<String, Stamp> = HashMap::new();
-    while let Ok(first) = jobs.recv() {
-        busy.store(true, Ordering::Relaxed);
-        // Typing sends a job a keystroke; a pause gathers them into one read.
-        if matches!(first, Job::Pages { .. }) {
-            std::thread::sleep(SETTLE);
+    stamps: HashMap<String, Stamp>,
+}
+
+impl Indexing {
+    /// The index thread: answers jobs, gathering those typing sends a keystroke apart.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn run(mut self) {
+        while let Ok(first) = self.jobs.recv() {
+            self.shared.2.store(true, Ordering::Relaxed);
+            // Typing sends a job a keystroke; a pause gathers them into one read.
+            if matches!(first, Job::Pages { .. }) {
+                std::thread::sleep(SETTLE);
+            }
+            self.answer(first);
         }
+    }
+
+    /// Answers `first` and the jobs waiting behind it, the newest notebooks first, then page
+    /// changes, and wakes the window once the index changed.
+    fn answer(&mut self, first: Job) {
+        let (index, version, busy) = &self.shared;
+        let (jobs, stamps) = (&self.jobs, &mut self.stamps);
+        busy.store(true, Ordering::Relaxed);
         let mut notebooks = None;
         let mut changed = HashSet::new();
         let mut pages: HashMap<String, (Weak<Replica>, HashSet<ExGuid>)> = HashMap::new();
@@ -246,25 +290,18 @@ fn run(
         }
         let start = Instant::now();
         if let Some((libraries, open)) = notebooks {
-            sync(
-                &index,
-                &version,
-                &mut stamps,
-                &libraries,
-                open.as_ref(),
-                &changed,
-            );
+            sync(index, version, stamps, &libraries, open.as_ref(), &changed);
             lap("index notebooks", start);
         }
         for (key, (replica, spaces)) in pages {
-            if let Err(error) = reread(&index, &key, &replica, &spaces) {
+            if let Err(error) = reread(index, &key, &replica, &spaces) {
                 eprintln!("Cannot index the open section: {error}");
             }
             version.fetch_add(1, Ordering::Relaxed);
         }
         lap("index", start);
         busy.store(false, Ordering::Relaxed);
-        redraw.wake_by_ref();
+        self.redraw.wake_by_ref();
     }
 }
 
@@ -329,7 +366,7 @@ fn sync(
             let read = || -> Result<Vec<Entry>, Box<dyn Error>> {
                 let bytes = match notebook {
                     Some(notebook) => notebook.read_section(&path)?,
-                    None => onestore::read_file(&file)?,
+                    None => notebook::fs::read_file(&file)?,
                 };
                 let stored = match library.unlocked(&path) {
                     Some(key) => notebook::session::stored_pages_unlocked(&bytes, &key)?,
@@ -494,7 +531,7 @@ impl State {
             return;
         }
         self.search.synced = identity;
-        let _ = self.search.jobs.send(Job::Notebooks {
+        self.search.send(Job::Notebooks {
             libraries: self.notebooks.clone(),
             open,
             changed,

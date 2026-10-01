@@ -1,15 +1,14 @@
 use super::*;
+use crate::task::{self, JoinHandle};
 use std::{
     collections::hash_map::RandomState,
     hash::BuildHasher,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc::{self, SyncSender},
     },
-    thread::{self, JoinHandle},
-    time::Instant,
 };
+use web_time::Instant;
 
 pub(super) struct Signal {
     pub(crate) stopped: AtomicBool,
@@ -22,7 +21,7 @@ pub(super) struct Signal {
     /// waits for that instead of checking the file on its own (`Background::hold`).
     pub(crate) watched: AtomicBool,
     pause: Mutex<Pause>,
-    sender: SyncSender<()>,
+    sender: task::Sender<()>,
 }
 
 /// How local edits wait before they publish (`SyncWorker::set_pause`).
@@ -37,8 +36,8 @@ struct Pause {
 const LONGEST: Duration = Duration::from_secs(30);
 
 impl Signal {
-    pub(crate) fn new() -> (Arc<Self>, mpsc::Receiver<()>) {
-        let (sender, receiver) = mpsc::sync_channel(1);
+    pub(crate) fn new() -> (Arc<Self>, task::Receiver<()>) {
+        let (sender, receiver) = task::channel();
         let signal = Self {
             stopped: AtomicBool::new(false),
             offline: AtomicBool::new(false),
@@ -123,9 +122,12 @@ impl SyncWorker {
     pub fn stop(mut self) -> Result<()> {
         self.signal.stopped.store(true, Ordering::Release);
         self.signal.wake();
-        self.thread
-            .take()
-            .expect("Worker owns its thread")
+        let thread = self.thread.take().expect("Worker owns its thread");
+        // In the browser no step is in flight outside the worker's own callback.
+        #[cfg(target_arch = "wasm32")]
+        return thread.finished().unwrap_or(Ok(()));
+        #[cfg(not(target_arch = "wasm32"))]
+        thread
             .join()
             .map_err(|_| io::Error::other("Synchronization worker panicked"))?
     }
@@ -176,118 +178,115 @@ impl Replica {
         let (signal, receiver) = Signal::new();
         let replica = Arc::clone(self);
         let worker_signal = Arc::clone(&signal);
-        let thread = thread::Builder::new()
-            .name("onestore-sync".into())
-            .spawn(move || {
-                let mut remote: Option<R> = None;
-                let jitter = RandomState::new();
-                let mut contention = 0_u32;
-                // The first step, and the first after a failure, always runs, so `observe`
-                // hears that the remote is reachable and what state the queue is in.
-                let mut reported = false;
-                // With nothing to do: a watched worker waits for the watch, any other looks
-                // again after `interval`.
-                let rest = || {
-                    if worker_signal.watched.load(Ordering::Acquire) {
-                        let _ = receiver.recv();
-                    } else {
-                        let _ = receiver.recv_timeout(interval);
-                    }
-                };
-                while !worker_signal.stopped.load(Ordering::Acquire) {
-                    if worker_signal.offline.load(Ordering::Acquire)
-                        && !worker_signal.requested.load(Ordering::Acquire)
-                    {
-                        remote = None;
-                        reported = false;
-                        let _ = receiver.recv();
-                        continue;
-                    }
-                    if !worker_signal.requested.load(Ordering::Acquire)
-                        && let Some(wait) = worker_signal.paused()
-                    {
-                        let _ = receiver.recv_timeout(wait);
-                        continue;
-                    }
-                    if let Ok(mut pause) = worker_signal.pause.lock() {
-                        // The step publishes what waits; edits from now on wait anew.
-                        pause.waiting = None;
-                    }
-                    let result = match remote.as_mut() {
-                        Some(remote) => {
-                            if reported && replica.settled(remote).unwrap_or(false) {
-                                worker_signal.requested.store(false, Ordering::Release);
-                                worker_signal.synced.store(crate::now(), Ordering::Release);
-                                rest();
-                                continue;
-                            }
-                            let result = replica.sync_once(remote);
-                            reported = result.is_ok();
-                            result
-                        }
-                        None => match connect() {
-                            Ok(connected) => {
-                                remote = Some(connected);
-                                continue;
-                            }
-                            Err(error) => Err(Error::RemoteIo(error)),
-                        },
-                    };
-                    if result.is_ok() {
-                        worker_signal.synced.store(crate::now(), Ordering::Release);
-                    }
-                    observe(&result);
-                    let idle = matches!(result, Ok(Synced { edit: None, .. }));
-                    match result {
-                        Ok(Synced {
-                            edit: Some((_, EditStatus::Published { .. })),
-                            ..
-                        }) => {
-                            contention = 0;
+        let thread = task::spawn("onestore-sync", move || async move {
+            let mut remote: Option<R> = None;
+            let jitter = RandomState::new();
+            let mut contention = 0_u32;
+            // The first step, and the first after a failure, always runs, so `observe`
+            // hears that the remote is reachable and what state the queue is in.
+            let mut reported = false;
+            // With nothing to do: a watched worker waits for the watch, any other looks
+            // again after `interval`.
+            let rest = || {
+                task::wait(
+                    &receiver,
+                    (!worker_signal.watched.load(Ordering::Acquire)).then_some(interval),
+                )
+            };
+            while !worker_signal.stopped.load(Ordering::Acquire) {
+                if worker_signal.offline.load(Ordering::Acquire)
+                    && !worker_signal.requested.load(Ordering::Acquire)
+                {
+                    remote = None;
+                    reported = false;
+                    task::wait(&receiver, None).await;
+                    continue;
+                }
+                if !worker_signal.requested.load(Ordering::Acquire)
+                    && let Some(wait) = worker_signal.paused()
+                {
+                    task::wait(&receiver, Some(wait)).await;
+                    continue;
+                }
+                if let Ok(mut pause) = worker_signal.pause.lock() {
+                    // The step publishes what waits; edits from now on wait anew.
+                    pause.waiting = None;
+                }
+                let result = match remote.as_mut() {
+                    Some(remote) => {
+                        if reported && replica.settled(remote).unwrap_or(false) {
+                            worker_signal.requested.store(false, Ordering::Release);
+                            worker_signal.synced.store(crate::now(), Ordering::Release);
+                            rest().await;
                             continue;
                         }
-                        Ok(Synced { edit: None, .. }) => contention = 0,
-                        Ok(_) => {}
-                        Err(Error::Remote(onestore::CommitError {
-                            state: onestore::CommitState::NotCommitted,
-                            ref error,
-                        })) if matches!(
+                        let result = replica.sync_once(remote);
+                        reported = result.is_ok();
+                        result
+                    }
+                    None => match connect() {
+                        Ok(connected) => {
+                            remote = Some(connected);
+                            continue;
+                        }
+                        Err(error) => Err(Error::RemoteIo(error)),
+                    },
+                };
+                if result.is_ok() {
+                    worker_signal.synced.store(crate::now(), Ordering::Release);
+                }
+                observe(&result);
+                let idle = matches!(result, Ok(Synced { edit: None, .. }));
+                match result {
+                    Ok(Synced {
+                        edit: Some((_, EditStatus::Published { .. })),
+                        ..
+                    }) => {
+                        contention = 0;
+                        continue;
+                    }
+                    Ok(Synced { edit: None, .. }) => contention = 0,
+                    Ok(_) => {}
+                    Err(Error::Remote(onestore::CommitError {
+                        state: onestore::CommitState::NotCommitted,
+                        ref error,
+                    })) if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::ResourceBusy
+                    ) =>
+                    {
+                        contention = contention.saturating_add(1);
+                        let ceiling = (50_u64 << contention.min(5)).min(1000);
+                        let until = Instant::now()
+                            + Duration::from_millis(jitter.hash_one(contention) % ceiling);
+                        // Local wakes must not keep competing writers in the same retry phase.
+                        while !worker_signal.stopped.load(Ordering::Acquire) {
+                            let Some(remaining) = until.checked_duration_since(Instant::now())
+                            else {
+                                break;
+                            };
+                            task::wait(&receiver, Some(remaining)).await;
+                        }
+                        continue;
+                    }
+                    Err(Error::RemoteIo(ref error))
+                        if matches!(
                             error.kind(),
                             io::ErrorKind::WouldBlock | io::ErrorKind::ResourceBusy
-                        ) =>
-                        {
-                            contention = contention.saturating_add(1);
-                            let ceiling = (50_u64 << contention.min(5)).min(1000);
-                            let until = Instant::now()
-                                + Duration::from_millis(jitter.hash_one(contention) % ceiling);
-                            // Local wakes must not keep competing writers in the same retry phase.
-                            while !worker_signal.stopped.load(Ordering::Acquire) {
-                                let Some(remaining) = until.checked_duration_since(Instant::now())
-                                else {
-                                    break;
-                                };
-                                let _ = receiver.recv_timeout(remaining);
-                            }
-                            continue;
-                        }
-                        Err(Error::RemoteIo(ref error))
-                            if matches!(
-                                error.kind(),
-                                io::ErrorKind::WouldBlock | io::ErrorKind::ResourceBusy
-                            ) => {}
-                        Err(Error::RemoteIo(_) | Error::Remote(_)) => remote = None,
-                        Err(Error::Io(ref error)) if error.kind() == io::ErrorKind::WouldBlock => {}
-                        Err(error) => return Err(error),
-                    }
-                    worker_signal.requested.store(false, Ordering::Release);
-                    if idle {
-                        rest();
-                    } else if !worker_signal.stopped.load(Ordering::Acquire) {
-                        let _ = receiver.recv_timeout(interval);
-                    }
+                        ) => {}
+                    Err(Error::RemoteIo(_) | Error::Remote(_)) => remote = None,
+                    Err(Error::Io(ref error)) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error),
                 }
-                Ok(())
-            })?;
+                worker_signal.requested.store(false, Ordering::Release);
+                if idle {
+                    rest().await;
+                } else if !worker_signal.stopped.load(Ordering::Acquire) {
+                    task::wait(&receiver, Some(interval)).await;
+                }
+            }
+            Ok(())
+        })?;
         *owner = Arc::downgrade(&signal);
         Ok(SyncWorker {
             signal,
