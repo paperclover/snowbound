@@ -62,6 +62,7 @@ mod spell;
 #[cfg_attr(not(feature = "wgpu"), path = "surface_gl.rs")]
 #[cfg_attr(windows, path = "surface_windows.rs")]
 mod surface;
+mod symbol;
 mod sync;
 mod tags;
 mod templates;
@@ -705,6 +706,7 @@ struct State {
     /// The Link dialog's fields while it is open.
     link: Option<link::LinkDialog>,
     properties: Option<properties::Properties>,
+    symbols: Option<symbol::Symbols>,
     /// Save As while it is open.
     save_as: Option<save_as::Dialog>,
     /// Unpack Notebook while it is open.
@@ -1077,6 +1079,7 @@ impl State {
             after_open: None,
             link: None,
             properties: None,
+            symbols: None,
             save_as: None,
             unpacking: None,
             reads,
@@ -1251,6 +1254,7 @@ impl State {
         self.new_icloud_dialog();
         self.link_dialog()?;
         self.properties_dialog();
+        self.symbols_dialog();
         self.save_as_dialog();
         self.unpack_dialog();
         self.password_dialog()?;
@@ -2501,7 +2505,6 @@ impl State {
             Cmd::InsertSpace,
             Cmd::Time,
             Cmd::DateTime,
-            Cmd::Symbol,
             Cmd::RecordAudio,
             Cmd::RecordVideo,
         ]
@@ -2537,6 +2540,25 @@ impl State {
                 for id in inserted {
                     choice = tool(ui, id, status_of(id)).or(choice);
                 }
+                if status_of(Cmd::Symbol).enabled {
+                    let anchor = ui::shell::menu_button(
+                        ui,
+                        "symbol",
+                        art::SYMBOL,
+                        None,
+                        toolbar_popup("symbol"),
+                    );
+                    tip(ui, Cmd::Symbol);
+                    let symbols = symbol::recent(&pens.symbols);
+                    if let Some(pick) =
+                        symbol::gallery(ui, toolbar_popup("symbol"), anchor, &symbols)
+                    {
+                        choice = Some(Choice::Symbol(pick));
+                    }
+                } else {
+                    ui::shell::unavailable(ui, "symbol", art::SYMBOL, text, true);
+                    tip(ui, Cmd::Symbol);
+                }
                 let mut entries = more.clone();
                 entries.push(Rule);
                 entries.extend(drawing.clone());
@@ -2552,6 +2574,7 @@ impl State {
             |ui| {
                 let mut entries = vec![Open("table", Cmd::Table)];
                 entries.extend(inserted.map(Run));
+                entries.push(Open("symbol", Cmd::Symbol));
                 entries.push(Rule);
                 entries.extend(more.iter().copied());
                 entries.push(Rule);

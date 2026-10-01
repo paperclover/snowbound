@@ -963,7 +963,7 @@ pub fn table_picker(ui: &mut Ui, id: Id, anchor: Anchor, size: [usize; 2]) -> Op
     None
 }
 
-/// A gallery's run of `cells` under `heading`, in rows of `columns` cells `size` large.
+/// A gallery's run of `cells` under `heading`, if any, in rows of `columns` cells `size` large.
 #[derive(Clone, Copy, Debug)]
 pub struct Group<'a> {
     pub heading: &'a str,
@@ -1026,18 +1026,20 @@ pub fn gallery(
     );
     let mut index = 0;
     for (number, group) in groups.iter().enumerate() {
-        ui.leaf(
-            ("heading", number),
-            Spec {
-                size: [fill(), px(MENU_ROW)],
-                text: Some(group.heading),
-                font_size: Some(theme.font_size - 2.0),
-                bold: true,
-                color: Some(theme.text_dim),
-                pad: [PAD, 0.0],
-                ..Spec::default()
-            },
-        );
+        if !group.heading.is_empty() {
+            ui.leaf(
+                ("heading", number),
+                Spec {
+                    size: [fill(), px(MENU_ROW)],
+                    text: Some(group.heading),
+                    font_size: Some(theme.font_size - 2.0),
+                    bold: true,
+                    color: Some(theme.text_dim),
+                    pad: [PAD, 0.0],
+                    ..Spec::default()
+                },
+            );
+        }
         for row in 0..group.cells.div_ceil(group.columns) {
             ui.open(
                 ("row", number, row),

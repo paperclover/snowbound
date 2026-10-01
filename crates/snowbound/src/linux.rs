@@ -1176,13 +1176,6 @@ pub fn open_file(path: &std::path::Path) {
     reveal(path);
 }
 
-/// Opens GNOME's character map, whose picks the user copies in.
-pub fn character_palette() {
-    if let Err(error) = Command::new("gnome-characters").spawn() {
-        eprintln!("Cannot open the character map: {error}");
-    }
-}
-
 /// Opens `target`, a folder or a link's URL, with the desktop's handler.
 pub fn reveal(target: impl AsRef<std::ffi::OsStr>) {
     let target = target.as_ref();

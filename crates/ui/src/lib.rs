@@ -1297,6 +1297,11 @@ impl Ui {
         self.texts.preview_font(data, family);
     }
 
+    /// Whether the interface's fonts draw every glyph of `text`.
+    pub fn shows(&mut self, text: &str) -> bool {
+        self.texts.shows(text, self.frame)
+    }
+
     /// The size of `text` as a label, in logical pixels.
     pub fn measure(&mut self, text: &str) -> [f32; 2] {
         self.texts

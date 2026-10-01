@@ -857,12 +857,6 @@ pub fn clip_screen(proxy: EventLoopProxy<crate::UserEvent>) {
     });
 }
 
-/// Shows the system's character palette, whose picks arrive as inserted text.
-pub fn character_palette() {
-    let mtm = MainThreadMarker::new().expect("AppKit belongs to the main thread");
-    NSApplication::sharedApplication(mtm).orderFrontCharacterPalette(None);
-}
-
 /// Tells the user something they asked for could not be done: `message`, then what to do.
 pub fn alert(message: &str, detail: &str) {
     let mtm = MainThreadMarker::new().expect("Window events run on the main thread");

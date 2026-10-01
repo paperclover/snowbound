@@ -33,6 +33,8 @@ ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 ring = "0.17"
 # Clears passwords typed into the password dialogs.
 zeroize = "1.9.0"
+# Names characters in More Symbols, Insert Symbol's dialog.
+unicode_names2 = "4.0.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"

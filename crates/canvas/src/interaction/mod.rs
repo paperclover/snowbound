@@ -1470,6 +1470,15 @@ impl PageView {
         self.commit_text(text)
     }
 
+    /// Insert Symbol: see [`CanvasEditor::insert_symbol`].
+    pub fn insert_symbol(&mut self, symbol: char) -> Result<Response> {
+        if self.edits_wait() {
+            return Ok(Response::default());
+        }
+        self.editor.insert_symbol(&mut self.engine, symbol)?;
+        self.edited()
+    }
+
     /// Text committed by an input method, line breaks included.
     pub fn commit_text(&mut self, text: String) -> Result<Response> {
         if !self.accepts_text() {

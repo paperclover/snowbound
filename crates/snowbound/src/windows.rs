@@ -1159,13 +1159,6 @@ pub fn open_file(path: &std::path::Path) {
     reveal(path);
 }
 
-/// Opens Character Map, whose picks the user copies in.
-pub fn character_palette() {
-    if let Err(error) = std::process::Command::new("charmap.exe").spawn() {
-        eprintln!("Cannot open Character Map: {error}");
-    }
-}
-
 /// No shell icon lookup yet; the page draws a blank page for the file.
 pub fn file_icon(_: &std::path::Path) -> Option<Vec<u8>> {
     None

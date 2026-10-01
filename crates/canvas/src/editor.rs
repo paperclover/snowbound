@@ -3502,6 +3502,19 @@ impl CanvasEditor {
         }
     }
 
+    /// Insert Symbol: `symbol` at the selection, as an undo step that neither joins the
+    /// typing before it nor takes the typing after.
+    pub fn insert_symbol(
+        &mut self,
+        engine: &mut TextEngine,
+        symbol: char,
+    ) -> Result<(), EditorError> {
+        self.typing = None;
+        self.insert(engine, symbol.encode_utf8(&mut [0; 4]))?;
+        self.typing = None;
+        Ok(())
+    }
+
     fn insert_text(&mut self, engine: &mut TextEngine, text: &str) -> Result<(), EditorError> {
         if self.page_selected() {
             return self.grouped(|editor| {
@@ -5916,6 +5929,33 @@ mod tests {
             assert_eq!(text(&editor), shown.pop().unwrap());
         }
         assert!(shown.is_empty());
+    }
+
+    #[test]
+    fn a_symbol_is_an_undo_step_between_typing_runs() {
+        let mut engine = TextEngine::default();
+        let source =
+            TextDocument::new(vec![Paragraph::new("Cost".into(), Format::default())]).unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, source, 240.0).unwrap();
+        let text = |editor: &CanvasEditor| editor.active_outline().shown_text();
+        editor
+            .select(
+                [TextPosition {
+                    paragraph: 0,
+                    offset: 4,
+                }; 2]
+                    .into(),
+            )
+            .unwrap();
+        editor.insert(&mut engine, " 5").unwrap();
+        editor.insert_symbol(&mut engine, '€').unwrap();
+        editor.insert_symbol(&mut engine, '±').unwrap();
+        editor.insert(&mut engine, "1").unwrap();
+        assert_eq!(text(&editor), "Cost 5€±1");
+        for shown in ["Cost 5€±", "Cost 5€", "Cost 5", "Cost"] {
+            assert!(editor.undo(&mut engine).unwrap());
+            assert_eq!(text(&editor), shown);
+        }
     }
 
     #[test]

@@ -84,6 +84,8 @@ pub struct Toolbar {
     pub numbering: Vec<usize>,
     /// The place in the pen gallery Pen draws with: the accent pen first.
     pub pen: usize,
+    /// Symbols inserted lately, latest first.
+    pub symbols: Vec<char>,
 }
 
 impl Default for Toolbar {
@@ -95,6 +97,7 @@ impl Default for Toolbar {
             bullets: Vec::new(),
             numbering: Vec::new(),
             pen: 0,
+            symbols: Vec::new(),
         }
     }
 }
@@ -233,6 +236,7 @@ mod tests {
                 bullets: vec![3, 0],
                 numbering: vec![16],
                 pen: 6,
+                symbols: vec!['⅔', '€'],
             },
             user_name: Some("Snowbound Test".into()),
             color_scheme: ColorScheme::Dark,

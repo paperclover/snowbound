@@ -144,6 +144,8 @@ pub enum Choice {
     Art(Option<&'static str>),
     /// A place in the pen gallery, which Pen then draws with.
     Pen(usize),
+    /// A symbol to insert, or `None` for More Symbols.
+    Symbol(Option<char>),
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -658,7 +660,8 @@ pub fn title(choice: Choice) -> String {
         | Choice::PageColor(_)
         | Choice::RuleLines(_)
         | Choice::Art(_)
-        | Choice::Pen(_) => {
+        | Choice::Pen(_)
+        | Choice::Symbol(_) => {
             unreachable!("Only the toolbar offers these")
         }
     }
@@ -1104,6 +1107,7 @@ impl State {
             Choice::Table(_) => Id::Table,
             Choice::PageColor(_) | Choice::RuleLines(_) | Choice::Art(_) => Id::PageColor,
             Choice::Pen(_) => Id::Pen,
+            Choice::Symbol(_) => Id::Symbol,
         };
         let tool = self.view.tool();
         match id {
@@ -1369,6 +1373,20 @@ impl State {
                 self.save_settings();
                 Id::Pen
             }
+            Choice::Symbol(None) => {
+                self.open_symbols();
+                return Ok(());
+            }
+            Choice::Symbol(Some(symbol)) => {
+                let recent = &mut self.toolbar.symbols;
+                recent.retain(|known| *known != symbol);
+                recent.insert(0, symbol);
+                recent.truncate(crate::symbol::GALLERY);
+                self.save_settings();
+                let response = self.view.insert_symbol(symbol)?;
+                self.respond(response);
+                return Ok(());
+            }
         };
         let field = self.ui.focused_field();
         let response = match id {
@@ -1530,11 +1548,11 @@ impl State {
                 return Ok(());
             }
             // The menu bar and keys open the toolbar's gallery.
-            Id::Table | Id::PageColor => {
-                let name = if id == Id::Table {
-                    "table"
-                } else {
-                    "page color"
+            Id::Table | Id::PageColor | Id::Symbol => {
+                let name = match id {
+                    Id::Table => "table",
+                    Id::Symbol => "symbol",
+                    _ => "page color",
                 };
                 self.ui.open_popup(crate::toolbar_popup(name));
                 return Ok(());
@@ -1555,10 +1573,6 @@ impl State {
             Id::ScreenClipping => {
                 #[cfg(target_os = "macos")]
                 platform::clip_screen(self.proxy.clone());
-                return Ok(());
-            }
-            Id::Symbol => {
-                platform::character_palette();
                 return Ok(());
             }
             Id::HideSpelling => {

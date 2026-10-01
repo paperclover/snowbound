@@ -21,6 +21,8 @@ pub(crate) struct Texts {
     context: LayoutContext<()>,
     /// By text, size, weight and preferred family, with the frame each was last used.
     cache: HashMap<LabelKey, (Rc<Label>, u64)>,
+    /// The Last Resort font's data, once looked for.
+    last_resort: Option<Option<u64>>,
 }
 
 impl Texts {
@@ -102,6 +104,26 @@ impl Texts {
         }
         let cut = format!("{}…", text[..end].trim_end());
         self.styled(&cut, size, *bold, *italic, font, frame)
+    }
+
+    /// Whether the interface's fonts or their fallbacks draw every glyph of `text`, not the
+    /// missing glyph nor the placeholders of macOS's Last Resort font.
+    pub fn shows(&mut self, text: &str, frame: u64) -> bool {
+        let last_resort = *self.last_resort.get_or_insert_with(|| {
+            let family = self.fonts.collection.family_by_name("LastResort")?;
+            let font = family.fonts().first()?;
+            Some(font.load(Some(&mut self.fonts.source_cache))?.id())
+        });
+        let label = self.styled(text, 16.0, false, false, None, frame);
+        label.layout.lines().all(|line| {
+            line.items().all(|item| match item {
+                PositionedLayoutItem::GlyphRun(run) => {
+                    Some(run.run().font().font.data.id()) != last_resort
+                        && run.glyphs().all(|glyph| glyph.id != 0)
+                }
+                PositionedLayoutItem::InlineBox(_) => true,
+            })
+        })
     }
 
     /// Makes `family` the interface's font, where fontique doesn't know the system's.
