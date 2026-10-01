@@ -30,6 +30,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
 
     private var dataSource: UICollectionViewDiffableDataSource<Location, Item>!
     private var collapsed: Set<Item> = []
+    private lazy var sync = SyncIndicator(in: self)
     private var selected: Item?
     var onOpen: ((Tab, Notebook) -> Void)?
 
@@ -111,7 +112,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         navigationItem.rightBarButtonItem = UIBarButtonItem(
             title: "Add Notebook", image: UIImage(systemName: "plus"), menu: add)
         navigationItem.searchController = SearchViewController.controller()
-        toolbarItems = [.flexibleSpace(), UIBarButtonItem(customView: SyncIndicator()), .flexibleSpace()]
+        toolbarItems = [.flexibleSpace(), sync, .flexibleSpace()]
         NotificationCenter.default.addObserver(forName: Notebook.listed, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             reload()
@@ -714,6 +715,7 @@ final class PagesViewController: UITableViewController {
 
     private(set) var section: Section?
     private var items: [Item] = []
+    private lazy var sync = SyncIndicator(in: self)
     private var selected: String?
     private let search = SearchViewController.controller()
     /// Opens a page of the section.
@@ -734,7 +736,7 @@ final class PagesViewController: UITableViewController {
             title: "New Page", image: UIImage(systemName: "square.and.pencil"),
             primaryAction: UIAction { [weak self] _ in self?.newPage(under: nil) })
         toolbarItems = [
-            .flexibleSpace(), UIBarButtonItem(customView: SyncIndicator()), .flexibleSpace(), compose,
+            .flexibleSpace(), sync, .flexibleSpace(), compose,
         ]
         NotificationCenter.default.addObserver(
             self, selector: #selector(changed), name: Section.changed, object: nil)

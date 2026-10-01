@@ -97,9 +97,17 @@ enum Sync {
 }
 
 /// The sync status in a list's toolbar, as Mail shows when it last checked; opens the sync
-/// sheet.
-final class SyncIndicator: UIButton {
-    init() {
+/// sheet. The item leaves `owner`'s toolbar while there is nothing to report (hidden, its
+/// custom view would leave the bar's glass behind), so the owner keeps it.
+final class SyncIndicator: UIBarButtonItem {
+    private let button = UIButton(type: .system)
+    private weak var owner: UIViewController?
+    /// Where in the toolbar the item goes back to.
+    private var slot = 0
+
+    init(in owner: UIViewController) {
+        self.owner = owner
+        super.init()
         var configuration = UIButton.Configuration.plain()
         configuration.imagePadding = 4
         configuration.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(textStyle: .caption1)
@@ -110,9 +118,9 @@ final class SyncIndicator: UIButton {
             attributes.font = .preferredFont(forTextStyle: .caption1)
             return attributes
         }
-        super.init(frame: .zero)
-        self.configuration = configuration
-        addAction(UIAction { [weak self] _ in self?.present() }, for: .primaryActionTriggered)
+        button.configuration = configuration
+        button.addAction(UIAction { [weak self] _ in self?.present() }, for: .primaryActionTriggered)
+        customView = button
         for name in [Sync.changed, Section.changed] {
             NotificationCenter.default.addObserver(self, selector: #selector(refresh), name: name, object: nil)
         }
@@ -124,23 +132,35 @@ final class SyncIndicator: UIButton {
     @objc private func refresh() {
         Sync.status { [weak self] notebooks in
             let sections = notebooks.flatMap(\.1)
-            guard let self, let worst = sections.map(\.state).max() else {
-                self?.isHidden = true
-                return
-            }
-            isHidden = false
+            guard let self else { return }
+            guard let worst = sections.map(\.state).max() else { return show(false) }
             let queued = sections.map(\.queued).reduce(0, +)
             let label = Sync.label(worst)
-            configuration?.title = queued > 0 && worst != .syncing ? "\(label), \(Sync.changes(queued))" : label
-            configuration?.image = UIImage(systemName: Sync.symbol(worst))
-            configuration?.baseForegroundColor = worst >= .notConnected && !Sync.offline ? .systemOrange : .secondaryLabel
-            accessibilityLabel = "Sync status: \(configuration?.title ?? label)"
-            sizeToFit()
+            button.configuration?.title = queued > 0 && worst != .syncing ? "\(label), \(Sync.changes(queued))" : label
+            button.configuration?.image = UIImage(systemName: Sync.symbol(worst))
+            button.configuration?.baseForegroundColor =
+                worst >= .notConnected && !Sync.offline ? .systemOrange : .secondaryLabel
+            button.accessibilityLabel = "Sync status: \(button.configuration?.title ?? label)"
+            button.sizeToFit()
+            show(true)
         }
     }
 
+    /// Takes the item out of its owner's toolbar, or puts it back where it was.
+    private func show(_ shown: Bool) {
+        guard let owner, var items = owner.toolbarItems else { return }
+        switch (shown, items.firstIndex { $0 === self }) {
+        case (true, nil): items.insert(self, at: min(slot, items.count))
+        case (false, let at?):
+            slot = at
+            items.remove(at: at)
+        default: return
+        }
+        owner.setToolbarItems(items, animated: true)
+    }
+
     private func present() {
-        guard let controller = window?.rootViewController else { return }
+        guard let controller = button.window?.rootViewController else { return }
         let navigation = UINavigationController(rootViewController: SyncViewController())
         navigation.sheetPresentationController?.detents = [.medium(), .large()]
         navigation.sheetPresentationController?.prefersGrabberVisible = true
