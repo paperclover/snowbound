@@ -20,6 +20,9 @@ Edits save to the notebook folder as you type. Settings live in
 `~/.config/snowbound` and sync state in `~/.cache/snowbound`; `--cache DIR`
 puts the latter elsewhere.
 
+If Snowbound stops unexpectedly, `~/.local/state/snowbound/snowbound.log` says
+why; please attach it when you report a problem.
+
 **Install Snowbound**, shown while no notebook is open, adds Snowbound to your app menu and
 to the apps that open `.one` and `.onetoc2` files, and copies it to
 `~/.local/bin/snowbound`. Options, next to the update settings, uninstalls it

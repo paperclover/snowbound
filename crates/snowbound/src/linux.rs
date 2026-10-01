@@ -662,8 +662,141 @@ pub fn move_cursor() -> winit::window::CursorIcon {
 /// No system border lies under the chrome.
 pub fn cover_border_line(_: &mut Ui, _: f32) {}
 
+/// The log's path, and the log itself where stderr isn't it.
+static LOG: OnceLock<(PathBuf, Option<std::fs::File>)> = OnceLock::new();
+
+/// Runs the app. Where stderr reaches no one, as when the desktop starts the app, stderr goes
+/// to `snowbound.log`; panics and the signals that end the process log a backtrace there
+/// either way, and say where the log is.
 pub fn with_pool<R>(run: impl FnOnce() -> R) -> R {
+    log_crashes();
     run()
+}
+
+/// Opens `snowbound.log` in the state folder, keeping the last run's as `snowbound.old.log`,
+/// and takes stderr there unless it reaches a terminal, a pipe or a file.
+fn log_crashes() {
+    use std::{io::Write, os::fd::AsRawFd};
+    let Some(folder) = xdg_dir("XDG_STATE_HOME", ".local/state") else {
+        return;
+    };
+    let path = folder.join("snowbound.log");
+    let _ = std::fs::create_dir_all(&folder);
+    let _ = std::fs::rename(&path, folder.join("snowbound.old.log"));
+    let Ok(mut log) = std::fs::File::create(&path) else {
+        return;
+    };
+    let mut system: libc::utsname = unsafe { std::mem::zeroed() };
+    unsafe { libc::uname(&mut system) };
+    let field =
+        |field: &[libc::c_char]| unsafe { CStr::from_ptr(field.as_ptr()) }.to_string_lossy();
+    let session = |name| std::env::var(name).unwrap_or_default();
+    let _ = writeln!(
+        log,
+        "Snowbound {} on Linux {} {}, {} {}",
+        option_env!("SNOWBOUND_BUILD").unwrap_or("development"),
+        field(&system.release),
+        field(&system.machine),
+        session("XDG_SESSION_TYPE"),
+        session("XDG_CURRENT_DESKTOP"),
+    );
+    let mut stderr: libc::stat = unsafe { std::mem::zeroed() };
+    let seen = unsafe { libc::isatty(2) } == 1
+        || unsafe { libc::fstat(2, &mut stderr) } == 0
+            && [libc::S_IFIFO, libc::S_IFREG].contains(&(stderr.st_mode & libc::S_IFMT));
+    let copy = if seen {
+        Some(log)
+    } else {
+        unsafe { libc::dup2(log.as_raw_fd(), 2) };
+        None
+    };
+    let _ = LOG.set((path, copy));
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current();
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let report = format!(
+            "Thread {:?} {info}\n{backtrace}\n",
+            thread.name().unwrap_or("")
+        );
+        crashed(|fd| write_all(fd, report.as_bytes()));
+    }));
+    // glibc's backtrace loads its unwinder on first use, which a signal handler can't.
+    unsafe { libc::backtrace([std::ptr::null_mut(); 1].as_mut_ptr(), 1) };
+    for signal in FATAL.map(|(signal, _)| signal) {
+        let mut action: libc::sigaction = unsafe { std::mem::zeroed() };
+        action.sa_sigaction = fatal as *const () as libc::sighandler_t;
+        action.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK | libc::SA_RESETHAND;
+        unsafe { libc::sigaction(signal, &action, std::ptr::null_mut()) };
+    }
+}
+
+const FATAL: [(i32, &str); 5] = [
+    (libc::SIGSEGV, "SIGSEGV"),
+    (libc::SIGBUS, "SIGBUS"),
+    (libc::SIGILL, "SIGILL"),
+    (libc::SIGFPE, "SIGFPE"),
+    (libc::SIGABRT, "SIGABRT"),
+];
+
+/// Logs the signal ending the process with the stack it arrived on, then lets it end the
+/// process as it would have. Calls only what a signal handler may.
+extern "C" fn fatal(signal: i32, info: *mut libc::siginfo_t, _: *mut libc::c_void) {
+    let name = FATAL
+        .iter()
+        .find(|(fatal, _)| *fatal == signal)
+        .map_or("", |(_, name)| name);
+    let mut thread = [0u8; 16];
+    unsafe { libc::prctl(libc::PR_GET_NAME, thread.as_mut_ptr()) };
+    let thread = &thread[..thread.iter().position(|&byte| byte == 0).unwrap_or(15)];
+    let mut address = *b"0x0000000000000000";
+    let mut value = unsafe { (*info).si_addr() } as usize;
+    for digit in address[2..].iter_mut().rev() {
+        *digit = b"0123456789abcdef"[value & 15];
+        value >>= 4;
+    }
+    let mut frames = [std::ptr::null_mut(); 128];
+    let count = unsafe { libc::backtrace(frames.as_mut_ptr(), frames.len() as i32) };
+    crashed(|fd| {
+        let parts: [&[u8]; 7] = [
+            b"Thread \"",
+            thread,
+            b"\" received ",
+            name.as_bytes(),
+            b" at ",
+            &address,
+            b"\n",
+        ];
+        for part in parts {
+            write_all(fd, part);
+        }
+        unsafe { libc::backtrace_symbols_fd(frames.as_ptr(), count, fd) };
+        write_all(fd, b"\n");
+    });
+    unsafe { libc::raise(signal) };
+}
+
+/// Writes a report, through `write` on a descriptor, to stderr and the log, then says where the
+/// log is.
+fn crashed(write: impl Fn(i32)) {
+    use std::os::{fd::AsRawFd, unix::ffi::OsStrExt};
+    write(2);
+    if let Some((path, Some(log))) = LOG.get() {
+        write(log.as_raw_fd());
+        let parts: [&[u8]; 3] = [b"The log is at ", path.as_os_str().as_bytes(), b".\n"];
+        for part in parts {
+            write_all(2, part);
+        }
+    }
+}
+
+fn write_all(fd: i32, mut bytes: &[u8]) {
+    while !bytes.is_empty() {
+        let written = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+        if written <= 0 {
+            return;
+        }
+        bytes = &bytes[written as usize..];
+    }
 }
 
 /// The interface keeps fontconfig's font and scrollbars overlay the content.
