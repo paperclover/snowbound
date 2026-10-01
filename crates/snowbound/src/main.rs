@@ -10,6 +10,9 @@ mod conflict_render;
 #[cfg(target_os = "linux")]
 #[path = "desktop_linux.rs"]
 mod desktop;
+#[cfg(target_os = "linux")]
+#[path = "dialog_linux.rs"]
+mod dialog;
 mod guide;
 mod history;
 #[cfg_attr(not(target_os = "macos"), path = "icloud_linux.rs")]
@@ -5926,6 +5929,14 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
 fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "linux")]
     loader::preload();
+    // Before the crash log, which the app showing the dialog keeps writing.
+    #[cfg(target_os = "linux")]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg == dialog::DIALOG)
+    {
+        return dialog::run(std::env::args_os().skip(2));
+    }
     platform::with_pool(launch)
 }
 

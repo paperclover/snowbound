@@ -1,7 +1,9 @@
 //! Linux, on X11 and Wayland: window controls drawn in the title bar, files chosen and opened
-//! through the XDG desktop portal, other dialogs through zenity or kdialog, the colour scheme
-//! from the settings portal, and text conventions from the C library's locale.
+//! through the XDG desktop portal, other dialogs through zenity, kdialog or Snowbound's own,
+//! the colour scheme from the settings portal, and text conventions from the C library's
+//! locale.
 
+use crate::dialog::Ask;
 use canvas::date::DateField;
 use std::{
     collections::HashMap,
@@ -1014,7 +1016,7 @@ pub fn smb_login(mount: &crate::library::Mount) -> Result<crate::library::Login,
         ["--password", "--username", &format!("--title={title}")],
         ["--password", &title],
     )
-    .map_err(str::to_owned)?
+    .unwrap_or_else(|_| crate::dialog::ask(&title, "User name:", Ask::Login { user: &user }))
     .ok_or_else(|| "Signing in was canceled".to_owned())?;
     // zenity answers "user|password"; kdialog only the password.
     let (typed, password) = asked
@@ -1211,7 +1213,15 @@ pub fn edit_date(
                 "--date-format=%Y-%m-%d",
             ],
             ["--calendar", title, "--dateformat", "yyyy-MM-dd"],
-        )?,
+        )
+        .unwrap_or_else(|_| {
+            let value = format(&tm, c"%Y-%m-%d");
+            crate::dialog::ask(
+                title,
+                "Date, as year-month-day:",
+                Ask::Entry { value: &value },
+            )
+        }),
         DateField::Time => {
             let current = format(&tm, c"%H:%M");
             dialog(
@@ -1222,7 +1232,11 @@ pub fn edit_date(
                     &format!("--entry-text={current}"),
                 ],
                 ["--inputbox", "Time, as hours and minutes:", &current],
-            )?
+            )
+            .unwrap_or_else(|_| {
+                let value = Ask::Entry { value: &current };
+                crate::dialog::ask(title, "Time, as hours and minutes:", value)
+            })
         }
     };
     let Some(answer) = answer else {
@@ -1275,7 +1289,8 @@ fn merge_date(
     Ok((updated, date_labels(&tm)))
 }
 
-/// Runs zenity, or kdialog where zenity is missing; the answer is None when cancelled.
+/// Runs zenity, or kdialog where zenity is missing; the answer is None when cancelled, and an
+/// error when neither is installed.
 fn dialog<const Z: usize, const K: usize>(
     zenity: [&str; Z],
     kdialog: [&str; K],
@@ -1455,7 +1470,7 @@ pub fn reveal(target: impl AsRef<std::ffi::OsStr>) {
     }
 }
 
-/// Asks whether to go ahead with `action`; false when no tool can ask.
+/// Asks whether to go ahead with `action`, through zenity or kdialog where installed.
 pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str) -> bool {
     let status = Command::new("zenity")
         .args([
@@ -1474,10 +1489,7 @@ pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str) -> bool 
         });
     match status {
         Ok(status) => status.success(),
-        Err(_) => {
-            eprintln!("Install zenity or kdialog to answer: {message}");
-            false
-        }
+        Err(_) => crate::dialog::ask(message, detail, Ask::Question { cancel, action }).is_some(),
     }
 }
 
@@ -1541,7 +1553,8 @@ pub fn inform(message: &str, detail: &str) {
     show(["--info", "--msgbox"], message, detail);
 }
 
-/// Shows `message` and `detail` in zenity's or else kdialog's dialog of the `kinds`.
+/// Shows `message` and `detail` in zenity's or else kdialog's dialog of the `kinds`, or else
+/// in Snowbound's own.
 fn show([zenity, kdialog]: [&'static str; 2], message: &str, detail: &str) {
     let (title, text) = (message.to_owned(), detail.to_owned());
     std::thread::spawn(move || {
@@ -1558,7 +1571,7 @@ fn show([zenity, kdialog]: [&'static str; 2], message: &str, detail: &str) {
                     .status()
             });
         if shown.is_err() {
-            eprintln!("{title}: {text}");
+            crate::dialog::ask(&title, &text, Ask::Message);
         }
     });
 }
