@@ -1161,6 +1161,11 @@ pub fn pick_file(title: &str, types: &[&str]) -> Option<PathBuf> {
     ))
 }
 
+/// None: fontique falls back through fontconfig's coverage, which reaches every installed font.
+pub fn symbol_fonts() -> Vec<String> {
+    Vec::new()
+}
+
 /// No icon theme lookup; the page draws a blank page for the file.
 pub fn file_icon(_: &std::path::Path) -> Option<Vec<u8>> {
     None

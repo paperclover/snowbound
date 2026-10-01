@@ -1159,6 +1159,47 @@ pub fn open_file(path: &std::path::Path) {
     reveal(path);
 }
 
+/// What text falls back to past its fonts and DirectWrite's fallback for its script: the
+/// symbol fonts, then Segoe UI's linked fonts and the scripts' fonts of Windows 7, whose
+/// DirectWrite has no fallback by script.
+pub fn symbol_fonts() -> Vec<String> {
+    [
+        "Segoe UI Symbol",
+        "Cambria Math",
+        "Segoe UI Emoji",
+        // Segoe UI's FontLink\SystemLink in Windows 7's registry.
+        "Tahoma",
+        "Meiryo",
+        "MS UI Gothic",
+        "Microsoft JhengHei",
+        "Microsoft YaHei",
+        "Malgun Gothic",
+        "PMingLiU",
+        "SimSun",
+        "Gulim",
+        // Windows 7's fonts of the scripts those leave out, then Office's catch-all.
+        "Microsoft Yi Baiti",
+        "Euphemia",
+        "Nyala",
+        "Ebrima",
+        "Mongolian Baiti",
+        "DaunPenh",
+        "Plantagenet Cherokee",
+        "Microsoft New Tai Lue",
+        "Iskoola Pota",
+        "Estrangelo Edessa",
+        "Microsoft PhagsPa",
+        "MV Boli",
+        "Microsoft Tai Le",
+        "Microsoft Himalaya",
+        "Mangal",
+        "Latha",
+        "Arial Unicode MS",
+    ]
+    .map(String::from)
+    .into()
+}
+
 /// No shell icon lookup yet; the page draws a blank page for the file.
 pub fn file_icon(_: &std::path::Path) -> Option<Vec<u8>> {
     None

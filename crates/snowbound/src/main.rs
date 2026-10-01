@@ -886,6 +886,8 @@ impl State {
         let (surface, renderer) = surface::Surface::new(window.clone(), backdrop).await?;
         let size = window.inner_size();
         let mut engine = TextEngine::default();
+        let fallbacks = platform::symbol_fonts();
+        draw::fall_back_to(&mut engine.fonts.collection, &fallbacks);
         for path in substitutes {
             let target = engine
                 .register_substitute(parley::fontique::Blob::new(Arc::new(std::fs::read(path)?)))?;
@@ -1019,6 +1021,7 @@ impl State {
         // A window shown but never focused hears no focus event; a hidden one draws as focused.
         ui.window_focused = !visible || window.has_focus();
         platform::system_interface(&mut ui);
+        ui.fall_back_to(&fallbacks);
         ui.set_focus(Some(page()));
         for family in FONTS {
             for (face, _) in engine.substitute(family).map_or(&[][..], |s| &s.faces) {

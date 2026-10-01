@@ -1297,6 +1297,12 @@ impl Ui {
         self.texts.preview_font(data, family);
     }
 
+    /// Draws what the interface's fonts and their scripts' fallbacks lack with the first of
+    /// `families` that has it; see `draw::fall_back_to`.
+    pub fn fall_back_to(&mut self, families: &[String]) {
+        self.texts.fall_back_to(families);
+    }
+
     /// Whether the interface's fonts draw every glyph of `text`.
     pub fn shows(&mut self, text: &str) -> bool {
         self.texts.shows(text, self.frame)

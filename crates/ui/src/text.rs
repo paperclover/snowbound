@@ -21,8 +21,8 @@ pub(crate) struct Texts {
     context: LayoutContext<()>,
     /// By text, size, weight and preferred family, with the frame each was last used.
     cache: HashMap<LabelKey, (Rc<Label>, u64)>,
-    /// The Last Resort font's data, once looked for.
-    last_resort: Option<Option<u64>>,
+    /// The Last Resort font, once looked for.
+    last_resort: Option<Option<Blob<u8>>>,
 }
 
 impl Texts {
@@ -106,24 +106,34 @@ impl Texts {
         self.styled(&cut, size, *bold, *italic, font, frame)
     }
 
-    /// Whether the interface's fonts or their fallbacks draw every glyph of `text`, not the
-    /// missing glyph nor the placeholders of macOS's Last Resort font.
+    /// Whether the interface's fonts or their fallbacks draw `text`: some glyph, and none the
+    /// missing glyph or a placeholder of macOS's Last Resort font.
     pub fn shows(&mut self, text: &str, frame: u64) -> bool {
-        let last_resort = *self.last_resort.get_or_insert_with(|| {
-            let family = self.fonts.collection.family_by_name("LastResort")?;
-            let font = family.fonts().first()?;
-            Some(font.load(Some(&mut self.fonts.source_cache))?.id())
-        });
+        let last_resort = self
+            .last_resort
+            .get_or_insert_with(|| {
+                let family = self.fonts.collection.family_by_name(".LastResort")?;
+                family
+                    .fonts()
+                    .first()?
+                    .load(Some(&mut self.fonts.source_cache))
+            })
+            .clone();
         let label = self.styled(text, 16.0, false, false, None, frame);
-        label.layout.lines().all(|line| {
+        let mut glyphs = 0;
+        let drawn = label.layout.lines().all(|line| {
             line.items().all(|item| match item {
                 PositionedLayoutItem::GlyphRun(run) => {
-                    Some(run.run().font().font.data.id()) != last_resort
+                    glyphs += run.glyphs().count();
+                    // By contents: the source cache may load the font afresh.
+                    let data = run.run().font().font.data.data();
+                    last_resort.as_ref().is_none_or(|font| font.data() != data)
                         && run.glyphs().all(|glyph| glyph.id != 0)
                 }
                 PositionedLayoutItem::InlineBox(_) => true,
             })
-        })
+        });
+        drawn && glyphs > 0
     }
 
     /// Makes `family` the interface's font, where fontique doesn't know the system's.
@@ -133,6 +143,11 @@ impl Texts {
             collection.set_generic_families(GenericFamily::SystemUi, std::iter::once(id));
             self.cache.clear();
         }
+    }
+
+    pub fn fall_back_to(&mut self, families: &[String]) {
+        draw::fall_back_to(&mut self.fonts.collection, families);
+        self.cache.clear();
     }
 
     pub fn preview_font(&mut self, data: Blob<u8>, family: &str) {

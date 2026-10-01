@@ -857,6 +857,80 @@ pub fn clip_screen(proxy: EventLoopProxy<crate::UserEvent>) {
     });
 }
 
+/// The families CoreText's cascade falls back to from the interface font, as the system's
+/// text and Character Viewer draw what a font lacks, then the system fonts that hold nearly
+/// all CoreText finds past it by searching every font. 10.6 and 10.7, which can't list the
+/// cascade, have their symbol fonts in its place.
+pub fn symbol_fonts() -> Vec<String> {
+    use std::ffi::c_void;
+    type Cascade = unsafe extern "C" fn(*const c_void, *const c_void) -> *const c_void;
+    #[link(name = "CoreText", kind = "framework")]
+    unsafe extern "C" {
+        static kCTFontFamilyNameAttribute: *const c_void;
+        fn CTFontCreateUIFontForLanguage(
+            kind: u32,
+            size: f64,
+            language: *const c_void,
+        ) -> *const c_void;
+        fn CTFontDescriptorCopyAttribute(
+            descriptor: *const c_void,
+            attribute: *const c_void,
+        ) -> *const c_void;
+    }
+    unsafe extern "C" {
+        fn CFArrayGetCount(array: *const c_void) -> isize;
+        fn CFArrayGetValueAtIndex(array: *const c_void, index: isize) -> *const c_void;
+        fn CFRelease(object: *const c_void);
+    }
+    const SYSTEM: u32 = 2;
+    let cascade = || unsafe {
+        // 10.8's.
+        let copy = libc::dlsym(
+            libc::RTLD_DEFAULT,
+            c"CTFontCopyDefaultCascadeListForLanguages".as_ptr(),
+        );
+        if copy.is_null() {
+            return None;
+        }
+        let copy = std::mem::transmute::<*mut c_void, Cascade>(copy);
+        let font = CTFontCreateUIFontForLanguage(SYSTEM, 13.0, std::ptr::null());
+        if font.is_null() {
+            return None;
+        }
+        let list = copy(font, std::ptr::null());
+        CFRelease(font);
+        if list.is_null() {
+            return None;
+        }
+        let mut families = Vec::new();
+        for index in 0..CFArrayGetCount(list) {
+            let descriptor = CFArrayGetValueAtIndex(list, index);
+            let name = CTFontDescriptorCopyAttribute(descriptor, kCTFontFamilyNameAttribute);
+            if !name.is_null() {
+                families.push((*name.cast::<NSString>()).to_string());
+                CFRelease(name);
+            }
+        }
+        CFRelease(list);
+        Some(families)
+    };
+    let mut families = cascade().unwrap_or_else(|| {
+        ["Lucida Grande", "Apple Symbols", "STIXGeneral", "Menlo"]
+            .map(String::from)
+            .into()
+    });
+    families.extend(
+        [
+            "Arial Unicode MS",
+            "Geneva",
+            "Noto Sans Coptic",
+            "Hiragino Sans",
+        ]
+        .map(String::from),
+    );
+    families
+}
+
 /// Tells the user something they asked for could not be done: `message`, then what to do.
 pub fn alert(message: &str, detail: &str) {
     let mtm = MainThreadMarker::new().expect("Window events run on the main thread");
