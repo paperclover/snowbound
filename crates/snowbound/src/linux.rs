@@ -233,8 +233,15 @@ impl Clipboard {
     }
 
     pub fn get_files(&mut self) -> Vec<std::path::PathBuf> {
-        self.through_x11(|clipboard| clipboard.get().file_list().ok())
-            .unwrap_or_default()
+        use std::os::unix::ffi::OsStrExt;
+        let files = self.through_x11(|clipboard| clipboard.get().file_list().ok());
+        // arboard splits text/uri-list at LF and keeps the CR its CRLF lines end in.
+        let path = |path: std::path::PathBuf| {
+            let bytes = path.as_os_str().as_bytes();
+            let bytes = bytes.strip_suffix(b"\r").unwrap_or(bytes);
+            std::ffi::OsStr::from_bytes(bytes).into()
+        };
+        files.unwrap_or_default().into_iter().map(path).collect()
     }
 
     pub fn get_html(&mut self) -> Option<String> {
