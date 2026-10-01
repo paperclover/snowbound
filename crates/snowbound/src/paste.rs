@@ -337,7 +337,7 @@ fn fetch(source: &str) -> Option<Vec<u8>> {
         .ok()
 }
 
-fn percent_decode(text: &str) -> Vec<u8> {
+pub(crate) fn percent_decode(text: &str) -> Vec<u8> {
     let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut at = 0;

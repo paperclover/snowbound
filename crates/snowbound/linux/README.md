@@ -40,8 +40,8 @@ Snowbound.
 - A Vulkan driver (Mesa's are standard) or, failing that, OpenGL ES 3 through
   EGL. `WGPU_BACKEND=gl ./bin/snowbound ...` forces OpenGL.
 - fontconfig, and X11 or Wayland with libxkbcommon.
-- zenity or kdialog for the folder picker, the page date and time dialogs and
-  alerts.
+- The desktop's portal (xdg-desktop-portal) for choosing, printing and opening
+  files, and zenity or kdialog for the page date and time dialogs and alerts.
 
 ## Known limits
 

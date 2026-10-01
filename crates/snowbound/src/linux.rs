@@ -1,11 +1,13 @@
-//! Linux, on X11 and Wayland: window controls drawn in the title bar, dialogs through zenity
-//! or kdialog, the colour scheme from the XDG settings portal, and text conventions from
-//! the C library's locale.
+//! Linux, on X11 and Wayland: window controls drawn in the title bar, files chosen and opened
+//! through the XDG desktop portal, other dialogs through zenity or kdialog, the colour scheme
+//! from the settings portal, and text conventions from the C library's locale.
 
 use canvas::date::DateField;
 use std::{
+    collections::HashMap,
     error::Error,
     ffi::CStr,
+    os::unix::ffi::OsStringExt,
     path::PathBuf,
     process::Command,
     sync::{
@@ -23,6 +25,7 @@ use winit::{
     },
     window::{ResizeDirection, Theme, Window, WindowAttributes},
 };
+use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
 /// The title bar's leading margin; the window controls sit at its trailing end.
 pub const LEADING: f32 = 8.0;
@@ -884,8 +887,7 @@ fn portal_color_scheme() -> Option<bool> {
 }
 
 /// Setting `key` in `namespace` from the settings portal.
-fn portal_setting(namespace: &str, key: &str) -> Option<zbus::zvariant::OwnedValue> {
-    use zbus::zvariant::{OwnedValue, Value};
+fn portal_setting(namespace: &str, key: &str) -> Option<OwnedValue> {
     // A missing portal must not hold up the window for D-Bus's 25 s default.
     let connection = zbus::blocking::connection::Builder::session()
         .ok()?
@@ -931,7 +933,7 @@ pub fn show_file(file: &std::path::Path) {
     if shown.is_err()
         && let Some(folder) = file.parent()
     {
-        let _ = Command::new("xdg-open").arg(folder).spawn();
+        reveal(folder);
     }
 }
 
@@ -1302,22 +1304,107 @@ fn picked(asked: Result<Option<String>, &str>) -> Option<PathBuf> {
 
 /// Asks for a file to insert, one of `types` (extensions) unless empty, titled `title`.
 pub fn pick_file(title: &str, types: &[&str]) -> Option<PathBuf> {
+    let globs: Vec<_> = types.iter().map(|kind| format!("*.{kind}")).collect();
     let patterns = match types {
         [] => "*".to_owned(),
-        types => types
-            .iter()
-            .map(|kind| format!("*.{kind}"))
-            .collect::<Vec<_>>()
-            .join(" "),
+        _ => globs.join(" "),
     };
-    picked(dialog(
+    let mut options = HashMap::new();
+    if !globs.is_empty() {
+        options.insert("filters", filters(&patterns, &globs));
+    }
+    choose(
+        title,
+        "OpenFile",
+        options,
         [
             "--file-selection",
             &format!("--title={title}"),
             &format!("--file-filter={patterns}"),
         ],
         ["--getopenfilename", ".", &patterns, "--title", title],
-    ))
+    )
+}
+
+/// A file chooser's `filters` option: one filter, `name`, of `globs`.
+fn filters(name: &str, globs: &[String]) -> Value<'static> {
+    let globs: Vec<_> = globs.iter().map(|glob| (0_u32, glob.clone())).collect();
+    Value::from(vec![(name.to_owned(), globs)])
+}
+
+/// The file the file chooser portal answers `method` with, titled `title`, or where no portal
+/// answers, zenity's or kdialog's; None when cancelled.
+fn choose<const Z: usize, const K: usize>(
+    title: &str,
+    method: &str,
+    mut options: HashMap<&str, Value>,
+    zenity: [&str; Z],
+    kdialog: [&str; K],
+) -> Option<PathBuf> {
+    let chosen = portal("org.freedesktop.portal.FileChooser")
+        .map_err(Into::into)
+        .and_then(|chooser| {
+            portal_request(&chooser, |token| {
+                options.insert("handle_token", Value::from(token.to_owned()));
+                chooser.call(method, &("", title, &options))
+            })
+        });
+    let results = match chosen {
+        Ok(results) => results?,
+        Err(error) => {
+            eprintln!("The file chooser portal failed: {error}");
+            return picked(dialog(zenity, kdialog));
+        }
+    };
+    let uris: Vec<String> = results.get("uris")?.try_clone().ok()?.try_into().ok()?;
+    let path = uris.first()?.strip_prefix("file://")?;
+    Some(std::ffi::OsString::from_vec(crate::paste::percent_decode(path)).into())
+}
+
+/// The desktop portal's `interface`, whose calls give up after five seconds.
+pub(crate) fn portal(interface: &'static str) -> zbus::Result<zbus::blocking::Proxy<'static>> {
+    let connection = zbus::blocking::connection::Builder::session()?
+        .method_timeout(Duration::from_secs(5))
+        .build()?;
+    zbus::blocking::Proxy::new(
+        &connection,
+        "org.freedesktop.portal.Desktop",
+        "/org/freedesktop/portal/desktop",
+        interface,
+    )
+}
+
+/// Asks `portal` through `call`, given the token for its options' `handle_token`, then waits
+/// on the dialog it opens: its results, or None when cancelled.
+pub(crate) fn portal_request(
+    portal: &zbus::blocking::Proxy,
+    call: impl FnOnce(&str) -> zbus::Result<OwnedObjectPath>,
+) -> Result<Option<HashMap<String, OwnedValue>>, Box<dyn std::error::Error>> {
+    static REQUESTS: AtomicU32 = AtomicU32::new(0);
+    // A request's path follows from the sender and the token, so its answer can be awaited
+    // before it is asked for.
+    let sender = portal
+        .connection()
+        .unique_name()
+        .ok_or("No D-Bus name")?
+        .trim_start_matches(':')
+        .replace('.', "_");
+    let token = format!(
+        "snowbound{}_{}",
+        std::process::id(),
+        REQUESTS.fetch_add(1, Ordering::Relaxed)
+    );
+    let request = zbus::blocking::Proxy::new(
+        portal.connection(),
+        "org.freedesktop.portal.Desktop",
+        format!("/org/freedesktop/portal/desktop/request/{sender}/{token}"),
+        "org.freedesktop.portal.Request",
+    )?;
+    let mut answers = request.receive_signal("Response")?;
+    call(&token)?;
+    let answer = answers.next().ok_or("The portal did not answer")?;
+    let (response, results): (u32, HashMap<String, OwnedValue>) = answer.body().deserialize()?;
+    Ok((response == 0).then_some(results))
 }
 
 /// None: fontique falls back through fontconfig's coverage, which reaches every installed font.
@@ -1340,10 +1427,30 @@ pub fn open_file(path: &std::path::Path) {
     reveal(path);
 }
 
-/// Opens `target`, a folder or a link's URL, with the desktop's handler.
+/// Opens `target`, a file, a folder or a link's URL, with the desktop's handler: through the
+/// OpenURI portal, or xdg-open where no portal answers.
 pub fn reveal(target: impl AsRef<std::ffi::OsStr>) {
     let target = target.as_ref();
-    if let Err(error) = Command::new("xdg-open").arg(target).spawn() {
+    let opened = portal("org.freedesktop.portal.OpenURI")
+        .map_err(Into::into)
+        .and_then(
+            |portal| -> Result<OwnedObjectPath, Box<dyn std::error::Error>> {
+                let options = HashMap::<&str, Value>::new();
+                Ok(match target.to_str() {
+                    Some(uri) if !uri.starts_with('/') => {
+                        portal.call("OpenURI", &("", uri, &options))?
+                    }
+                    // The portal opens local files by descriptor only.
+                    _ => {
+                        let file = std::fs::File::open(target)?;
+                        portal.call("OpenFile", &("", zbus::zvariant::Fd::from(&file), &options))?
+                    }
+                })
+            },
+        );
+    if opened.is_err()
+        && let Err(error) = Command::new("xdg-open").arg(target).spawn()
+    {
         eprintln!("Cannot open {}: {error}", target.display());
     }
 }
@@ -1377,30 +1484,43 @@ pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str) -> bool 
 /// Asks for a notebook's table of contents or a section file, titled `title`; None when
 /// cancelled or when no tool can ask.
 pub fn pick_notebook(title: &str) -> Option<PathBuf> {
-    picked(dialog(
+    let name = "OneNote notebooks, sections and packages";
+    let globs = ["*.onetoc2", "*.one", "*.onepkg"].map(String::from);
+    choose(
+        title,
+        "OpenFile",
+        HashMap::from([("filters", filters(name, &globs))]),
         [
             "--file-selection",
             &format!("--title={title}"),
-            "--file-filter=OneNote notebooks, sections and packages | *.onetoc2 *.one *.onepkg",
+            &format!("--file-filter={name} | {}", globs.join(" ")),
         ],
-        [
-            "--getopenfilename",
-            ".",
-            "*.onetoc2 *.one *.onepkg",
-            "--title",
-            title,
-        ],
-    ))
+        ["--getopenfilename", ".", &globs.join(" "), "--title", title],
+    )
 }
 
-/// Asks where to put something named `name` by default; the dialog names its own button.
+/// Asks where to put something named `name` by default, in `folder` where given, with
+/// `action` on the button where the portal asks.
 pub fn pick_new(
     title: &str,
     name: &str,
-    _action: &str,
-    _folder: Option<&std::path::Path>,
+    action: &str,
+    folder: Option<&std::path::Path>,
 ) -> Option<PathBuf> {
-    picked(dialog(
+    use std::os::unix::ffi::OsStrExt;
+    let mut options = HashMap::from([
+        ("current_name", Value::from(name)),
+        ("accept_label", Value::from(action)),
+    ]);
+    if let Some(folder) = folder {
+        let mut bytes = folder.as_os_str().as_bytes().to_vec();
+        bytes.push(0);
+        options.insert("current_folder", Value::from(bytes));
+    }
+    choose(
+        title,
+        "SaveFile",
+        options,
         [
             "--file-selection",
             "--save",
@@ -1408,7 +1528,7 @@ pub fn pick_new(
             &format!("--filename={name}"),
         ],
         ["--getsavefilename", name, "--title", title],
-    ))
+    )
 }
 
 /// Tells the user something they asked for could not be done: `message`, then what to do.

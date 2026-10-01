@@ -1,9 +1,9 @@
 //! Printing on Linux: the desktop's print dialog through the XDG print portal, which prints
 //! the PDF itself; without a portal the PDF opens in the desktop's viewer to print from.
 
-use std::{collections::HashMap, error::Error, time::Duration};
+use std::{collections::HashMap, error::Error};
 use winit::window::Window;
-use zbus::zvariant::{Fd, OwnedValue, Value};
+use zbus::zvariant::{Fd, Value};
 
 /// Countries whose paper is US Letter; everywhere else prints on A4.
 const LETTER_COUNTRIES: [&str; 16] = [
@@ -48,44 +48,15 @@ pub fn print(_window: &Window, pdf: &[u8], title: &str) -> Result<(), Box<dyn Er
 }
 
 fn portal(path: &std::path::Path, title: &str) -> Result<(), Box<dyn Error>> {
-    let connection = zbus::blocking::connection::Builder::session()?
-        .method_timeout(Duration::from_secs(5))
-        .build()?;
-    let portal = zbus::blocking::Proxy::new(
-        &connection,
-        "org.freedesktop.portal.Desktop",
-        "/org/freedesktop/portal/desktop",
-        "org.freedesktop.portal.Print",
-    )?;
-    // A request's path follows from the sender and the token, so its answer can be awaited
-    // before it is asked for.
-    let sender = connection
-        .unique_name()
-        .ok_or("No D-Bus name")?
-        .trim_start_matches(':')
-        .replace('.', "_");
-    let request = |token: &str| -> Result<_, Box<dyn Error>> {
-        let path = format!("/org/freedesktop/portal/desktop/request/{sender}/{token}");
-        let request = zbus::blocking::Proxy::new(
-            &connection,
-            "org.freedesktop.portal.Desktop",
-            path,
-            "org.freedesktop.portal.Request",
-        )?;
-        Ok(request.receive_signal("Response")?)
-    };
-    let token = format!("snowbound{}", std::process::id());
-    let mut answers = request(&token)?;
-    let options = HashMap::from([("handle_token", Value::from(token.as_str()))]);
     let empty: HashMap<&str, Value> = HashMap::new();
-    let _: zbus::zvariant::OwnedObjectPath =
-        portal.call("PreparePrint", &("", title, &empty, &empty, &options))?;
-    let answer = answers.next().ok_or("The print dialog did not answer")?;
-    let (response, results): (u32, HashMap<String, OwnedValue>) = answer.body().deserialize()?;
-    // 1 is cancelled.
-    if response != 0 {
+    let portal = crate::platform::portal("org.freedesktop.portal.Print")?;
+    let Some(results) = crate::platform::portal_request(&portal, |token| {
+        let options = HashMap::from([("handle_token", Value::from(token))]);
+        portal.call("PreparePrint", &("", title, &empty, &empty, &options))
+    })?
+    else {
         return Ok(());
-    }
+    };
     let prepared = results
         .get("token")
         .and_then(|token| u32::try_from(token).ok())
