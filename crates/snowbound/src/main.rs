@@ -342,6 +342,8 @@ struct App {
     /// Files and folders to open, as File, Open does, once the window opens.
     opening: Vec<PathBuf>,
     state: Option<State>,
+    /// The staged update to swap in once the app has quit.
+    restart: Option<PathBuf>,
     startup_error: Option<Box<dyn Error>>,
 }
 
@@ -5792,6 +5794,15 @@ impl ApplicationHandler<UserEvent> for App {
             .min();
         event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
+
+    /// Drops the window's state while the event loop still holds the Wayland connection the
+    /// clipboard's thread and the surface use; `run_app` closes it on returning.
+    fn exiting(&mut self, _: &ActiveEventLoop) {
+        self.restart = self
+            .state
+            .take()
+            .and_then(|state| state.updates.restarting());
+    }
 }
 
 fn write_png(path: &Path, size: [u32; 2], pixels: &[u8]) -> Result<(), Box<dyn Error>> {
@@ -6094,15 +6105,12 @@ fn launch() -> Result<(), Box<dyn Error>> {
         substitutes,
         screenshot,
         state: None,
+        restart: None,
         startup_error: None,
     };
     event_loop.run_app(&mut app)?;
-    let restart = app
-        .state
-        .as_ref()
-        .and_then(|state| state.updates.restarting());
-    if let Some(staged) = restart {
-        update::relaunch(&staged)?;
+    if let Some(staged) = &app.restart {
+        update::relaunch(staged)?;
     }
     app.startup_error.map_or(Ok(()), Err)
 }
