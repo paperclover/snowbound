@@ -4,10 +4,14 @@
 //! it, and unpacks it beside the install. Restart to Update swaps it in once the app quits.
 //! `tools/RELEASE.md` describes the publishing side.
 
+#[cfg(target_os = "linux")]
+use crate::loader::executable;
 use crate::{State, UserEvent, platform};
 use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::Deserialize;
 use std::collections::HashMap;
+#[cfg(not(target_os = "linux"))]
+use std::env::current_exe as executable;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -278,7 +282,7 @@ fn check_archive(key: &[u8], archive: &Archive, bytes: &[u8]) -> Result<(), Stri
 /// builds and Mac OS X 10.6 have none, and point to the build's folder instead.
 fn install() -> Option<PathBuf> {
     running()?;
-    let executable = std::env::current_exe().ok()?;
+    let executable = executable().ok()?;
     if !cfg!(feature = "wgpu") {
         None
     } else if cfg!(target_os = "macos") {
@@ -659,7 +663,7 @@ pub fn show_build(version: &Version) {
 /// the app with the arguments this one had.
 pub fn relaunch(staged: &Path) -> std::io::Result<()> {
     let install = install().ok_or_else(|| std::io::Error::other("Nothing to update"))?;
-    Command::new(std::env::current_exe()?)
+    Command::new(executable()?)
         .arg(FINISH)
         .arg(std::process::id().to_string())
         .arg(staged)

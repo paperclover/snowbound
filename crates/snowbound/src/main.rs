@@ -20,6 +20,9 @@ mod instance;
 mod keys;
 mod library;
 mod link;
+#[cfg(target_os = "linux")]
+#[path = "loader_linux.rs"]
+mod loader;
 mod manage;
 #[cfg_attr(target_os = "linux", path = "media_linux.rs")]
 #[cfg_attr(target_os = "macos", path = "media_macos.rs")]
@@ -5910,6 +5913,8 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    #[cfg(target_os = "linux")]
+    loader::preload();
     platform::with_pool(launch)
 }
 

@@ -32,7 +32,8 @@ Snowbound.
 ## Requirements
 
 - x86_64 or aarch64 Linux with glibc 2.17 or newer (RHEL 7, Debian 8,
-  Ubuntu 14.04 and later).
+  Ubuntu 14.04 and later). NixOS needs nothing extra: Snowbound finds the
+  libraries below among the system's packages or your profile's.
 - A Vulkan driver (Mesa's are standard) or, failing that, OpenGL ES 3 through
   EGL. `WGPU_BACKEND=gl ./bin/snowbound ...` forces OpenGL.
 - fontconfig, and X11 or Wayland with libxkbcommon.

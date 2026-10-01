@@ -142,7 +142,7 @@ pub fn prepare(event_loop: &EventLoop<crate::UserEvent>) {
 fn write_portable(path: &Path) -> io::Result<()> {
     let icon = runtime_icon().ok_or(io::ErrorKind::NotFound)?;
     fs::write(&icon, ICON)?;
-    let text = entry_text(&std::env::current_exe()?, &icon.to_string_lossy())
+    let text = entry_text(&crate::loader::executable()?, &icon.to_string_lossy())
         + &format!("NoDisplay=true\n{PORTABLE}={}\n", std::process::id());
     write_entry(path, &text)?;
     extern "C" fn exiting() {
@@ -366,7 +366,7 @@ pub fn install() {
 
 fn try_install() -> io::Result<()> {
     let (data, binary) = data_home().zip(binary()).ok_or(io::ErrorKind::NotFound)?;
-    let running = std::env::current_exe()?;
+    let running = crate::loader::executable()?;
     if fs::canonicalize(&running)? != fs::canonicalize(&binary).unwrap_or_default() {
         fs::create_dir_all(binary.parent().ok_or(io::ErrorKind::NotFound)?)?;
         let partial = binary.with_extension("partial");
