@@ -443,7 +443,6 @@ impl State {
             .cloned()
             .collect();
         for library in gone {
-            eprintln!("DEBUG gone {} listed {listed:?}", library.location);
             self.close_notebook(&library);
         }
         for location in listed {
@@ -572,7 +571,6 @@ impl State {
     /// folders go with the account. Replicas holding edits stay, the open section's also
     /// exported as a recovery archive; signing in again and reopening publishes them.
     pub(crate) fn icloud_account_changed(&mut self) {
-        eprintln!("DEBUG account changed");
         let closing: Vec<Arc<Library>> = self
             .notebooks
             .iter()
