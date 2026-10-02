@@ -49,6 +49,9 @@ impl Storage for Racing {
     fn rename(&self, from: &str, to: &str) -> Result<()> {
         self.inner.rename(from, to)
     }
+    fn rename_root(&self, name: &str, files: &[String]) -> Result<String> {
+        self.inner.rename_root(name, files)
+    }
     fn replace(&self, from: &str, to: &str) -> Result<()> {
         self.inner.replace(from, to)
     }

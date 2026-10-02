@@ -452,12 +452,76 @@ impl Library {
     /// Names the notebook `name` on this computer, leaving its folder as it is, as OneNote
     /// 2010's Notebook Properties does; the notebook read again with `with` shows it.
     pub fn set_display_name(&self, name: &str) -> io::Result<()> {
-        let file = display_names(&self.cache);
-        let mut names = read_display_names(&file);
-        names.insert(self.location.clone(), name.to_owned());
-        let partial = file.with_extension("partial");
-        notebook::fs::write(&partial, serde_json::to_vec_pretty(&names)?)?;
-        notebook::fs::rename(partial, file)
+        edit_display_names(&self.cache, |names| {
+            names.insert(self.location.clone(), name.to_owned());
+        })
+    }
+
+    /// Where the notebook would be with its folder named `name`; none for a section opened on
+    /// its own, or a notebook at the top of its share.
+    pub fn renamed_location(&self, name: &str) -> Option<String> {
+        self.catalog()?;
+        if let Some(mut mount) = server_address(&self.location) {
+            let (parent, _) = mount.root.rsplit_once('/').unwrap_or(("", &mount.root));
+            mount.root = match (parent, mount.root.is_empty()) {
+                (_, true) => return None,
+                ("", false) => name.to_owned(),
+                (parent, false) => format!("{parent}/{name}"),
+            };
+            return Some(mount.url());
+        }
+        let parent = Path::new(&self.location).parent()?;
+        Some(parent.join(name).to_string_lossy().into_owned())
+    }
+
+    /// Renames the notebook's folder to `name` once nothing of this notebook holds its files:
+    /// its background stopped and its kept sections closed, as the open section must be too.
+    /// The replicas, and edits waiting in them, follow, and the folder's own name takes the
+    /// place of a display name. Refused, with nothing changed, while another writer holds a file
+    /// of it. Returns the notebook's new location, where it opens again, or why not, as its
+    /// reader is told.
+    pub fn rename_folder(&self, name: &str) -> Result<String, String> {
+        let to = self
+            .renamed_location(name)
+            .ok_or("This notebook’s folder can’t be renamed.")?;
+        if let Some(background) = &self.background {
+            background.stop();
+        }
+        self.close_kept();
+        let renamed = self
+            .reopen()
+            .and_then(|notebook| Ok(notebook.rename_folder(name)?));
+        if let Err(error) = renamed {
+            let kind = match error.downcast_ref::<notebook::Error>() {
+                Some(notebook::Error::Io(error) | notebook::Error::RemoteIo(error)) => {
+                    Some(error.kind())
+                }
+                _ => error.downcast_ref::<io::Error>().map(io::Error::kind),
+            };
+            return Err(match kind {
+                Some(io::ErrorKind::WouldBlock | io::ErrorKind::ResourceBusy) => {
+                    "Another computer is saving to this notebook. Try again in a moment.".into()
+                }
+                Some(io::ErrorKind::PermissionDenied) => "Its files are open on another \
+                    computer, or you can’t rename folders there. Close the notebook in OneNote \
+                    on other computers, then try again."
+                    .into(),
+                Some(io::ErrorKind::AlreadyExists) => {
+                    format!("A folder named “{name}” is already there. Choose another name.")
+                }
+                Some(io::ErrorKind::InvalidInput) => "A folder name can’t contain \\ / : * ? \" \
+                    < > | or end with a dot or space."
+                    .into(),
+                _ => error.to_string(),
+            });
+        }
+        // The folder's own name shows now.
+        if let Err(error) = edit_display_names(&self.cache, |names| {
+            names.remove(&self.location);
+        }) {
+            eprintln!("{}: {error}", self.location);
+        }
+        Ok(to)
     }
 
     /// The art the notebook's tags draw with.
@@ -795,6 +859,11 @@ impl Library {
             .then(|| Path::new(&self.location))
     }
 
+    /// Whether the notebook is on an SMB share, however it is reached.
+    pub fn on_smb(&self) -> bool {
+        self.server.is_some() || server_address(&self.location).is_some() || self.notice.is_some()
+    }
+
     /// Whether iCloud Drive keeps the notebook, or the section opened on its own.
     pub fn in_icloud(&self) -> bool {
         self.folder().is_some_and(crate::icloud::ubiquitous)
@@ -1036,6 +1105,18 @@ fn read_display_names(file: &Path) -> std::collections::BTreeMap<String, String>
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default()
+}
+
+fn edit_display_names(
+    cache: &Path,
+    edit: impl FnOnce(&mut std::collections::BTreeMap<String, String>),
+) -> io::Result<()> {
+    let file = display_names(cache);
+    let mut names = read_display_names(&file);
+    edit(&mut names);
+    let partial = file.with_extension("partial");
+    notebook::fs::write(&partial, serde_json::to_vec_pretty(&names)?)?;
+    notebook::fs::rename(partial, file)
 }
 
 fn display_name(cache: &Path, location: &str) -> Option<String> {
@@ -1426,6 +1507,133 @@ mod tests {
             remove_tree(&client, &root);
             assert!(client.read_dir(&root, 1).is_err(), "the folder is gone");
         }
+    }
+
+    /// Renames a notebook folder on the lab share (`ONESTORE_SMB_LAB`, as above) with an edit
+    /// queued offline, which publishes into the renamed folder; `notebook`'s
+    /// `live_folder_rename` covers the refusal while another writer holds a section.
+    #[test]
+    #[ignore = "requires an owned Samba share at ONESTORE_SMB_LAB"]
+    fn a_notebook_folder_on_a_share_renames_with_its_queue() {
+        let address = std::env::var("ONESTORE_SMB_LAB").unwrap();
+        let parent = format!("snowbound-rename-{}", std::process::id());
+        let user = std::env::var("ONESTORE_SMB_LAB_USER").ok();
+        let mount = |root: &str| Mount {
+            server: address.clone(),
+            share: "agent".into(),
+            user: user.clone(),
+            domain: String::new(),
+            root: format!("{parent}/{root}"),
+        };
+        let login = Login {
+            user: user.clone().unwrap_or_default(),
+            password: std::env::var("ONESTORE_SMB_LAB_PASSWORD").unwrap_or_default(),
+            domain: String::new(),
+        };
+        let connect = || {
+            Server {
+                mount: mount("Before"),
+                login: login.clone(),
+            }
+            .connect()
+            .unwrap()
+        };
+        let client = Arc::new(connect());
+        remove_tree(&client, &parent);
+        client.create_directory(&parent).unwrap();
+        client.create_directory(&mount("Before").root).unwrap();
+        let cache = std::env::temp_dir().join(&parent);
+        let page = onestore::PageCreation::new(None, Some(""), "Rust Author").unwrap();
+        Notebook::open_smb(Arc::clone(&client), &mount("Before").root, &cache)
+            .unwrap()
+            .create_section("", "Queued", &page)
+            .unwrap();
+        let open = |root: &str| {
+            let location = mount(root).url();
+            Library::on_share(&location, mount(root), login.clone(), &cache).unwrap()
+        };
+        let library = open("Before");
+        let section = library.open("Queued.one", || {}).unwrap();
+        section.set_offline(true);
+        let (space, ..) = section.pages().unwrap()[0].clone();
+        let title = (section.page(space).unwrap().objects.iter())
+            .find_map(|object| match object {
+                onestore::page::PageObject::Title(title) => {
+                    title.outlines[0].paragraphs[0].text().map(|text| text.id)
+                }
+                _ => None,
+            })
+            .unwrap();
+        let typed = onestore::op::Edit {
+            at: crate::filetime(),
+            ops: vec![onestore::op::Op::Page {
+                space,
+                op: onestore::op::PageOp::Text {
+                    text: title,
+                    range: 0..0,
+                    with: "Renamed over SMB".into(),
+                },
+            }],
+        };
+        section.apply("Rust Author", typed).unwrap();
+        section.close().unwrap();
+        assert_eq!(
+            library.rename_folder("After").unwrap(),
+            mount("After").url()
+        );
+        assert!(client.read_dir(&mount("Before").root, 10).is_err());
+        let renamed = open("After");
+        let section = renamed.open("Queued.one", || {}).unwrap();
+        let file = format!("{}/Queued.one", mount("After").root);
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            let titles = client
+                .read_storage(&file, LIMIT)
+                .ok()
+                .and_then(|bytes| {
+                    let arena = onestore::Arena::default();
+                    onestore::Section::open(&arena, bytes).ok()?.pages().ok()
+                })
+                .unwrap_or_default();
+            if titles
+                .iter()
+                .any(|(_, title, _)| title == "Renamed over SMB")
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{titles:?}");
+            section.wake();
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        section.close().unwrap();
+        drop((library, renamed));
+        let _ = notebook::fs::remove_dir_all(&cache);
+        remove_tree(&client, &parent);
+    }
+
+    #[test]
+    fn a_notebook_folder_renames_unless_its_name_is_taken() {
+        let directory =
+            std::env::temp_dir().join(format!("snowbound-rename-{}", std::process::id()));
+        let cache = directory.join("cache");
+        let page = onestore::PageCreation::new(None, Some(""), "Author").unwrap();
+        notebook::fs::create_dir_all(&directory).unwrap();
+        for name in ["Mine", "Taken"] {
+            Notebook::create(directory.join(name), &cache, Notebook::NEW_COLOR, &page).unwrap();
+        }
+        let location = |name: &str| directory.join(name).to_string_lossy().into_owned();
+        let library = Library::notebook(&location("Mine"), &cache);
+        library.set_display_name("Shown").unwrap();
+        let refused = library.rename_folder("Taken").unwrap_err();
+        assert!(refused.starts_with("A folder named “Taken”"), "{refused}");
+        let library = Library::notebook(&location("Mine"), &cache);
+        assert_eq!(library.name, "Shown");
+        assert_eq!(library.rename_folder("Ours").unwrap(), location("Ours"));
+        assert!(notebook::fs::metadata(location("Mine")).is_err());
+        let renamed = Library::notebook(&location("Ours"), &cache);
+        assert_eq!(renamed.name, "Ours");
+        assert_eq!(renamed.color(), Some(Notebook::NEW_COLOR));
+        notebook::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

@@ -298,7 +298,11 @@ impl State {
             .notebooks
             .iter()
             .filter(|library| {
-                in_icloud_folder(&library.location) && !listed.contains(&library.location)
+                in_icloud_folder(&library.location)
+                    && !listed.contains(&library.location)
+                    && !self.folder_renaming(&library.location)
+                    // A listing taken before a rename names the folder by its old name.
+                    && notebook::fs::metadata(&library.location).is_err()
             })
             .cloned()
             .collect();
@@ -307,16 +311,21 @@ impl State {
         }
         for location in listed {
             if self.notebooks.iter().any(|open| open.location == location)
+                || self.folder_renaming(&location)
                 || !self.icloud_reading.insert(location.clone())
             {
                 continue;
             }
             let (cache, proxy) = (self.cache.clone(), self.proxy.clone());
             crate::spawn(move || {
+                let gone = notebook::fs::metadata(&location).is_err();
                 let library = Arc::new(Library::notebook(&location, &cache));
                 let _ = proxy.send_event(crate::UserEvent::Then(Box::new(move |state| {
                     state.icloud_reading.remove(&location);
-                    if state.notebooks.iter().any(|open| open.location == location) {
+                    if gone
+                        || state.notebooks.iter().any(|open| open.location == location)
+                        || state.folder_renaming(&location)
+                    {
                         return Ok(());
                     }
                     state.notebooks.push(Arc::clone(&library));
@@ -327,6 +336,13 @@ impl State {
                 })));
             });
         }
+    }
+
+    /// Whether a folder rename is taking the notebook from or to `location`.
+    pub(crate) fn folder_renaming(&self, location: &str) -> bool {
+        self.folder_rename
+            .as_ref()
+            .is_some_and(|(from, to)| from == location || to == location)
     }
 
     /// Shows `library`, a notebook that just arrived or whose sections did, where no other
@@ -497,6 +513,121 @@ impl State {
                     self.sectionless = self.notebooks.first().cloned();
                     self.title();
                 }
+            }
+        }
+        self.save_settings();
+    }
+
+    /// Renames `library`'s folder to `name` on a thread of its own, the notebook closed
+    /// meanwhile, then opens it from there in its place, at the section it showed, with `color`
+    /// given it. What this computer keeps by the notebook's location follows it. Refused, the
+    /// notebook opens again as it was.
+    pub(crate) fn rename_notebook(
+        &mut self,
+        library: Arc<Library>,
+        name: String,
+        color: Option<u32>,
+    ) {
+        let Some(to) = library.renamed_location(&name) else {
+            return;
+        };
+        let ours = |shown: &Arc<Library>| Arc::ptr_eq(shown, &library);
+        let shown = self
+            .session
+            .as_ref()
+            .filter(|session| ours(&session.library))
+            .map(|session| session.tabs[session.tab].path.clone());
+        if shown.is_some() {
+            let closed = self.persist().and_then(|()| match self.session.take() {
+                Some(session) => Ok(session.section.close()?),
+                None => Ok(()),
+            });
+            if let Err(error) = closed {
+                return platform::alert("Couldn't rename the folder", &error.to_string());
+            }
+        }
+        let showing = shown.is_some() || self.sectionless.as_ref().is_some_and(ours);
+        if showing {
+            self.sectionless = Some(Arc::clone(&library));
+            self.title();
+        }
+        self.folder_rename = Some((library.location.clone(), to.clone()));
+        let (cache, proxy) = (self.cache.clone(), self.proxy.clone());
+        crate::spawn(move || {
+            let renamed = library.rename_folder(&name);
+            // A failure after the folder moved, as its replicas followed, leaves it there.
+            let moved = library
+                .folder()
+                .is_some_and(|folder| notebook::fs::metadata(folder).is_err());
+            let location = match &renamed {
+                Ok(to) => to,
+                Err(_) if moved => &to,
+                Err(_) => &library.location,
+            };
+            let mut reopened = Library::notebook(location, &cache);
+            let mut problem = renamed.err();
+            if let (None, Some(color)) = (&problem, color) {
+                let colored = reopened.reopen().and_then(|mut notebook| {
+                    notebook.set_color(color)?;
+                    Ok(reopened.with(notebook))
+                });
+                match colored {
+                    Ok(colored) => reopened = colored,
+                    Err(error) => problem = Some(error.to_string()),
+                }
+            }
+            let reopened = Arc::new(reopened);
+            let _ = proxy.send_event(crate::UserEvent::Then(Box::new(move |state| {
+                state.renamed_notebook(&library, reopened, showing.then_some(shown));
+                if let Some(problem) = problem {
+                    platform::alert("Couldn't rename the folder", &problem);
+                }
+                Ok(())
+            })));
+        });
+    }
+
+    /// Lists `reopened` in the place of `old`, the notebook `rename_notebook` closed, moving
+    /// what this computer keeps by its location, and shows it again where `shown`: at the
+    /// section it showed, or its first.
+    fn renamed_notebook(
+        &mut self,
+        old: &Arc<Library>,
+        reopened: Arc<Library>,
+        shown: Option<Option<String>>,
+    ) {
+        self.folder_rename = None;
+        let (from, to) = (old.location.clone(), reopened.location.clone());
+        match (self.notebooks.iter_mut()).find(|open| Arc::ptr_eq(open, old)) {
+            Some(open) => *open = Arc::clone(&reopened),
+            None => self.notebooks.push(Arc::clone(&reopened)),
+        }
+        // iCloud Drive's listing may have found the renamed folder first.
+        let mut listed = false;
+        self.notebooks
+            .retain(|open| open.location != to || !std::mem::replace(&mut listed, true));
+        if from != to {
+            self.undo.close(&from);
+            self.trail.moved(&from, &to);
+            self.reads.moved(&from, &to);
+            let (from, to) = (crate::library::key(&from, ""), crate::library::key(&to, ""));
+            let rekey = |key: &String| match key.strip_prefix(&from) {
+                Some(rest) => format!("{to}{rest}"),
+                None => key.clone(),
+            };
+            self.folded = self.folded.iter().map(rekey).collect();
+            self.last_pages = (self.last_pages.iter())
+                .map(|(key, space)| (rekey(key), *space))
+                .collect();
+        }
+        if let Some(shown) = shown {
+            self.sectionless = Some(Arc::clone(&reopened));
+            self.title();
+            if let Some(path) = shown
+                .filter(|path| reopened.contains(path))
+                .or_else(|| reopened.first_section())
+            {
+                self.commands.push(Command::OpenSection(reopened, path));
             }
         }
         self.save_settings();

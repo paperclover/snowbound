@@ -31,6 +31,17 @@ const KEPT: usize = 100;
 const RECENT: usize = 8;
 
 impl Trail {
+    /// Follows the notebook at `from` to `to`, where it moved.
+    pub fn moved(&mut self, from: &str, to: &str) {
+        let places = (self.back.iter_mut())
+            .chain(&mut self.here)
+            .chain(&mut self.forward)
+            .chain(&mut self.recent);
+        for place in places.filter(|place| place.notebook == from) {
+            place.notebook = to.to_owned();
+        }
+    }
+
     /// Notes `place` shown. Arriving anywhere but where Back or Forward went drops the pages
     /// ahead, as a browser does.
     pub fn visit(&mut self, place: Place) {

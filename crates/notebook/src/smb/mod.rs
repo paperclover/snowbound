@@ -329,6 +329,12 @@ impl Client {
         file.close()
     }
 
+    /// Takes and lets go of OneNote 2010's writer opening and locks on the file at `path`, as a
+    /// commit does; `WouldBlock` while another writer holds them.
+    pub(crate) fn unheld(&self, path: &str) -> io::Result<()> {
+        self.open(path, true)?.coordinate(path, true, &[])?.close()
+    }
+
     /// Gives a file or directory the hidden attribute, keeping its others, as OneNote 2010
     /// skips a hidden folder.
     pub(crate) fn hide(&self, path: &str) -> io::Result<()> {

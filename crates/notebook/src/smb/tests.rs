@@ -835,6 +835,72 @@ fn live_structure() {
     client.delete(&root).unwrap();
 }
 
+/// Renames a notebook folder of its own on the share, signing in as `ONESTORE_SMB_LAB_USER`
+/// where set: refused while another client holds OneNote's writer locks on a section, then
+/// done with every file as it was.
+#[test]
+#[ignore = "requires an owned Samba share at ONESTORE_SMB_LAB"]
+fn live_folder_rename() {
+    use crate::session::Notebook;
+    let (user, password) = (
+        std::env::var("ONESTORE_SMB_LAB_USER").unwrap_or_default(),
+        std::env::var("ONESTORE_SMB_LAB_PASSWORD").unwrap_or_default(),
+    );
+    let connect = || {
+        let credentials = Credentials {
+            username: &user,
+            password: &password,
+            domain: "",
+        };
+        let address = std::env::var("ONESTORE_SMB_LAB").unwrap();
+        Client::connect(&address, "agent", credentials, Duration::from_secs(10)).unwrap()
+    };
+    let (client, other) = (std::sync::Arc::new(connect()), connect());
+    let parent = format!("rename-{}", std::process::id());
+    let (root, renamed) = (format!("{parent}/Before"), format!("{parent}/After"));
+    client.create_directory(&parent).unwrap();
+    client.create_directory(&root).unwrap();
+    let section = onestore::create_section("First.one", "First page", "Author").unwrap();
+    client
+        .create(&format!("{root}/First.one"), &section)
+        .unwrap();
+    let id = onestore::Store::parse(&section).unwrap().header.file_id;
+    let toc =
+        onestore::create_table_of_contents("Open Notebook.onetoc2", &[("First.one", id)]).unwrap();
+    client
+        .create(&format!("{root}/Open Notebook.onetoc2"), &toc)
+        .unwrap();
+    let cache = tempfile::tempdir().unwrap();
+    let open = || Notebook::open_smb(std::sync::Arc::clone(&client), &root, cache.path()).unwrap();
+    let held = format!("{root}/First.one");
+    let writer = other
+        .open(&held, true)
+        .unwrap()
+        .coordinate(&held, true, &[])
+        .unwrap();
+    let refused = open().rename_folder("After").unwrap_err();
+    assert!(
+        matches!(&refused, crate::Error::Io(error) if error.kind() == io::ErrorKind::WouldBlock),
+        "{refused}"
+    );
+    assert!(client.read_dir(&root, 10).is_ok());
+    writer.close().unwrap();
+    let to = open().rename_folder("After").unwrap();
+    assert_eq!(to, client.location(&renamed));
+    assert!(client.read_dir(&root, 10).is_err());
+    assert_eq!(
+        client
+            .read_storage(&format!("{renamed}/First.one"), 1 << 20)
+            .unwrap(),
+        section
+    );
+    for path in ["First.one", "Open Notebook.onetoc2"] {
+        client.delete(&format!("{renamed}/{path}")).unwrap();
+    }
+    client.delete(&renamed).unwrap();
+    client.delete(&parent).unwrap();
+}
+
 /// Signs in as `ONESTORE_SMB_LAB_USER` with `ONESTORE_SMB_LAB_PASSWORD` where set, else as a
 /// guest, to a server with a share `agent`; only lists and reads.
 #[test]

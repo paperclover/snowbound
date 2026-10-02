@@ -330,6 +330,10 @@ unavailable bin refuses the delete (`corpus/recycle-bin-repair`). `empty_recycle
 Empty Recycle Bin: Deleted Pages loses every page in one revision and each binned section's
 file goes, the bin's TOC left as it was (`corpus/recycle-bin-view`). An entry a TOC still
 lists for a file gone from its folder gives way to the file an edit gives its name.
+`rename_folder` renames the notebook's own folder, which OneNote 2010 opens again from its
+new name with no file inside changed (it drops the old one from its list): on a share it
+first takes and lets go of OneNote's writer locks on every section and TOC, refusing with
+`WouldBlock` while another writer holds one, then the replicas and listing follow.
 Edits keep entries in the order their ordering numbers give; a rename or colour keeps
 the numbers. Every created, renamed or moved file is placed with
 `onestore::place_file`, which sets the header's ancestor to the parent TOC's

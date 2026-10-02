@@ -811,6 +811,8 @@ struct State {
     /// Notebooks in iCloud Drive a thread is reading, or following the download of, by
     /// location.
     icloud_reading: HashSet<String>,
+    /// The notebook locations a folder rename takes a notebook from and to, while it does.
+    folder_rename: Option<(String, String)>,
     /// The user's tag list, which the toolbar, menus and Ctrl+1 to Ctrl+9 apply.
     tags: Vec<canvas::editor::NoteTag>,
     /// The Customize Tags dialog's list while it is open.
@@ -1197,6 +1199,7 @@ impl State {
             peers: None,
             server: None,
             icloud_reading: HashSet::new(),
+            folder_rename: None,
             tags: stored
                 .tags
                 .unwrap_or_else(canvas::editor::NoteTag::defaults),
@@ -3160,6 +3163,10 @@ impl State {
     fn apply(&mut self, command: Command) -> Result<(), Box<dyn Error>> {
         match command {
             Command::OpenSection(library, path) => {
+                // Its files are on their way to the renamed folder.
+                if self.folder_renaming(&library.location) {
+                    return Ok(());
+                }
                 if library.locked(&path) {
                     return self.show_locked(library, path);
                 }

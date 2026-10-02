@@ -1231,6 +1231,7 @@ impl crate::State {
     /// it, with a button to add one; or while none is on this computer yet.
     pub(crate) fn no_sections(&mut self, library: Arc<Library>) {
         let downloading = library.downloading();
+        let renaming = self.folder_renaming(&library.location);
         let new = crate::Command::Structure(
             library,
             crate::manage::Structure::NewSection {
@@ -1238,7 +1239,9 @@ impl crate::State {
             },
         );
         let id = self.ui.id("no sections");
-        let (title, buttons) = if downloading {
+        let (title, buttons) = if renaming {
+            ("Renaming the folder…", Vec::new())
+        } else if downloading {
             ("Downloading from iCloud Drive…", Vec::new())
         } else {
             (

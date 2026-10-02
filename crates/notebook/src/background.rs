@@ -42,7 +42,7 @@ const SETTLE: Duration = Duration::from_secs(1);
 /// its offline copy, where the notebook keeps them. A section a session holds is left to that
 /// session's worker, which the watch wakes. Dropping requests cancellation without waiting for
 /// the step in flight.
-pub struct Background(Arc<Shared>);
+pub struct Background(Arc<Shared>, Mutex<Option<crate::task::JoinHandle<()>>>);
 
 /// A section for `Background::watch`, as its notebook knows it.
 pub struct Known {
@@ -138,7 +138,7 @@ impl Background {
         });
         let weak = Arc::downgrade(&shared);
         let owner = Arc::clone(&shared);
-        crate::task::spawn("onestore-background", move || async move {
+        let thread = crate::task::spawn("onestore-background", move || async move {
             let signal = &owner.signal;
             let mut bound: Option<(B, L)> = None;
             let mut news = false;
@@ -295,7 +295,7 @@ impl Background {
                 }
             }
         })?;
-        Ok(Self(shared))
+        Ok(Self(shared, Mutex::new(Some(thread))))
     }
 
     /// Keeps the sections of a notebook on a share in sync while they are not open, with an
@@ -446,6 +446,21 @@ impl Background {
         self.0.discard.store(true, Ordering::Release);
         self.0.signal.stopped.store(true, Ordering::Release);
         self.0.signal.wake();
+    }
+
+    /// Stops for good, waiting for the step in flight, so that no replica stays open and no
+    /// watch holds the notebook's folder.
+    pub fn stop(&self) {
+        self.0.signal.stopped.store(true, Ordering::Release);
+        self.0.signal.wake();
+        let thread = self.1.lock().ok().and_then(|mut thread| thread.take());
+        // In the browser no step is in flight while another task runs.
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(thread) = thread {
+            let _ = thread.join();
+        }
+        #[cfg(target_arch = "wasm32")]
+        drop(thread);
     }
 
     /// Working offline, nothing is checked until `wake`, or until working online again, which

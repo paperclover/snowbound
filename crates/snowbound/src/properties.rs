@@ -15,6 +15,8 @@ pub struct Properties {
     name: String,
     /// A colour picked, COLORREF.
     color: Option<u32>,
+    /// Renames the notebook's folder to a name changed.
+    rename_folder: bool,
 }
 
 fn id() -> Id {
@@ -37,6 +39,7 @@ impl State {
             name: library.name.clone(),
             library,
             color: None,
+            rename_folder: true,
         });
         self.ui.open_popup(id());
         self.ui.focus_all(name_field());
@@ -126,7 +129,28 @@ impl State {
         if let Some(node) = ui.access(name_field()) {
             node.set_label("Display name");
         }
-        dim(ui, "hint", "Doesn’t change the notebook’s folder name");
+        let renamable = dialog.name.trim() != dialog.library.name
+            && (dialog.library.renamed_location(dialog.name.trim())).is_some();
+        if renamable {
+            let rename = ui::check_box(ui, "rename", "Rename the folder too", dialog.rename_folder);
+            if rename.clicked {
+                dialog.rename_folder = !dialog.rename_folder;
+            }
+            if dialog.rename_folder && dialog.library.on_smb() {
+                ui.leaf(
+                    "shared",
+                    Spec {
+                        flags: ui::Flags::CLIP,
+                        size: [fill(), px(row * 0.8)],
+                        text: Some("Other computers must reopen it from the new folder"),
+                        icon: Some(art::WARNING),
+                        ..Spec::default()
+                    },
+                );
+            }
+        } else {
+            dim(ui, "hint", "Doesn’t change the notebook’s folder name");
+        }
         label(ui, "Color:");
         let shown = dialog.color.or(dialog.library.color());
         let named = SECTION_COLORS
@@ -161,6 +185,13 @@ impl State {
         ui.close();
         ui.close();
         let name = dialog.name.trim();
+        if ok && !name.is_empty() && renamable && dialog.rename_folder {
+            let (library, name, color) =
+                (Arc::clone(&dialog.library), name.to_owned(), dialog.color);
+            self.ui.close_popup(id());
+            self.properties = None;
+            return self.rename_notebook(library, name, color);
+        }
         if ok && !name.is_empty() {
             if name != dialog.library.name || dialog.color.is_some() {
                 self.commands.push(Command::Structure(

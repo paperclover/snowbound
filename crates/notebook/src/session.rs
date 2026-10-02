@@ -92,6 +92,9 @@ pub trait Storage: Send + Sync {
     fn hide(&self, path: &str) -> Result<()>;
     /// Renames or moves a file or directory; an existing target is an error.
     fn rename(&self, from: &str, to: &str) -> Result<()>;
+    /// Renames the notebook's own folder to `name` beside it once no other writer holds any
+    /// of `files`; the location it then has.
+    fn rename_root(&self, name: &str, files: &[String]) -> Result<String>;
     /// Renames a file over another, replacing it.
     fn replace(&self, from: &str, to: &str) -> Result<()>;
     /// Deletes a file or an empty directory.
@@ -211,6 +214,18 @@ impl Storage for Directory {
         Ok(fs::rename(self.path(from), self.path(to))?)
     }
 
+    /// A local file system shows no other writer's hold; one that refuses to rename a folder
+    /// whose files are open says so as the rename fails.
+    fn rename_root(&self, name: &str, _: &[String]) -> Result<String> {
+        let to = self.0.with_file_name(name);
+        // A change of case alone finds the folder itself on a case-insensitive volume.
+        if fs::metadata(&to).is_ok() && fs::canonicalize(&to)? != self.0 {
+            return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
+        }
+        fs::rename(&self.0, &to)?;
+        Ok(to.to_string_lossy().into_owned())
+    }
+
     fn replace(&self, from: &str, to: &str) -> Result<()> {
         Ok(fs::rename(self.path(from), self.path(to))?)
     }
@@ -304,6 +319,29 @@ impl Storage for Share {
 
     fn rename(&self, from: &str, to: &str) -> Result<()> {
         Ok(self.client.rename(&self.path(from), &self.path(to))?)
+    }
+
+    fn rename_root(&self, name: &str, files: &[String]) -> Result<String> {
+        if self.root.is_empty() {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
+        }
+        for file in files {
+            self.client.unheld(&self.path(file))?;
+        }
+        let (parent, _) = split(&self.root);
+        let taken = self
+            .client
+            .read_dir(parent, LIMITS.entries)?
+            .iter()
+            .any(|entry| {
+                entry.name.eq_ignore_ascii_case(name) && entry.name != split(&self.root).1
+            });
+        if taken {
+            return Err(io::Error::from(io::ErrorKind::AlreadyExists).into());
+        }
+        let to = catalog_path(parent, name);
+        self.client.rename(&self.root, &to)?;
+        Ok(self.client.location(&to))
     }
 
     fn replace(&self, from: &str, to: &str) -> Result<()> {
@@ -408,13 +446,8 @@ impl Notebook {
         cache: impl AsRef<Path>,
     ) -> Result<Self> {
         let cache = cache.as_ref().to_path_buf();
-        let listings = cache.join("listings");
-        fs::create_dir_all(&listings)?;
-        let name: String = <sha2::Sha256 as sha2::Digest>::digest(storage.location())[..16]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        let listing = listings.join(format!("{name}.json"));
+        let listing = listing(&cache, &storage.location());
+        fs::create_dir_all(listing.parent().unwrap_or(&cache))?;
         let mut read = fs::read(&listing)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -736,6 +769,45 @@ impl Notebook {
         }
         self.refresh()?;
         Ok(renamed)
+    }
+
+    /// Renames the notebook's folder to `name`, as OneNote 2010 finds a notebook folder renamed
+    /// outside it: no file inside changes, and it opens the folder again by its new name. Refused,
+    /// `WouldBlock`, while another writer holds one of its sections or tables of contents, and
+    /// `AlreadyExists` where `name` is taken. The replicas and the catalog's listing follow, so
+    /// edits waiting publish to the renamed folder; every replica must be closed. Returns the
+    /// notebook's new location, as `crate::location` names it.
+    pub fn rename_folder(mut self, name: &str) -> Result<String> {
+        if !folder_name(name) {
+            return Err(io::Error::from(io::ErrorKind::InvalidInput).into());
+        }
+        let from = self.storage.location();
+        let files: Vec<String> = (self.catalog.folders())
+            .flat_map(|folder| {
+                let toc = folder.toc.as_ref().map(|toc| &toc.filename);
+                (toc.map(|toc| catalog_path(&folder.path, toc)).into_iter())
+                    .chain(folder.sections.iter().map(|section| section.path.clone()))
+            })
+            .collect();
+        let to = self.storage.rename_root(name, &files)?;
+        let mut moves = vec![(from.clone(), to.clone())];
+        moves.extend(
+            (self.catalog.sections())
+                .filter(|section| section.copy)
+                .map(|section| {
+                    (
+                        replica_location(&from, section),
+                        replica_location(&to, section),
+                    )
+                }),
+        );
+        for (from, to) in moves {
+            crate::location::moved(&self.cache, &from, &to)?;
+        }
+        let _ = fs::remove_file(&self.listing);
+        self.listing = listing(&self.cache, &to);
+        self.keep_listing();
+        Ok(to)
     }
 
     /// Sets a section's colour (COLORREF) in its own metadata, where OneNote keeps it.
@@ -1676,6 +1748,24 @@ pub(crate) fn lists(image: &[u8], file: [u8; 16]) -> Result<bool> {
             Some(onestore::document::Kind::Toc { identity: Some(identity), .. }) if *identity == file
         )
     }))
+}
+
+/// Where the cache keeps what reading the catalog of the notebook at `location` took.
+fn listing(cache: &Path, location: &str) -> PathBuf {
+    let name: String = <sha2::Sha256 as sha2::Digest>::digest(location)[..16]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    cache.join("listings").join(format!("{name}.json"))
+}
+
+/// Whether `name` can name a folder on every system a notebook's readers use, Windows's
+/// included.
+fn folder_name(name: &str) -> bool {
+    component(name)
+        && !name.contains(['<', '>', ':', '"', '|', '?', '*'])
+        && !name.chars().any(char::is_control)
+        && !name.ends_with(['.', ' '])
 }
 
 fn split(path: &str) -> (&str, &str) {

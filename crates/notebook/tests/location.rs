@@ -168,6 +168,59 @@ fn a_notebook_the_app_moves_keeps_its_queued_edits() {
 }
 
 #[test]
+fn renaming_a_notebook_folder_keeps_its_queued_edits_and_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let root = notebook(directory.path(), "Notebook");
+    let space = queued(&root, &cache, "Queued ");
+    let before = std::fs::read(root.join("Second.one")).unwrap();
+    let renamed = directory.path().join("Renamed");
+    let to = Notebook::open(&root, &cache)
+        .unwrap()
+        .rename_folder("Renamed")
+        .unwrap();
+    assert_eq!(to, notebook::location::local(&renamed).unwrap());
+    assert!(std::fs::metadata(&root).is_err());
+    // OneNote finds nothing inside changed.
+    assert_eq!(std::fs::read(renamed.join("Second.one")).unwrap(), before);
+    // A new notebook where the old one was takes nothing of the queue.
+    notebook(directory.path(), "Notebook");
+    assert_eq!(published(&renamed, &cache), 1);
+    assert!(stored(&renamed.join("First.one"), space).starts_with("Queued "));
+    assert_eq!(published(&root, &cache), 0);
+}
+
+#[test]
+fn a_notebook_folder_rename_refuses_a_taken_or_unportable_name_and_changes_nothing() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let root = notebook(directory.path(), "Notebook");
+    notebook(directory.path(), "Taken");
+    for (name, kind) in [
+        ("Taken", std::io::ErrorKind::AlreadyExists),
+        ("Notes: 2026", std::io::ErrorKind::InvalidInput),
+        ("a/b", std::io::ErrorKind::InvalidInput),
+        ("Trailing.", std::io::ErrorKind::InvalidInput),
+    ] {
+        let error = Notebook::open(&root, &cache)
+            .unwrap()
+            .rename_folder(name)
+            .unwrap_err();
+        assert!(
+            matches!(&error, notebook::Error::Io(error) if error.kind() == kind),
+            "{name}: {error}"
+        );
+        assert!(std::fs::metadata(root.join("First.one")).is_ok());
+    }
+    // A change of case alone renames the folder itself.
+    let to = Notebook::open(&root, &cache)
+        .unwrap()
+        .rename_folder("NOTEBOOK")
+        .unwrap();
+    assert!(to.ends_with("NOTEBOOK"));
+}
+
+#[test]
 fn a_notebook_moved_outside_the_app_takes_its_replicas_along() {
     let directory = tempfile::tempdir().unwrap();
     let cache = directory.path().join("cache");

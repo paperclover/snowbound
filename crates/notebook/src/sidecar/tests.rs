@@ -139,6 +139,10 @@ impl Storage for Folder {
         Ok(())
     }
 
+    fn rename_root(&self, _: &str, _: &[String]) -> Result<String> {
+        unreachable!()
+    }
+
     fn replace(&self, from: &str, to: &str) -> Result<()> {
         let mut files = self.files.lock().unwrap();
         let bytes = files.remove(from).ok_or_else(missing)?;

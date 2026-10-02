@@ -80,8 +80,9 @@ by its own path instead, the original being the one the folder's TOC lists.
 
 When a notebook moves, its queue follows by one of three roads:
 
-- **the app moved it** (iOS Rename): `location::moved` moves the folder's
-  replicas to the new location;
+- **the app moved it** (iOS Rename, or Notebook Properties' "Rename the folder
+  too"): `location::moved` moves the folder's replicas to the new location, the
+  latter through `Notebook::rename_folder` once no other writer holds a file;
 - **something else moved it** (Finder): on open, a section with no replica takes
   one from the folder of a local location that no longer exists, if the file
   stands as that replica's base or has moved on from it (a higher header

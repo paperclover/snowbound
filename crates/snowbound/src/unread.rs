@@ -91,6 +91,14 @@ impl Reads {
         })
     }
 
+    /// Keeps what was read in the notebook at `from` for it at `to`, where it moved.
+    pub fn moved(&mut self, from: &str, to: &str) {
+        if let Some(kept) = self.notebooks.remove(from) {
+            self.notebooks.insert(to.to_owned(), kept);
+            self.save();
+        }
+    }
+
     /// Whether Show Unread Changes is on for the notebook at `notebook`.
     pub fn shown(&self, notebook: &str) -> bool {
         self.notebooks.get(notebook).is_none_or(|kept| !kept.hidden)
