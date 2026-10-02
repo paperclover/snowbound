@@ -41,9 +41,8 @@ Snowbound.
   EGL. `WGPU_BACKEND=gl ./bin/snowbound ...` forces OpenGL.
 - fontconfig, and X11 or Wayland with libxkbcommon.
 - The desktop's portal (xdg-desktop-portal) for choosing, printing and opening
-  files. Questions, alerts and the page date and time use zenity or kdialog
-  where installed. Where none of these is, Snowbound asks, and chooses files,
-  with its own dialogs.
+  files. Without it, Snowbound chooses files with its own dialog, as it always
+  asks questions and shows alerts.
 
 ## Known limits
 

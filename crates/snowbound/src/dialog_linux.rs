@@ -1,6 +1,5 @@
-//! Snowbound's own dialogs, drawn with the interface kit in the window, where no desktop
-//! portal, zenity or kdialog can ask, as on GNOME's image-based systems or a bare X11
-//! desktop: messages, questions, a line of text, and a file chooser.
+//! Snowbound's own dialogs on Linux, drawn with the interface kit in the window: messages,
+//! questions and a line of text, and a file chooser where no desktop portal answers.
 
 use crate::{Reply, State, UserEvent, art};
 use accesskit::Role;

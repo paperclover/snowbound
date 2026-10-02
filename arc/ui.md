@@ -49,7 +49,7 @@ look and move as the desktop's own (see [platforms](platforms.md)).
 
 The platform still owns what it's best at and what people expect to be
 native. That means file pickers, alerts and date pickers (AppKit's sheets on
-macOS; the portal, zenity or kdialog on Linux, else the kit's own), none of
+macOS; the portal on Linux, which otherwise asks with the kit's own), none of
 which blocks the window, the caret and selection colours, each platform's
 editing chords, the keychain, the traffic lights and window frames. On iOS the
 split goes further (see [platforms](platforms.md)).
