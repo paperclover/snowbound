@@ -103,7 +103,6 @@ windows-sys = { version = "0.61", features = [
 
 [target.'cfg(target_os = "linux")'.dependencies]
 accesskit_winit = { version = "0.34.0", default-features = false, features = ["accesskit_unix", "async-io"] }
-smithay-clipboard = "0.7.3"
 # Scales the window's icon.
 image = { version = "0.25", default-features = false }
 # Loads fontconfig at run time, so builds need no fontconfig headers or library.
@@ -118,6 +117,7 @@ sctk-adwaita = { version = "0.10.1", default-features = false }
 wayland-backend = { version = "0.3.17", features = ["client_system"] }
 wayland-client = "0.31.15"
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+wayland-sys = { version = "0.31.11", features = ["client"] }
 # Brings the window forward on X11, on a connection of its own.
 x11rb = "0.13.2"
 

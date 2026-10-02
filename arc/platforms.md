@@ -104,7 +104,10 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   and so is Enchant, which checks spelling with whatever dictionaries its
   providers have; without it, words go unmarked.
 - Wayland's clipboard goes through the window's own connection, since not every
-  compositor offers a clipboard to clients without a window.
+  compositor offers a clipboard to clients without a window. Its queue wakes the
+  event loop, which answers other apps' pastes with no thread of its own. Text,
+  pages, pictures and files are read there too, not through Xwayland. X11
+  sessions use arboard.
 - The executable carries its desktop entry and icon (`desktop_linux.rs`). The
   window is `net.paperclover.snowbound` to Wayland and X11 alike. Where a
   Wayland compositor lacks xdg-toplevel-icon, as GNOME's does, it finds the

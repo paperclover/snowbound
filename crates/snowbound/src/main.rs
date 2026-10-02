@@ -6,6 +6,9 @@ mod aqua;
 mod art;
 mod attachment;
 mod background;
+#[cfg(target_os = "linux")]
+#[path = "clipboard_linux.rs"]
+mod clipboard;
 mod commands;
 #[cfg(all(test, feature = "wgpu", not(windows)))]
 mod conflict_render;
@@ -278,6 +281,9 @@ fn confirm(message: &str, detail: &str, cancel: &str, action: &str, reply: Reply
 
 enum UserEvent {
     Quit,
+    /// The Wayland compositor asked something of the clipboard.
+    #[cfg(target_os = "linux")]
+    Clipboard,
     /// Quits without asking, as after the user agreed to discard a temporary page.
     #[cfg(not(target_arch = "wasm32"))]
     Exit,
@@ -6194,6 +6200,12 @@ impl State {
             UserEvent::Quit | UserEvent::Replay(Replay::Quit) => {}
             #[cfg(not(target_arch = "wasm32"))]
             UserEvent::Exit => {}
+            #[cfg(target_os = "linux")]
+            UserEvent::Clipboard => {
+                if let Clipboard::System(clipboard) = &mut self.clipboard {
+                    clipboard.serve();
+                }
+            }
             UserEvent::Picture(bytes) => {
                 if let Err(error) = self.insert_picture(bytes, None) {
                     eprintln!("{error}");
@@ -6623,7 +6635,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 
     /// Drops the window's state while the event loop still holds the Wayland connection the
-    /// clipboard's thread and the surface use; `run_app` closes it on returning.
+    /// clipboard and the surface use; `run_app` closes it on returning.
     fn exiting(&mut self, _: &ActiveEventLoop) {
         self.restart = self
             .state
