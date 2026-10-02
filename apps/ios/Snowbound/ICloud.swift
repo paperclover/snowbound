@@ -51,6 +51,10 @@ enum ICloud {
     /// the container.
     private(set) static var documents: URL?
 
+    /// Tooling launched the app, naming a `SNOWBOUND_` variable such as `SNOWBOUND_SCRIPT`: it
+    /// reaches no account's iCloud, only the folder `SNOWBOUND_ICLOUD` names.
+    private static let automated = ProcessInfo.processInfo.environment.keys.contains { $0.hasPrefix("SNOWBOUND_") }
+
     /// Whether iCloud is signed in with iCloud Drive on, container or not.
     static var signedIn: Bool { FileManager.default.ubiquityIdentityToken != nil }
 
@@ -58,6 +62,7 @@ enum ICloud {
     /// another device adds or removes; call once at launch.
     static func start() {
         sb_set_versions(listVersions, retireVersion)
+        if automated { return lookUp() }
         NotificationCenter.default.addObserver(
             forName: .NSUbiquityIdentityDidChange, object: nil, queue: .main
         ) { _ in lookUp() }
@@ -84,7 +89,7 @@ enum ICloud {
                 return URL(fileURLWithPath: folder, isDirectory: true)
             }
             #endif
-            guard
+            guard !automated,
                 let container = FileManager.default.url(forUbiquityContainerIdentifier: identifier)?
                     .appendingPathComponent("Documents", isDirectory: true)
             else { return nil }

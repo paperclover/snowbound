@@ -111,12 +111,12 @@ pub fn look_up(changed: impl Fn() + Send + Sync + 'static) {
 }
 
 /// The container's Documents, or for trying the app out without its entitlement, the folder
-/// `SNOWBOUND_ICLOUD_FOLDER` names in its place.
+/// `SNOWBOUND_ICLOUD_FOLDER` names in its place; tooling reaches only that one.
 fn container() -> Option<PathBuf> {
     if let Some(folder) = std::env::var_os("SNOWBOUND_ICLOUD_FOLDER") {
         return Some(folder.into());
     }
-    if !available() {
+    if !available() || crate::automated() {
         return None;
     }
     let manager = unsafe { NSFileManager::defaultManager() };
@@ -127,9 +127,9 @@ fn container() -> Option<PathBuf> {
     Some(documents)
 }
 
-/// The top of iCloud Drive, where it is on.
+/// The top of iCloud Drive, where it is on and a person, not tooling, runs the app.
 pub fn drive() -> Option<PathBuf> {
-    if !available() {
+    if !available() || crate::automated() {
         return None;
     }
     let drive = PathBuf::from(std::env::var_os("HOME")?)

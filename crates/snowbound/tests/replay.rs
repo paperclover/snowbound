@@ -4,7 +4,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// A scratch folder, deleted when dropped.
+/// A scratch folder, deleted when dropped. Its replays run with a home folder of its own, its
+/// `settings.json` unless removed, and its `icloud` folder, where made, standing in for iCloud's.
 struct Scratch(PathBuf);
 
 impl Scratch {
@@ -12,6 +13,7 @@ impl Scratch {
         let path = std::env::temp_dir().join(format!("snowbound-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(path.join("notebook")).unwrap();
+        std::fs::create_dir_all(path.join("home")).unwrap();
         std::fs::write(
             path.join("settings.json"),
             r#"{"user_name": "Snowbound Test"}"#,
@@ -52,15 +54,21 @@ fn replay(scratch: &Scratch, notebook: Option<&Path>, steps: &[&str]) -> Vec<Str
     }
     script += "quit\n";
     std::fs::write(dir.join("script"), script).unwrap();
-    let status = Command::new(env!("CARGO_BIN_EXE_snowbound"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_snowbound"));
+    if dir.join("icloud").is_dir() {
+        command.env("SNOWBOUND_ICLOUD_FOLDER", dir.join("icloud"));
+    }
+    command
+        .env("HOME", dir.join("home"))
         .env("SNOWBOUND_REPLAY", dir.join("script"))
         .arg("--notebook")
         .arg(dir.join("notebook"))
         .args(["--cache".as_ref(), dir.join("cache").as_os_str()])
-        .args(["--settings".as_ref(), dir.join("settings.json").as_os_str()])
-        .args(["--screenshot".as_ref(), dir.join("shot").as_os_str()])
-        .status()
-        .unwrap();
+        .args(["--screenshot".as_ref(), dir.join("shot").as_os_str()]);
+    if dir.join("settings.json").exists() {
+        command.args(["--settings".as_ref(), dir.join("settings.json").as_os_str()]);
+    }
+    let status = command.status().unwrap();
     assert!(status.success(), "the replay ended with {status}");
     trees
         .iter()
@@ -433,4 +441,63 @@ fn a_launch_returns_to_the_page_each_notebook_was_left_on() {
         Some("*Delete a whole table"),
         "{other}"
     );
+}
+
+/// The names of the rows that fold in `tree`'s sidebar: its notebooks, where none holds a
+/// section group.
+fn notebooks(tree: &str) -> Vec<&str> {
+    let lines: Vec<&str> = tree.lines().map(str::trim_start).collect();
+    lines
+        .windows(2)
+        .filter(|pair| {
+            pair[0].starts_with("TreeItem ")
+                && ["Button \"Collapse\"", "Button \"Expand\""]
+                    .iter()
+                    .any(|fold| pair[1].starts_with(fold))
+        })
+        .filter_map(|pair| pair[0].split('"').nth(1))
+        .collect()
+}
+
+/// Copies the notebook at `source` to `folder`.
+fn copy_notebook(source: &Path, folder: &Path) {
+    std::fs::create_dir_all(folder).unwrap();
+    for entry in std::fs::read_dir(source).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), folder.join(entry.file_name())).unwrap();
+    }
+}
+
+/// Tooling never reaches the account's own notebooks: not those its settings list, nor
+/// iCloud's beyond the folder it names.
+#[test]
+fn a_replay_opens_only_the_notebooks_and_icloud_folder_it_is_given() {
+    let scratch = Scratch::new("isolated");
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
+    let account = scratch.0.join("Account");
+    copy_notebook(&notebook, &account);
+    let settings = scratch
+        .0
+        .join("home/Library/Application Support/Snowbound/settings.json");
+    std::fs::create_dir_all(settings.parent().unwrap()).unwrap();
+    let listed = serde_json::json!({"sidebar": true, "notebooks": [account]});
+    std::fs::write(&settings, listed.to_string()).unwrap();
+    std::fs::remove_file(scratch.0.join("settings.json")).unwrap();
+    let sidebar = [
+        "modifiers command",
+        "key \\",
+        "modifiers",
+        "settle",
+        "accessibility tree",
+    ];
+    let [tree] = replay(&scratch, Some(&notebook), &sidebar)
+        .try_into()
+        .unwrap();
+    assert_eq!(notebooks(&tree), ["notebook"], "{tree}");
+    copy_notebook(&notebook, &scratch.0.join("icloud/Cloudy"));
+    let [tree] = replay(&scratch, None, &sidebar).try_into().unwrap();
+    let mut listed = notebooks(&tree);
+    listed.sort_unstable();
+    assert_eq!(listed, ["Cloudy", "notebook"], "{tree}");
 }

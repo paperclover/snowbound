@@ -385,6 +385,16 @@ impl From<accesskit_winit::Event> for UserEvent {
     }
 }
 
+/// Tooling drives the app, with `--screenshot` or `SNOWBOUND_REPLAY`: it reads only the
+/// settings and iCloud folder it is given, never the account's own.
+#[cfg(not(target_arch = "wasm32"))]
+static AUTOMATED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(not(target_arch = "wasm32"))]
+fn automated() -> bool {
+    AUTOMATED.load(Ordering::Relaxed)
+}
+
 /// With `SNOWBOUND_PROFILE` set, prints how long a phase of the frame took since `start`.
 fn lap(phase: &str, start: Instant) {
     static PROFILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -6317,6 +6327,10 @@ fn launch() -> Result<(), Box<dyn Error>> {
             positional.push(arg);
         }
     }
+    AUTOMATED.store(
+        screenshot.is_some() || std::env::var_os("SNOWBOUND_REPLAY").is_some(),
+        Ordering::Relaxed,
+    );
     let stored = notebook.is_some() || section.is_some();
     if (editable || stored) && !positional.is_empty()
         || notebook.is_some() && (section.is_some() || reference.is_some())
@@ -6349,7 +6363,7 @@ fn launch() -> Result<(), Box<dyn Error>> {
         Some(cache) => cache,
         None => platform::cache_dir().ok_or("HOME is not set.")?,
     };
-    let settings_file = settings_file.or_else(settings::default_path);
+    let settings_file = settings_file.or_else(|| settings::default_path().filter(|_| !automated()));
     let saved = settings_file
         .as_deref()
         .map(settings::Settings::load)
