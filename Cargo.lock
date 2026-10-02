@@ -1040,6 +1040,7 @@ dependencies = [
  "png",
  "pollster",
  "roxmltree",
+ "skrifa",
  "subsetter",
  "swash",
  "web-time",

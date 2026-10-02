@@ -1,3 +1,4 @@
+mod colr;
 #[cfg(all(feature = "wgpu", windows))]
 mod d3d11;
 #[cfg(all(feature = "wgpu", windows))]
@@ -1108,10 +1109,10 @@ impl Renderer {
                     Source::Outline,
                 ]);
                 // Swash rasterizes outlines in Y-up coordinates.
-                render.format(Format::Alpha).offset(Vector::new(
-                    f32::from(phase[0]) * 0.25,
-                    -f32::from(phase[1]) * 0.25,
-                ));
+                let offset = [f32::from(phase[0]) * 0.25, -f32::from(phase[1]) * 0.25];
+                render
+                    .format(Format::Alpha)
+                    .offset(Vector::new(offset[0], offset[1]));
                 if run.embolden {
                     render.embolden(size / 24.0);
                 }
@@ -1121,7 +1122,16 @@ impl Renderer {
                         Angle::from_degrees(0.0),
                     )));
                 }
-                let image = render.render(&mut scaler, glyph_id).map(|mut image| {
+                let image = colr::paint(
+                    run.font.as_ref(),
+                    run.index,
+                    glyph_id,
+                    size,
+                    run.coords,
+                    offset,
+                )
+                .or_else(|| render.render(&mut scaler, glyph_id))
+                .map(|mut image| {
                     if image.content == Content::Mask {
                         let coverage = text_coverage(tone);
                         for alpha in &mut image.data {

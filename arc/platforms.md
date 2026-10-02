@@ -180,7 +180,8 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
 - Spelling is Hunspell's American English dictionary through `spellbook`, fetched beside the
   module; Add to Dictionary keeps its words in the browser's files. Text the bundled faces
   lack takes Noto's, fetched by script the first time a page holds it (a CJK face cut to
-  the national standards' characters by `tools/web/subset_cjk.py`).
+  the national standards' characters by `tools/web/subset_cjk.py`; emoji in Noto Color
+  Emoji's COLRv1 outlines, which `draw` paints itself), and the page is laid out again.
 - AccessKit has no web adapter, so once a screen reader asks for it (a visually hidden
   button, then on every visit) the trees AccessKit would get are mirrored as hidden
   elements with ARIA roles; acting on one sends AccessKit's action back.

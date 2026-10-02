@@ -1215,6 +1215,16 @@ impl CanvasEditor {
         Ok(true)
     }
 
+    /// Lays every outline out again, keeping its text and selection, as after fonts arrived
+    /// that draw characters the old layout had no face for.
+    pub fn relayout(&mut self, engine: &mut TextEngine) -> Result<(), EditorError> {
+        for outline in &mut self.outlines {
+            outline.shaped =
+                TextOutline::from_outline(engine, &outline.snapshot(), &self.definitions)?.shaped;
+        }
+        Ok(())
+    }
+
     /// Rebuilds the stored page, restoring the title areas and read-only objects import split up.
     pub fn page(&self) -> Result<Page, EditorError> {
         let mut objects: Vec<PageObject> = Vec::new();

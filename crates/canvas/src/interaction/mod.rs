@@ -390,6 +390,12 @@ impl PageView {
         self.moved()
     }
 
+    /// Lays the page out again where it stands, as after fonts arrived.
+    pub fn relayout(&mut self) -> Result<Response> {
+        self.editor.relayout(&mut self.engine)?;
+        self.moved()
+    }
+
     /// Shows another page as OneNote opens one, keeping the zoom: at `place` if the page was
     /// left there earlier. OneNote keeps the scroll in device pixels across zoom changes and
     /// does not reveal the restored selection. Returns the editor of the page left.

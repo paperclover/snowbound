@@ -9,7 +9,7 @@ default = ["wgpu"]
 # The renderer; `edit` needs only parley. It submits through wgpu, or without it through
 # OpenGL 2.1, for Mac OS X 10.6. On Windows it has Direct3D 11 and OpenGL besides, and its
 # maker picks one, as Windows 7 has no Direct3D 12.
-render = ["dep:base64", "dep:bytemuck", "dep:image", "dep:linebender_resource_handle", "dep:roxmltree", "dep:swash"]
+render = ["dep:base64", "dep:bytemuck", "dep:image", "dep:linebender_resource_handle", "dep:roxmltree", "dep:skrifa", "dep:swash"]
 wgpu = ["render", "dep:wgpu", "dep:windows"]
 # Writes layers as PDF pages, text as real text in subset fonts.
 pdf = ["render", "dep:miniz_oxide", "dep:pdf-writer", "dep:subsetter"]
@@ -27,6 +27,8 @@ miniz_oxide = { version = "0.8", optional = true }
 pdf-writer = { version = "0.15", optional = true }
 roxmltree = { version = "0.21", optional = true }
 subsetter = { version = "0.2.6", default-features = false, optional = true }
+# COLRv1 glyphs, which swash can't paint.
+skrifa = { version = "0.44.0", optional = true }
 swash = { version = "0.2.10", optional = true }
 wgpu = { workspace = true, optional = true }
 

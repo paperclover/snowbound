@@ -6,12 +6,15 @@ static folder and publishes it to the share's web/ folder.
     python3 tools/release_web.py --publish                       # build, then replace web/
 """
 import argparse
+import gzip
+import hashlib
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 # The one target folder wasm builds share, apart from the native builds in target/.
@@ -21,6 +24,10 @@ FONTS = ROOT / 'crates/canvas/assets/fonts'
 PUBLISHED = Path('/Volumes/clover/Documents/Public/Snowbound/web')
 # copyparty lists the folder itself, so the app is at its index.html.
 URL = 'https://file.paperclover.net/shr/snowbound/web/index.html'
+EMOJI_URL = 'https://github.com/googlefonts/noto-emoji/raw/v2.051/fonts/Noto-COLRv1.ttf'
+EMOJI_SHA256 = '0ae57fe58645638523ba35f388d93739d292539a9acb84df5700c81b1e1a28d2'
+# As `EMOJI` in src/web.rs names it.
+EMOJI_FONT = 'Noto-COLRv1.ttf.gz'
 # Size over speed where it costs little: the module is most of the first load.
 PROFILE = ['--config', 'profile.release.opt-level="s"']
 
@@ -98,6 +105,16 @@ def fallbacks(fonts):
         run(['uv', 'run', '--no-project', '--with', 'fonttools', 'python', ROOT / 'tools/web/subset_cjk.py',
              collection, cjk])
     shutil.copy(cjk, fonts)
+    # Noto Color Emoji as COLRv1 outlines (4.8 MB), which src/render/colr.rs in draw paints,
+    # gzipped to 2.7 MB for the glue to inflate; nixpkgs has only its 10 MB of bitmaps.
+    emoji = TARGET / EMOJI_FONT
+    if not emoji.exists():
+        data = urllib.request.urlopen(EMOJI_URL).read()
+        if hashlib.sha256(data).hexdigest() != EMOJI_SHA256:
+            sys.exit(f'{EMOJI_URL} is not the font this build pins')
+        emoji.write_bytes(gzip.compress(data, 9, mtime=0))
+    shutil.copy(emoji, fonts)
+    shutil.copy(ROOT / 'crates/draw/assets/NotoColorEmoji-OFL.txt', fonts)
     (fonts / 'Noto-OFL.txt').write_text('Noto fonts: SIL Open Font License 1.1, https://openfontlicense.org\n')
 
 

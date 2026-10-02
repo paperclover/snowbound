@@ -289,8 +289,14 @@ export function pickNotebook() {
 
 export function fetchFont(name) {
   fetch(`fonts/${name}`)
-    .then((response) => (response.ok ? response.arrayBuffer() : Promise.reject(response.status)))
-    .then((data) => wasm.font_arrived(new Uint8Array(data)))
+    .then((response) => {
+      if (!response.ok) return Promise.reject(response.status);
+      const body = name.endsWith(".gz")
+        ? new Response(response.body.pipeThrough(new DecompressionStream("gzip")))
+        : response;
+      return body.arrayBuffer();
+    })
+    .then((data) => wasm.font_arrived(name, new Uint8Array(data)))
     .catch((error) => console.warn("Font", name, error));
 }
 

@@ -96,7 +96,7 @@ const FOLDERS: &str = "/Folders";
 const CHOSEN: &str = "/Chosen";
 /// Faces for what the bundled ones lack, beside them in `fonts/`, fetched the first time a
 /// page holds a character in their ranges: Noto's, by script.
-const FALLBACKS: [(&str, &[RangeInclusive<u32>]); 6] = [
+const FALLBACKS: [(&str, &[RangeInclusive<u32>]); 7] = [
     (
         "NotoSansArabic.ttf",
         &[
@@ -128,7 +128,20 @@ const FALLBACKS: [(&str, &[RangeInclusive<u32>]); 6] = [
             0xff00..=0xffef,
         ],
     ),
+    (
+        EMOJI,
+        &[
+            0x20e3..=0x20e3,
+            0x2300..=0x23ff,
+            0x2600..=0x27bf,
+            0x2b00..=0x2bff,
+            0xfe0f..=0xfe0f,
+            0x1f000..=0x1faff,
+        ],
+    ),
 ];
+/// Noto Color Emoji as COLRv1 outlines, gzipped: a third the size of its bitmaps.
+const EMOJI: &str = "Noto-COLRv1.ttf.gz";
 /// How long changed files wait to be written out, so a burst of edits writes once.
 const STORE_AFTER: Duration = Duration::from_millis(500);
 
@@ -1373,29 +1386,40 @@ fn fetch_fallbacks(text: &str) {
     }
 }
 
-/// A fallback face arrived: the page, its loaders and the interface draw what the bundled
-/// faces lack with it, and the page is laid out again.
+/// Fallback face `name` arrived: the page, its loaders and the interface draw what the
+/// bundled faces lack with it, and the page is laid out again.
 #[wasm_bindgen]
-pub fn font_arrived(bytes: Vec<u8>) {
+pub fn font_arrived(name: String, bytes: Vec<u8>) {
+    use parley::fontique::{Collection, GenericFamily};
     let face = parley::fontique::Blob::new(Arc::new(bytes));
-    send(UserEvent::Then(Box::new(move |state| {
-        let collection = &mut state.view.engine.fonts.collection;
-        let families: Vec<String> = collection
-            .register_fonts(face.clone(), None)
-            .into_iter()
-            .filter_map(|(family, _)| collection.family_name(family).map(String::from))
+    // Emoji take the emoji face before any script's fallback, which may draw them plain.
+    let register = move |collection: &mut Collection, face| {
+        let ids: Vec<_> = (collection.register_fonts(face, None).into_iter())
+            .map(|(family, _)| family)
+            .collect();
+        let families: Vec<String> = (ids.iter())
+            .filter_map(|family| collection.family_name(*family).map(String::from))
             .collect();
         draw::fall_back_to(collection, &families);
+        if name == EMOJI {
+            collection.append_generic_families(GenericFamily::Emoji, ids.into_iter());
+        }
+        families
+    };
+    send(UserEvent::Then(Box::new(move |state| {
+        let families = register(&mut state.view.engine.fonts.collection, face.clone());
         if let Ok(mut layouts) = state.layouts.lock() {
-            layouts.fonts.collection.register_fonts(face.clone(), None);
-            draw::fall_back_to(&mut layouts.fonts.collection, &families);
+            register(&mut layouts.fonts.collection, face.clone());
         }
         for family in &families {
             state.ui.preview_font(face.clone(), family);
         }
         state.ui.fall_back_to(&families);
         state.renderer.clear_glyph_cache();
-        state.refresh()
+        let response = state.view.relayout()?;
+        state.respond(response);
+        state.window.request_redraw();
+        Ok(())
     })));
 }
 
