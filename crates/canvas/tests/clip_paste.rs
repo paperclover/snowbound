@@ -191,3 +191,122 @@ fn a_title_takes_the_text_alone() {
         .unwrap();
     assert_eq!(title.shown_text(), "Bold title");
 }
+
+/// Several lines pasted from the title go into the body as OneNote 2010 puts them (lab,
+/// 2026-10-02), plain or formatted, and the title keeps its text: at the end of the outline
+/// where the body starts, in a new one there on a page without body content, and otherwise
+/// in a new one two grid rows below the content.
+#[test]
+fn several_lines_pasted_from_the_title_go_into_the_body() {
+    let source = onestore::create_section("clips.one", "First page", "Author").unwrap();
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, source.clone()).unwrap();
+    let mut at = 133_000_000_000_000_000;
+    let mut spaces = Vec::new();
+    for title in ["Title paste", "Far content"] {
+        let creation = onestore::PageCreation::new(None, Some(title), "Author").unwrap();
+        let create = Op::Section(onestore::op::SectionOp::Create(creation));
+        at += 10_000_000;
+        section
+            .apply(
+                "Author",
+                &Edit {
+                    at,
+                    ops: vec![create],
+                },
+            )
+            .unwrap();
+        spaces.push(section.pages().unwrap().last().unwrap().0);
+    }
+    let mut engine = TextEngine::default();
+    let mut store = |section: &mut Section, editor: &mut CanvasEditor, space| {
+        let ops = editor.take_ops().unwrap();
+        assert!(!ops.is_empty());
+        at += 10_000_000;
+        let ops = ops.into_iter().map(|op| Op::Page { space, op }).collect();
+        section.apply("Author", &Edit { at, ops }).unwrap();
+    };
+    let title = |editor: &mut CanvasEditor| {
+        let title = editor.outlines().iter().find(|o| o.title).unwrap().id;
+        editor.focus_outline(title).unwrap();
+    };
+    let origins = |editor: &CanvasEditor| {
+        editor
+            .outlines()
+            .iter()
+            .filter(|outline| !outline.title)
+            .map(|outline| outline.origin())
+            .collect::<Vec<_>>()
+    };
+
+    let page = section.page(spaces[0]).unwrap();
+    let mut editor = CanvasEditor::from_page(page, &mut engine).unwrap();
+    let start = editor.body_start().unwrap();
+    title(&mut editor);
+    editor
+        .paste(
+            &mut engine,
+            "First line\r\nSecond line\r\nThird line",
+            0x409,
+        )
+        .unwrap();
+    store(&mut section, &mut editor, spaces[0]);
+    title(&mut editor);
+    editor.paste(&mut engine, "Alpha\r\nBeta", 0x409).unwrap();
+    store(&mut section, &mut editor, spaces[0]);
+    assert_eq!(origins(&editor), [start]);
+
+    let page = section.page(spaces[1]).unwrap();
+    let mut far = CanvasEditor::from_page(page, &mut engine).unwrap();
+    let margin = far.margin_origin();
+    far.place_caret(&mut engine, [start[0] + 270.0, start[1] + 72.0], 468.0)
+        .unwrap();
+    far.insert(&mut engine, "far").unwrap();
+    let bottom = far.active_outline().bounds().y1 as f32;
+    title(&mut far);
+    let pieces = html_pieces("<p><b>One</b></p><ul><li>Two</li></ul>", 0x409, |_, _| None);
+    far.paste_pieces(&mut engine, pieces).unwrap();
+    store(&mut section, &mut far, spaces[1]);
+    let row = ((bottom - margin[1]) / 18.0).floor() + 2.0;
+    assert_eq!(
+        origins(&far),
+        [
+            [start[0] + 270.0, start[1] + 72.0],
+            [start[0], margin[1] + row * 18.0]
+        ]
+    );
+
+    let mut image = source;
+    section.seal().unwrap().unwrap().apply(&mut image).unwrap();
+    let arena = Arena::default();
+    let reopened = Section::open(&arena, image.clone()).unwrap();
+    let page = reopened.page(spaces[0]).unwrap();
+    assert_eq!(page.title, "Title paste");
+    assert_eq!(
+        bodies(&page),
+        [vec![
+            "First line",
+            "Second line",
+            "Third line",
+            "Alpha",
+            "Beta"
+        ]]
+    );
+    assert_eq!(bodies(&page), bodies(&editor.page().unwrap()));
+    let page = reopened.page(spaces[1]).unwrap();
+    assert_eq!(page.title, "Far content");
+    assert_eq!(bodies(&page), [vec!["far"], vec!["One (bold)", "• Two"]]);
+
+    if let Some(directory) = std::env::var_os("CANVAS_TITLE_PASTE_EXPORT") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("clips.one"), &image).unwrap();
+        let file_id = Store::parse(&image).unwrap().header.file_id;
+        std::fs::write(
+            directory.join("Open Notebook.onetoc2"),
+            onestore::create_table_of_contents("Open Notebook.onetoc2", &[("clips.one", file_id)])
+                .unwrap(),
+        )
+        .unwrap();
+    }
+}

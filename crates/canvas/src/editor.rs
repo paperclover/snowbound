@@ -2313,41 +2313,50 @@ impl CanvasEditor {
         Ok(true)
     }
 
+    /// Moves the caret from the title to where OneNote 2010 puts what the title can't take
+    /// (lab, 2026-09-30 and 2026-10-02): the end of an outline where the body starts, a new
+    /// one there on a page without body content, and otherwise a caret on blank page two grid
+    /// rows below the content, which is the one case it returns false.
+    fn leave_title_for_body(&mut self, engine: &mut TextEngine) -> Result<bool, EditorError> {
+        let start = self.body_start_of(self.active_outline());
+        let first = self
+            .outlines
+            .iter()
+            .find(|outline| !outline.title && outline.origin() == start)
+            .map(|outline| outline.id);
+        if let Some(id) = first {
+            self.focus_outline(id)?;
+            self.move_selection(engine, Movement::DocumentEnd, false)?;
+            return Ok(true);
+        }
+        let Some(bottom) = self.body_bottom() else {
+            self.place_caret(engine, start, DEFAULT_OUTLINE_WIDTH)?;
+            return Ok(true);
+        };
+        let margin = self.margin_origin();
+        let row = ((bottom - margin[1]) / 18.0).floor() + 2.0;
+        self.place_caret(
+            engine,
+            [start[0], margin[1] + row * 18.0],
+            DEFAULT_OUTLINE_WIDTH,
+        )?;
+        Ok(false)
+    }
+
     /// Puts `image` at the caret as OneNote 2010 pastes and inserts a picture: in an outline
     /// as [`Self::insert_attachment`] puts a file, and on blank page at the caret with the
     /// caret moving to the grid row below it, where typing starts a new outline. From the
-    /// title it goes at the end of an outline where the body starts, in a new one there on a
-    /// page without body content, and otherwise on the page two grid rows below the content
-    /// (lab, 2026-09-30).
+    /// title it goes where [`Self::leave_title_for_body`] puts the caret, in the flow there
+    /// unless on blank page.
     pub fn insert_picture(
         &mut self,
         engine: &mut TextEngine,
         mut image: onestore::page::Image,
     ) -> Result<(), EditorError> {
-        let margin = self.margin_origin();
-        if self.active_outline().title {
-            let start = self.body_start_of(self.active_outline());
-            let first = self
-                .outlines
-                .iter()
-                .find(|outline| !outline.title && outline.origin() == start)
-                .map(|outline| outline.id);
-            if let Some(id) = first {
-                self.focus_outline(id)?;
-                self.move_selection(engine, Movement::DocumentEnd, false)?;
-                return self.insert_in_flow(engine, ParagraphContent::Image(image));
-            }
-            let Some(bottom) = self.body_bottom() else {
-                self.place_caret(engine, start, DEFAULT_OUTLINE_WIDTH)?;
-                return self.insert_in_flow(engine, ParagraphContent::Image(image));
-            };
-            let row = ((bottom - margin[1]) / 18.0).floor() + 2.0;
-            self.place_caret(
-                engine,
-                [start[0], margin[1] + row * 18.0],
-                DEFAULT_OUTLINE_WIDTH,
-            )?;
+        if self.active_outline().title && self.leave_title_for_body(engine)? {
+            return self.insert_in_flow(engine, ParagraphContent::Image(image));
         }
+        let margin = self.margin_origin();
         let Focus::Caret { outline, .. } = &self.active else {
             return self.insert_in_flow(engine, ParagraphContent::Image(image));
         };
@@ -3562,7 +3571,9 @@ impl CanvasEditor {
     }
 
     /// Pastes plain text as OneNote does: lines become plain Calibri 11 paragraphs without style
-    /// or list between the halves of the caret's paragraph (`evidence/structural-edits/xml/c7-*`).
+    /// or list between the halves of the caret's paragraph (`evidence/structural-edits/xml/c7-*`),
+    /// an empty half dropped; from the title they go where [`Self::leave_title_for_body`] puts
+    /// the caret.
     /// Pasted runs take the clipboard's `language`, an LCID, not the caret's run's as typing
     /// does; Windows derives it from the keyboard language at copy time.
     pub fn paste(
@@ -3582,6 +3593,9 @@ impl CanvasEditor {
             .split('\n')
             .map(|line| line.strip_suffix('\r').unwrap_or(line))
             .collect::<Vec<_>>();
+        if lines.len() > 1 && self.active_outline().title {
+            self.leave_title_for_body(engine)?;
+        }
         let last = lines[lines.len() - 1];
         let [anchor, focus] = self.active_outline().selection.positions;
         let (start, end) = (anchor.min(focus), anchor.max(focus));
@@ -3617,8 +3631,9 @@ impl CanvasEditor {
             node.style = None;
             node.lists.clear();
         }
+        let head = clip::drop_empty_halves(&mut edit, lines.len(), true);
         let caret = TextPosition {
-            paragraph: start.paragraph + lines.len(),
+            paragraph: start.paragraph + lines.len() - usize::from(head),
             offset: u32::try_from(last.encode_utf16().count())
                 .map_err(|_| EditError::TextTooLong)?,
         };

@@ -92,7 +92,7 @@ impl CanvasEditor {
     /// Pastes `clip` as one undo step: one paragraph's runs go in at the selection; more
     /// paragraphs go between the halves of the caret's paragraph, each keeping its
     /// formatting, style, list, tags and indentation below that paragraph's. A title takes
-    /// the text alone.
+    /// one paragraph's text alone; more go into the body.
     pub fn paste_clip(&mut self, engine: &mut TextEngine, clip: Clip) -> Result<(), EditorError> {
         if self.page_selected() {
             return self.grouped(|editor| {
@@ -100,7 +100,9 @@ impl CanvasEditor {
                 editor.paste_clip(engine, clip)
             });
         }
-        if self.active_outline().title {
+        if self.active_outline().title && clip.paragraphs.len() > 1 {
+            self.leave_title_for_body(engine)?;
+        } else if self.active_outline().title {
             // A title takes text alone, as OneNote 2010's does (lab, 2026-10-02).
             let language = leaves(&clip.paragraphs, None)
                 .find_map(|(.., node)| node.text()?.text.spans()[0].format.language)
@@ -153,23 +155,7 @@ impl CanvasEditor {
         let count = nodes.len();
         let added = leaves(&nodes, None).count();
         edit.replacement.splice(1..=count, nodes);
-        // A half of the caret's paragraph goes where empty, as OneNote 2010 pastes (lab,
-        // 2026-10-02), unless it holds children or the caret.
-        let gone = |edit: &DocumentEdit, at: usize| {
-            let node = &edit.replacement[at];
-            node.text().is_some_and(|text| text.text.text().is_empty())
-                && !edit
-                    .replacement
-                    .iter()
-                    .any(|child| child.parent == Some(node.id))
-        };
-        if ends_in_text && gone(&edit, count + 1) {
-            edit.replacement.remove(count + 1);
-        }
-        let head = gone(&edit, 0);
-        if head {
-            edit.replacement.remove(0);
-        }
+        let head = drop_empty_halves(&mut edit, count, ends_in_text);
         let paragraph = start.paragraph + added - usize::from(head);
         let caret = if ends_in_text {
             TextPosition {
@@ -205,6 +191,28 @@ impl CanvasEditor {
         renew(&mut nodes, &renamed, &self.active_outline().indents)?;
         Ok(nodes)
     }
+}
+
+/// Drops a half of the caret's paragraph around `count` pasted nodes where empty, as OneNote
+/// 2010 pastes (lab, 2026-10-02), unless it holds children or, past what `ends_in_text`
+/// pasted, the caret; true if the upper half went.
+pub(super) fn drop_empty_halves(edit: &mut DocumentEdit, count: usize, ends_in_text: bool) -> bool {
+    let gone = |edit: &DocumentEdit, at: usize| {
+        let node = &edit.replacement[at];
+        node.text().is_some_and(|text| text.text.text().is_empty())
+            && !edit
+                .replacement
+                .iter()
+                .any(|child| child.parent == Some(node.id))
+    };
+    if ends_in_text && gone(edit, count + 1) {
+        edit.replacement.remove(count + 1);
+    }
+    let head = gone(edit, 0);
+    if head {
+        edit.replacement.remove(0);
+    }
+    head
 }
 
 /// Gives `nodes` and everything they hold new identities, keeping their tree, and points
