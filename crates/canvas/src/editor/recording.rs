@@ -161,6 +161,11 @@ impl CanvasEditor {
         Ok(id)
     }
 
+    /// Forgets the recording under way, whose file never came; its line stays.
+    pub fn cancel_recording(&mut self) {
+        self.recording = None;
+    }
+
     /// Stops recording: `file`, the recording made, goes where it started, linked to its
     /// start, or at the caret when that place is gone.
     pub fn finish_recording(

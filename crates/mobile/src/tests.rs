@@ -1129,3 +1129,110 @@ fn the_page_prints_as_a_pdf() {
         &text[..400]
     );
 }
+
+#[test]
+fn a_recording_goes_in_as_the_desktop_stores_it_and_a_tap_plays_it() {
+    use onestore::page::{PageObject, ParagraphContent};
+    let (directory, section) = features();
+    let mut canvas = canvas(&section, "Paragraph controls");
+    focus(&mut canvas, "Collapsed parent");
+    canvas.edit().unwrap();
+    let date = ["Tuesday, September 29, 2026", "5:18 PM"];
+    assert!(canvas.start_recording(false, date[0], date[1]).unwrap());
+    canvas.insert("Linked note".into()).unwrap();
+    let samples: Vec<i16> = (0..16_000).map(|n| (n % 64 * 256 - 8192) as i16).collect();
+    let wav = canvas::recording::wave(canvas::recording::RATE, &samples);
+    assert!(canvas.finish_recording(Some(wav), false).unwrap());
+    section
+        .shared
+        .apply(canvas.edit().unwrap().unwrap())
+        .unwrap();
+
+    let page = section.shared.page(canvas.space).unwrap().0;
+    let paragraphs: Vec<_> = page
+        .objects
+        .iter()
+        .filter_map(|object| match object {
+            PageObject::Outline(outline) => Some(&outline.paragraphs),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let file = paragraphs
+        .iter()
+        .find_map(|paragraph| match &paragraph.content {
+            ParagraphContent::Attachment(file) => Some(file),
+            _ => None,
+        })
+        .unwrap();
+    let recording = file.recording.unwrap();
+    assert_eq!(file.filename, format!("{}.wav", page.title));
+    assert_eq!((recording.kind, recording.duration_ms), (1, Some(1000)));
+    // IMA ADPCM, as the desktop stores audio for OneNote (`corpus/recording`).
+    let bytes = file.bytes.as_deref().unwrap();
+    assert_eq!(u16::from_le_bytes([bytes[20], bytes[21]]), 0x11);
+    let linked = |text: &str| {
+        paragraphs
+            .iter()
+            .find(|paragraph| {
+                paragraph
+                    .text()
+                    .is_some_and(|t| t.text.text().starts_with(text))
+            })
+            .map(|paragraph| (paragraph.media.recordings.clone(), paragraph.media.time_ms))
+            .unwrap()
+    };
+    let line = linked("Audio recording started: 5:18 PM Tuesday, September 29, 2026");
+    assert_eq!(line, (vec![recording.id], Some(0)));
+    assert_eq!(linked("Linked note").0, [recording.id]);
+
+    // A tap on the recording plays it as PCM from the start.
+    let tapped = (0..800)
+        .flat_map(|y| (0..300).map(move |x| [x as f32 * 2.0, y as f32 * 2.0]))
+        .find(|&point| {
+            matches!(
+                canvas.page.hit(canvas.device(point.map(|v| v * POINT))),
+                Some(Hit::File(_))
+            )
+        })
+        .unwrap()
+        .map(|v| v * POINT);
+    canvas.press(tapped).unwrap();
+    canvas.release().unwrap();
+    let folder = directory.path().join("playback");
+    let request = canvas.take_play(&folder).unwrap().unwrap();
+    assert_eq!(request["at_ms"], 0);
+    assert!(request["video"].is_null());
+    let sound = std::fs::read(request["sound"].as_str().unwrap()).unwrap();
+    assert_eq!(u16::from_le_bytes([sound[20], sound[21]]), 1);
+    assert!(canvas.take_play(&folder).unwrap().is_none());
+    canvas.played(Some(5_000)).unwrap();
+    canvas.played(None).unwrap();
+}
+
+#[test]
+fn a_movie_from_the_camera_becomes_the_desktop_s_avi() {
+    let movie = recording::sb_movie_new();
+    let bgra: Vec<u8> = (0..480 * 640 * 4).map(|n| (n % 251) as u8).collect();
+    for index in 0..20u64 {
+        unsafe {
+            recording::sb_movie_picture(
+                &mut *movie,
+                index * 50_000,
+                bgra.as_ptr(),
+                640,
+                480,
+                640 * 4,
+            )
+        };
+    }
+    let pcm = vec![0u8; canvas::recording::RATE as usize * 2];
+    unsafe { recording::sb_movie_sound(&mut *movie, pcm.as_ptr(), pcm.len()) };
+    let mut length = 0;
+    let avi = unsafe { recording::sb_movie_finish(movie, 1_000_000, &mut length) };
+    let bytes = unsafe { std::slice::from_raw_parts(avi, length) }.to_vec();
+    unsafe { sb_bytes_free(avi, length) };
+    let parsed = canvas::recording::video::Movie::parse(&bytes).unwrap();
+    assert_eq!((parsed.frames.len(), parsed.duration_ms()), (15, 1000));
+    assert!(parsed.sound.is_some());
+}

@@ -109,6 +109,20 @@ int8_t sb_view_date_request(View *view, int64_t *seconds);
 bool sb_view_change_date(View *view, int64_t seconds, const char *date, const char *time);
 bool sb_view_insert_picture(View *view, const uint8_t *bytes, size_t length, float width, float height);
 
+typedef struct Movie Movie;
+uint32_t sb_recording_rate(void);
+bool sb_view_start_recording(View *view, bool video, const char *date, const char *time);
+int64_t sb_view_recording(const View *view, bool *paused);
+void sb_view_pause_recording(View *view, bool paused);
+bool sb_view_finish_recording(View *view, const uint8_t *bytes, size_t length, bool video);
+char *sb_view_play_request(View *view, const char *folder);
+bool sb_view_played(View *view, int64_t at_ms);
+Movie *sb_movie_new(void);
+void sb_movie_picture(Movie *movie, uint64_t at_us, const uint8_t *bgra, uint32_t width, uint32_t height,
+                      size_t stride);
+void sb_movie_sound(Movie *movie, const uint8_t *pcm, size_t length);
+uint8_t *sb_movie_finish(Movie *movie, uint64_t duration_us, size_t *length);
+
 uint32_t sb_text_length(const View *view);
 char *sb_text(const View *view, uint32_t start, uint32_t end);
 void sb_selection(const View *view, uint32_t range[2]);

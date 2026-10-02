@@ -14,8 +14,6 @@ canvas = { path = "../canvas", features = ["interaction", "pdf"] }
 draw = { path = "../draw", default-features = false, features = ["render"] }
 ui = { path = "../ui" }
 png = "0.18"
-# Encodes a video recording's pictures as JPEG, which OneNote 2010 plays.
-image = { version = "0.25", default-features = false, features = ["jpeg"] }
 onestore = { path = "../onestore" }
 notebook = { path = "../notebook" }
 serde = { version = "1", features = ["derive"] }
@@ -94,6 +92,8 @@ windows-sys = { version = "0.61", features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 accesskit_winit = { version = "0.34.0", default-features = false, features = ["accesskit_unix", "async-io"] }
 smithay-clipboard = "0.7.3"
+# Scales the window's icon.
+image = { version = "0.25", default-features = false }
 # Loads fontconfig at run time, so builds need no fontconfig headers or library.
 fontique = { workspace = true, features = ["fontconfig-dlopen"] }
 libc = "0.2"
@@ -106,3 +106,7 @@ sctk-adwaita = { version = "0.10.1", default-features = false }
 wayland-backend = { version = "0.3.17", features = ["client_system"] }
 wayland-client = "0.31.15"
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+
+[dev-dependencies]
+# Draws the pictures of the video recording the tests store.
+image = { version = "0.25", default-features = false }

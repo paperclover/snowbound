@@ -203,6 +203,9 @@ fn between(from: [f32; 2], middle: [f32; 2], to: [f32; 2]) -> bool {
     (0.0..=1.0).contains(&along) && (mx * dy - my * dx).abs() / length.sqrt() <= 0.1
 }
 
+/// The size OneNote 2010 shows a file's icon at, in points.
+pub const ICON_SIZE: [f32; 2] = [24.0, 24.0];
+
 const FILE_ICON: &str = include_str!("../../assets/file.svg");
 
 /// The blank page for a file without an icon of its own, as the 32 pixel PNG OneNote 2010

@@ -4,13 +4,12 @@
 use std::ops::Range;
 
 /// Pictures a second in a recording: OneNote 2010's own profiles record at 15.
-pub(crate) const FPS: u32 = 15;
+pub const FPS: u32 = 15;
 /// A recording's picture size, OneNote 2010's own.
-pub(crate) const SIZE: [u32; 2] = [320, 240];
+pub const SIZE: [u32; 2] = [320, 240];
 
 /// Interleaved signed 16-bit little-endian sound.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) struct Pcm {
+pub struct Pcm {
     pub rate: u32,
     pub channels: u16,
     pub data: Vec<u8>,
@@ -25,14 +24,12 @@ fn chunk(out: &mut Vec<u8>, id: &[u8; 4], body: &[u8]) {
     }
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn list(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(body.len() + 12);
     chunk(&mut out, b"LIST", &[&kind[..], body].concat());
     out
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn words(values: &[u32]) -> Vec<u8> {
     values
         .iter()
@@ -42,8 +39,7 @@ fn words(values: &[u32]) -> Vec<u8> {
 
 /// An AVI file of `frames`, JPEG pictures of `size` shown `FPS` a second, where an empty one
 /// repeats the picture before it, and `sound` alongside. None past AVI's 4 GiB.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub(crate) fn write(size: [u32; 2], frames: &[Vec<u8>], sound: &Pcm) -> Option<Vec<u8>> {
+pub fn write(size: [u32; 2], frames: &[Vec<u8>], sound: &Pcm) -> Option<Vec<u8>> {
     let block = u32::from(sound.channels) * 2;
     let bytes_per_second = sound.rate * block;
     let samples = sound.data.len() as u64 / u64::from(block);
@@ -184,7 +180,7 @@ pub(crate) fn write(size: [u32; 2], frames: &[Vec<u8>], sound: &Pcm) -> Option<V
 }
 
 /// An AVI file's pictures and sound, as byte ranges of the file.
-pub(crate) struct Movie {
+pub struct Movie {
     /// Each picture's JPEG; an empty range repeats the one before.
     pub frames: Vec<Range<usize>>,
     pub frame_us: u32,
@@ -194,7 +190,7 @@ pub(crate) struct Movie {
 
 impl Movie {
     /// A Motion JPEG AVI file's contents; none for other files.
-    pub(crate) fn parse(bytes: &[u8]) -> Option<Self> {
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
         let mut movie = Self {
             frames: Vec::new(),
             frame_us: 0,
@@ -264,13 +260,13 @@ impl Movie {
         Some(())
     }
 
-    pub(crate) fn duration_ms(&self) -> u32 {
+    pub fn duration_ms(&self) -> u32 {
         let ms = (self.frames.len() as u64 * u64::from(self.frame_us)).div_ceil(1000);
         u32::try_from(ms).unwrap_or(u32::MAX)
     }
 
     /// The picture showing `at_ms` in: the last stored one at or before it.
-    pub(crate) fn frame(&self, at_ms: u32) -> Option<Range<usize>> {
+    pub fn frame(&self, at_ms: u32) -> Option<Range<usize>> {
         let at = (u64::from(at_ms) * 1000 / u64::from(self.frame_us.max(1))) as usize;
         self.frames[..=at.min(self.frames.len().checked_sub(1)?)]
             .iter()
@@ -280,7 +276,7 @@ impl Movie {
     }
 
     /// The sound as a WAV file, or none where the file has none.
-    pub(crate) fn wave(&self, bytes: &[u8]) -> Option<Vec<u8>> {
+    pub fn wave(&self, bytes: &[u8]) -> Option<Vec<u8>> {
         let (format, data) = self.sound.as_ref()?;
         let format = &bytes[format.clone()];
         let length: usize = data.iter().map(ExactSizeIterator::len).sum();
@@ -334,26 +330,46 @@ impl Iterator for Chunks<'_> {
 
 /// Pictures taken at uneven moments, as a camera takes them, made the `FPS` a second of a
 /// recording: each one shows until the next, fitted to `SIZE`.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Default)]
-pub(crate) struct Pictures {
+pub struct Pictures {
     frames: Vec<Vec<u8>>,
     last: Option<image::RgbImage>,
     /// Whether the last picture is stored yet, which the frames after it repeat.
     stored: bool,
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 impl Pictures {
     /// The picture taken `at_us` microseconds in; the first shows from the start.
-    pub(crate) fn take(&mut self, at_us: u64, picture: image::RgbImage) {
+    pub fn take(&mut self, at_us: u64, picture: image::RgbImage) {
         self.fill(at_us);
         self.last = Some(fit(picture));
         self.stored = false;
     }
 
+    /// A picture as Core Video gives one: `height` rows of `stride` bytes of BGRA pixels.
+    pub fn take_bgra(
+        &mut self,
+        at_us: u64,
+        [width, height]: [usize; 2],
+        stride: usize,
+        bgra: &[u8],
+    ) {
+        let rgb = bgra
+            .chunks_exact(stride.max(1))
+            .take(height)
+            .filter_map(|row| row.get(..width * 4))
+            .flat_map(|row| {
+                row.chunks_exact(4)
+                    .flat_map(|pixel| [pixel[2], pixel[1], pixel[0]])
+            })
+            .collect();
+        if let Some(picture) = image::RgbImage::from_raw(width as u32, height as u32, rgb) {
+            self.take(at_us, picture);
+        }
+    }
+
     /// The frames of a recording `end_us` microseconds long.
-    pub(crate) fn finish(mut self, end_us: u64) -> Vec<Vec<u8>> {
+    pub fn finish(mut self, end_us: u64) -> Vec<Vec<u8>> {
         self.fill(end_us);
         self.frames
     }
@@ -382,7 +398,6 @@ impl Pictures {
 }
 
 /// `picture` scaled to fit `SIZE`, centred on black.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn fit(picture: image::RgbImage) -> image::RgbImage {
     let [width, height] = SIZE;
     if picture.dimensions() == (width, height) {

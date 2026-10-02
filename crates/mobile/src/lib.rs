@@ -8,6 +8,7 @@
 //! the host redraws and rereads `sb_view_content`.
 
 mod library;
+mod recording;
 #[cfg(target_os = "ios")]
 mod spell;
 
@@ -119,6 +120,10 @@ struct Canvas {
     scale: f32,
     /// The page date field a tap asked to change, for the host's picker.
     asked: Option<DateField>,
+    /// The recording a tap asked to play, and from when.
+    play: Option<(onestore::page::Attachment, u32)>,
+    /// The recording playing, whose linked notes See Playback follows.
+    playing: Option<[u8; 16]>,
 }
 
 impl Canvas {
@@ -156,6 +161,8 @@ impl Canvas {
             paper: Paper::WHITE,
             scale,
             asked: None,
+            play: None,
+            playing: None,
         })
     }
 
@@ -263,12 +270,16 @@ impl Canvas {
         Ok(self.respond(pressed) || changed)
     }
 
-    /// Whether `response` moved the page, keeping the date field it asks to change.
+    /// Whether `response` moved the page, keeping the date field it asks to change or the
+    /// recording it asks to play.
     fn respond(&mut self, response: Response) -> bool {
-        if let Some(Request::EditDate(field)) = response.request {
-            self.asked = Some(field);
+        let changed = response.changed || response.moved;
+        match response.request {
+            Some(Request::EditDate(field)) => self.asked = Some(field),
+            Some(Request::Play { file, at_ms }) => self.play = Some((file, at_ms)),
+            _ => {}
         }
-        moved(response)
+        changed
     }
 
     fn drag(&mut self, point: [f32; 2]) -> Result<bool> {

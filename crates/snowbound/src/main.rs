@@ -84,7 +84,6 @@ mod undo;
 mod unpack;
 mod unread;
 mod update;
-mod video;
 #[cfg_attr(target_arch = "wasm32", path = "watch_web.rs")]
 mod watch;
 

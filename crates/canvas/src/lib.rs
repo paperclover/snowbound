@@ -17,6 +17,8 @@ pub mod gpu;
 pub mod interaction;
 #[cfg(feature = "pdf")]
 pub mod print;
+#[cfg(feature = "gpu")]
+pub mod recording;
 
 /// Where an object stored with `layout` lies; an unset coordinate is zero.
 pub(crate) fn origin(layout: &onestore::document::Layout) -> [f32; 2] {

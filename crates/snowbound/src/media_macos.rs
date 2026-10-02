@@ -3,7 +3,7 @@
 //! PCM WAV, and a capture session records the default camera and microphone as a movie,
 //! which `AVAssetReader` reads back into the AVI file OneNote plays.
 
-use crate::video;
+use canvas::recording::video;
 use objc2::{
     msg_send, msg_send_id,
     rc::{Allocated, Retained},
@@ -432,7 +432,7 @@ fn delegate() -> Retained<AnyObject> {
 }
 
 /// The movie at `path`, as AVFoundation reads it, as a Motion JPEG AVI file with its sound
-/// in mono PCM at `crate::recording::RATE`.
+/// in mono PCM at `canvas::recording::RATE`.
 fn avi(path: &Path) -> Option<Vec<u8>> {
     unsafe {
         let asset: Retained<AnyObject> = msg_send_id![class("AVURLAsset"), URLAssetWithURL: &*url(path)?, options: std::ptr::null::<AnyObject>()];
@@ -453,22 +453,14 @@ fn avi(path: &Path) -> Option<Vec<u8>> {
                 CVPixelBufferGetBytesPerRow(buffer),
             ];
             let base = CVPixelBufferGetBaseAddress(buffer);
-            let mut rgb = Vec::with_capacity(width * height * 3);
             if !base.is_null() {
                 let rows = std::slice::from_raw_parts(base, stride * height);
-                for row in rows.chunks_exact(stride) {
-                    for bgra in row[..width * 4].chunks_exact(4) {
-                        rgb.extend_from_slice(&[bgra[2], bgra[1], bgra[0]]);
-                    }
-                }
+                pictures.take_bgra(at, [width, height], stride, rows);
             }
             CVPixelBufferUnlockBaseAddress(buffer, 1);
-            if let Some(picture) = image::RgbImage::from_raw(width as u32, height as u32, rgb) {
-                pictures.take(at, picture);
-            }
         })?;
         let mut sound = video::Pcm {
-            rate: crate::recording::RATE,
+            rate: canvas::recording::RATE,
             channels: 1,
             data: Vec::new(),
         };
@@ -550,8 +542,9 @@ mod tests {
     /// What Snowbound records, compressed, plays back through Core Audio at its length.
     #[test]
     fn core_audio_plays_the_compressed_recordings() {
-        let pcm = crate::recording::wave(crate::recording::RATE, &crate::recording::tests::tone());
-        let (bytes, duration) = crate::recording::compress(&pcm).unwrap();
+        let pcm =
+            canvas::recording::wave(canvas::recording::RATE, &crate::recording::tests::tone());
+        let (bytes, duration) = canvas::recording::compress(&pcm).unwrap();
         let folder = std::env::temp_dir().join(format!("snowbound-player-{}", std::process::id()));
         std::fs::create_dir_all(&folder).unwrap();
         let path = folder.join("tone.wav");
@@ -611,7 +604,7 @@ mod tests {
             .iter()
             .map(ExactSizeIterator::len)
             .sum();
-        let expected = 2 * crate::recording::RATE as usize * 2;
+        let expected = 2 * canvas::recording::RATE as usize * 2;
         assert!(length.abs_diff(expected) < expected / 20, "{length}");
     }
 }

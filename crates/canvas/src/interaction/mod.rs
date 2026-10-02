@@ -1261,6 +1261,14 @@ impl PageView {
             Some(Hit::File(id)) => {
                 self.set_object_focus(Some(ObjectFocus::File(id)));
                 self.drag = None;
+                // A finger plays a recording with a tap, having no play button to hover.
+                if self.touch
+                    && let Some(file) = self.editor.attachment(id)
+                    && file.recording.is_some()
+                {
+                    let file = file.clone();
+                    return Ok(Response::request(Request::Play { file, at_ms: 0 }));
+                }
                 if unit != SelectionUnit::Grapheme
                     && let Some(file) = self.editor.attachment(id)
                 {

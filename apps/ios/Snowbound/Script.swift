@@ -14,17 +14,22 @@ extension CanvasView {
     /// `tool:pen:N`, `tool:shape:N`, `tool:eraser` or `tool:lasso` gives it a tool, `picker` shows or hides the
     /// drawing tools, `pencildoubletap` is the Pencil's double tap, and `deleteink` deletes
     /// what the lasso picked; `rotate:landscape` or `rotate:portrait` turns the device; `done`
-    /// ends editing, `reading` turns the reading view on or off, `tree` saves the view hierarchy to
+    /// ends editing, `reading` turns the reading view on or off, `record:audio` or
+    /// `record:video` records, `pauserecording` pauses or resumes and `stoprecording` stops it,
+    /// `wait:N` waits N seconds more before the next step, `tree` saves the view hierarchy to
     /// Documents/tree.txt, and `shot:a` the window to Documents/a.png, as a device has no
     /// screenshot command.
     func runScript() {
         // Only the first page shown runs it, not every page opened afterwards.
         guard !scriptedPage, let script = ProcessInfo.processInfo.environment["SNOWBOUND_SCRIPT"] else { return }
         scriptedPage = true
-        for (index, step) in script.split(separator: "|").enumerated() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1 + Double(index) * 0.4) { [weak self] in
+        var delay = 1.0
+        for step in script.split(separator: "|") {
+            if step.hasPrefix("wait:") { delay += Double(step.dropFirst(5)) ?? 0 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                 self?.perform(String(step))
             }
+            delay += 0.4
         }
     }
 
@@ -90,6 +95,11 @@ extension CanvasView {
             let caret = caretRect(for: range.start)
             menu.presentEditMenu(with: UIEditMenuConfiguration(identifier: nil, sourcePoint: CGPoint(x: caret.midX, y: caret.minY)))
         case "done": _ = resignFirstResponder()
+        case "wait": break
+        case "record", "stoprecording":
+            let page = sequence(first: self as UIResponder, next: \.next).lazy.compactMap { $0 as? PageViewController }.first
+            if command == "record" { page?.record(video: argument == "video") } else { page?.stopRecording() }
+        case "pauserecording": Recorder.current.map { $0.pause(!($0.elapsed?.paused ?? false)) }
         case "selectall": selectAll(nil)
         case "reading": showReading(!readingShown)
         case "format": apply(UInt8(argument) ?? 0)

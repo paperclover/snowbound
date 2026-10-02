@@ -137,6 +137,8 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     var onOpened: (() -> Void)?
     /// Called when a tap on the page date asks to change it, with the date it shows.
     var onDate: ((DateField, Date) -> Void)?
+    /// Called when a tap on a recording, or beside a note linked to one, asks to play it.
+    var onPlay: ((PlayRequest) -> Void)?
     /// Formatting above the keyboard.
     let formatBar = FormatBar()
     /// Room above the page for a bar over it.
@@ -144,6 +146,16 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         didSet {
             contentInset.top = topInset
             home()
+        }
+    }
+
+    /// Room below the page, above the keyboard, for a bar over its foot.
+    var bottomInset: CGFloat = 0 {
+        didSet {
+            guard bottomInset != oldValue else { return }
+            contentInset.bottom += bottomInset - oldValue
+            verticalScrollIndicatorInsets.bottom = contentInset.bottom
+            revealCaret()
         }
     }
 
@@ -480,8 +492,8 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
         else { return }
         let keyboard = convert(frame, from: window.screen.coordinateSpace)
         let overlap = max(0, bounds.maxY - keyboard.minY - safeAreaInsets.bottom)
-        contentInset.bottom = overlap
-        verticalScrollIndicatorInsets.bottom = overlap
+        contentInset.bottom = overlap + bottomInset
+        verticalScrollIndicatorInsets.bottom = contentInset.bottom
         revealCaret()
     }
 
@@ -542,7 +554,9 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
     func tap(at point: CGPoint) {
         press(at: point)
         var seconds: Int64 = 0
-        if let handle, let field = DateField(rawValue: sb_view_date_request(handle, &seconds)) {
+        if let request = playRequest() {
+            onPlay?(request)
+        } else if let handle, let field = DateField(rawValue: sb_view_date_request(handle, &seconds)) {
             onDate?(field, Date(timeIntervalSince1970: TimeInterval(seconds)))
         } else if inkFrame != nil {
             showInkMenu()
@@ -1140,6 +1154,59 @@ final class CanvasView: UIScrollView, UIScrollViewDelegate, UITextInput, UITextI
                     Float(size.height))
             }
         }
+    }
+
+    // MARK: Recordings
+
+    /// Starts recording at the caret, under a line saying when; whether it started.
+    func startRecording(video: Bool) -> Bool {
+        guard let handle else { return false }
+        let (day, time) = titleDate()
+        return edit(external: true) { sb_view_start_recording(handle, video, day, time) }
+    }
+
+    /// How far the recording has got in milliseconds, without its pauses, and whether it is
+    /// paused; nil when nothing records.
+    var recording: (ms: Int64, paused: Bool)? {
+        guard let handle else { return nil }
+        var paused = false
+        let ms = sb_view_recording(handle, &paused)
+        return ms < 0 ? nil : (ms, paused)
+    }
+
+    /// Nothing typed while the recording is paused links to it.
+    func pauseRecording(_ paused: Bool) {
+        guard let handle else { return }
+        sb_view_pause_recording(handle, paused)
+    }
+
+    /// Puts the recording made where it started: a PCM WAV file, or with `video` the AVI
+    /// file of `sb_movie_finish`. Nil forgets a recording whose file never came.
+    func finishRecording(_ file: Data?, video: Bool) {
+        guard let handle else { return }
+        _ = edit(external: true) {
+            guard let file else { return sb_view_finish_recording(handle, nil, 0, video) }
+            return file.withUnsafeBytes { bytes in
+                sb_view_finish_recording(handle, bytes.bindMemory(to: UInt8.self).baseAddress, bytes.count, video)
+            }
+        }
+    }
+
+    /// The recording the last tap asked to play, with its files written out to play from.
+    private func playRequest() -> PlayRequest? {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("Playback")
+        guard let handle, let json = sb_view_play_request(handle, folder.path) else { return nil }
+        defer { sb_string_free(json) }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try? decoder.decode(PlayRequest.self, from: Data(String(cString: json).utf8))
+    }
+
+    /// See Playback: the note linked at `ms` into the recording playing is highlighted; nil
+    /// ends playback.
+    func played(at ms: Int64?) {
+        guard let handle, sb_view_played(handle, ms ?? -1) else { return }
+        dirty = true
     }
 
     /// Commits marked text, so it is stored before the app leaves the screen.

@@ -167,7 +167,8 @@ scrolling it into view when it changes.
 
 The host records audio as 16 kHz WAV and stores it as IMA ADPCM, and video as
 AVI of Motion JPEG at 320 by 240 and 15 pictures a second with PCM sound, both
-of which OneNote plays (`corpus/recording/video`). GStreamer writes that AVI
+of which OneNote plays (`corpus/recording/video`); `canvas::recording` makes both,
+so every host stores the same bytes. GStreamer writes that AVI
 directly; on macOS a capture session records a movie that `AVAssetReader` reads
 back into it off the main thread after Stop, the transport saying so and the page
 editable meanwhile. Mac OS X 10.6, without AVFoundation, opens recordings in the

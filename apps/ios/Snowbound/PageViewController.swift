@@ -21,6 +21,10 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
     private let titleFocus: Bool
     private lazy var canvas = CanvasView(section: section, page: page)
     private let bar = ConflictBar()
+    /// What records or plays on this page, over its foot.
+    private let media = MediaBar()
+    private var playback: Playback?
+    private var mediaClock: Timer?
     /// Reading View, beside the page menu where the page has one.
     private var reader: UIBarButtonItem?
     /// Opens another page or conflict page of the section.
@@ -62,7 +66,15 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
         bar.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(canvas)
         view.addSubview(bar)
+        media.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(media)
+        let wide = media.widthAnchor.constraint(equalToConstant: 480)
+        wide.priority = .required - 1
         NSLayoutConstraint.activate([
+            wide,
+            media.centerXAnchor.constraint(equalTo: view.safeAreaLayoutGuide.centerXAnchor),
+            media.leadingAnchor.constraint(greaterThanOrEqualTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 12),
+            media.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -12),
             canvas.leadingAnchor.constraint(equalTo: view.leadingAnchor),
             canvas.trailingAnchor.constraint(equalTo: view.trailingAnchor),
             canvas.topAnchor.constraint(equalTo: view.topAnchor),
@@ -75,6 +87,10 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
         canvas.onChange = { [weak self] in self?.editingChanged() }
         canvas.onOpened = { [weak self] in self?.opened() }
         canvas.onDate = { [weak self] field, date in self?.pickDate(field, date) }
+        canvas.onPlay = { [weak self] request in self?.play(request) }
+        media.onPause = { [weak self] in self?.pauseMedia() }
+        media.onStop = { [weak self] in self?.stopMedia() }
+        NotificationCenter.default.addObserver(self, selector: #selector(showMedia), name: Recorder.changed, object: nil)
         canvas.formatBar.onPicture = { [weak self] camera in self?.pickPicture(camera: camera) }
         bar.onAction = { [weak self] in self?.conflictAction() }
         NotificationCenter.default.addObserver(
@@ -173,6 +189,16 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
                 UIAction(
                     title: "Space", image: UIImage(systemName: "arrow.up.and.down.text.horizontal"), attributes: editable
                 ) { [weak self] _ in self?.canvas.insertSpace() },
+                UIMenu(options: .displayInline, children: [
+                    UIAction(
+                        title: "Record Audio", image: UIImage(systemName: "mic"),
+                        attributes: Recorder.current == nil ? editable : .disabled
+                    ) { [weak self] _ in self?.record(video: false) },
+                    UIAction(
+                        title: "Record Video", image: UIImage(systemName: "video"),
+                        attributes: Recorder.current == nil && Recorder.canRecordVideo ? editable : .disabled
+                    ) { [weak self] _ in self?.record(video: true) },
+                ]),
             ])
         return (Prototype.reading ? [readingAction()] : []) + [
             insert,
@@ -217,6 +243,8 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
     }
 
     private func toggleReading() {
+        // A recording goes on the page as laid out.
+        guard Recorder.current?.canvas !== canvas else { return }
         canvas.showReading(!canvas.readingShown)
     }
 
@@ -288,6 +316,94 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
     }
 
     @objc private func leaving() { canvas.commitComposition() }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        // A recording goes on the page it started on, as the desktop's does on leaving it.
+        if Recorder.current?.canvas === canvas { Recorder.current?.stop() }
+        stopPlayback()
+    }
+
+    // MARK: Recording and playback
+
+    func record(video: Bool) {
+        stopPlayback()
+        Recorder.start(video: video, on: canvas) { [weak self] title, message in self?.alert(title, message) }
+    }
+
+    func stopRecording() {
+        if Recorder.current?.canvas === canvas { Recorder.current?.stop() }
+    }
+
+    private func play(_ request: PlayRequest) {
+        guard Recorder.current == nil else { return }
+        playback = Playback(request)
+        showMedia()
+    }
+
+    private func stopPlayback() {
+        guard playback != nil else { return }
+        playback = nil
+        canvas.played(at: nil)
+        showMedia()
+    }
+
+    private func pauseMedia() {
+        if let recorder = Recorder.current, recorder.canvas === canvas {
+            recorder.pause(!(recorder.elapsed?.paused ?? false))
+        } else {
+            playback?.toggle()
+        }
+        showMedia()
+    }
+
+    private func stopMedia() {
+        if Recorder.current?.canvas === canvas {
+            Recorder.current?.stop()
+        } else {
+            stopPlayback()
+        }
+    }
+
+    /// The bar shows the clock of what records or plays, and a video's picture as it plays.
+    @objc private func showMedia() {
+        if let recorder = Recorder.current, recorder.canvas === canvas {
+            media.picture.isHidden = true
+            if recorder.saving {
+                media.showSaving(recorder.video ? "Saving video…" : "Saving audio…")
+            } else if let elapsed = recorder.elapsed {
+                let state = elapsed.paused ? "Paused" : recorder.video ? "Recording video" : "Recording"
+                media.show(
+                    "\(state)  \(MediaBar.clock(elapsed.ms))", recording: true,
+                    paused: recorder.pausable ? elapsed.paused : nil)
+            }
+        } else if let playback {
+            if playback.failed {
+                stopPlayback()
+                return alert("Couldn't Play the Recording", "This kind of recording doesn't play on this device.")
+            }
+            let total = playback.durationMs.map { " / " + MediaBar.clock($0) } ?? ""
+            media.show(
+                "\(playback.request.name)  \(MediaBar.clock(playback.ms))\(total)", recording: false,
+                paused: !playback.playing, playing: true)
+            if let picture = playback.picture() { media.picture.image = picture }
+            media.picture.isHidden = playback.request.video == nil
+            canvas.played(at: playback.ms)
+        } else {
+            media.isHidden = true
+            canvas.bottomInset = 0
+            mediaClock?.invalidate()
+            mediaClock = nil
+            return
+        }
+        // The line being written stays above the bar.
+        canvas.bottomInset = view.keyboardLayoutGuide.layoutFrame.minY - media.frame.minY
+        if mediaClock == nil {
+            mediaClock = Timer.scheduledTimer(withTimeInterval: 1.0 / 15, repeats: true) { [weak self] _ in
+                self?.showMedia()
+            }
+        }
+    }
 
     @objc private func sectionChanged(_ notification: Notification) {
         let flags = notification.userInfo?["flags"] as? UInt32 ?? 0

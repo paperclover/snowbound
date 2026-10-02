@@ -4,9 +4,6 @@ use crate::{State, platform};
 use onestore::page::Attachment;
 use std::{error::Error, path::Path};
 
-/// The size OneNote 2010 shows a file's icon at, in points.
-pub(crate) const ICON_SIZE: [f32; 2] = [24.0, 24.0];
-
 impl State {
     /// Attach File, or a file dropped at `at`, a window point: a copy of the file's bytes
     /// at the caret or at `at`, with the icon the system shows for it; audio and video are
@@ -30,10 +27,10 @@ impl State {
             id: onestore::page::text::new_id()?,
             filename: name.to_owned(),
             source_path: path.to_str().map(str::to_owned),
-            size: Some(ICON_SIZE),
+            size: Some(canvas::gpu::page::ICON_SIZE),
             layout: Default::default(),
             preview: platform::file_icon(path).map(Into::into),
-            recording: crate::recording::attached(name, &bytes),
+            recording: canvas::recording::attached(name, &bytes),
             bytes: Some(bytes.into()),
             tags: Vec::new(),
         };

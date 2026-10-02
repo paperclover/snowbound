@@ -208,6 +208,13 @@ the same ops. Notebooks from Files
 are read and written under `NSFileCoordinator`, so file providers see every
 change.
 
+Record Audio and Record Video record through AVFoundation and hand `crates/mobile` the
+WAV file, or the camera's pictures and sound, which it stores as the desktop does. Audio
+keeps recording in the background and with the screen locked, under the `audio`
+background mode, as a lecture outlasts the screen's timeout; a call pauses it until the
+system says to go on. The camera stops in the background, which ends a video recording
+and saves it. A tap on a recording plays it with `AVPlayer` in a bar over the page's foot.
+
 ## What stays shared, on purpose
 
 - **Behaviour**: the editor, hit-testing, the placement grid, undo, conflicts

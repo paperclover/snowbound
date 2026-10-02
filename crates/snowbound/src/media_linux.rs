@@ -3,7 +3,8 @@
 //! with gst-libav), the default microphone records as PCM WAV, and the default camera with
 //! it as the Motion JPEG AVI file OneNote plays. Recording needs the Base and Good plug-ins.
 
-use crate::{platform::symbol, video};
+use crate::platform::symbol;
+use canvas::recording::video;
 use std::{
     cell::Cell,
     ffi::{CStr, CString, c_char, c_int, c_void},
@@ -313,7 +314,7 @@ impl Recorder {
         Self::start(&movie(
             "autovideosrc",
             "autoaudiosrc",
-            crate::recording::RATE,
+            canvas::recording::RATE,
             location,
         ))
     }
@@ -395,17 +396,18 @@ mod tests {
                 "{} ! wavenc ! filesink location=\"{location}\"",
                 sound(
                     "audiotestsrc is-live=true wave=sine",
-                    crate::recording::RATE
+                    canvas::recording::RATE
                 )
             ),
             2,
             true,
         );
-        let (bytes, duration) = crate::recording::compress(&std::fs::read(&path).unwrap()).unwrap();
+        let (bytes, duration) =
+            canvas::recording::compress(&std::fs::read(&path).unwrap()).unwrap();
         // Two seconds recorded; the paused one is left out.
         assert!(duration.abs_diff(2000) < 300, "{duration}");
         // Snowbound's IMA ADPCM, decoded as playback decodes it, plays at its length.
-        let wave = crate::recording::decompress(&bytes).unwrap();
+        let wave = canvas::recording::decompress(&bytes).unwrap();
         let played = scratch.0.join("played.wav");
         std::fs::write(&played, wave).unwrap();
         let mut player = Player::open(&played, false).unwrap();
@@ -432,7 +434,7 @@ mod tests {
             &movie(
                 "videotestsrc is-live=true pattern=smpte",
                 "audiotestsrc is-live=true wave=sine",
-                crate::recording::RATE,
+                canvas::recording::RATE,
                 quoted(&path).unwrap(),
             ),
             2,
