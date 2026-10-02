@@ -403,15 +403,52 @@ fn search_finds_pages_by_title_and_text_across_sections() {
         true,
     )
     .unwrap();
-    let found = library.search(None, "collapsed PARENT").unwrap();
+    let found = library::search(&[&library], None, "collapsed PARENT").unwrap();
     assert!(!found.is_empty());
     assert!(found[0].snippet.to_lowercase().contains("collapsed parent"));
+    let [start, end] = found[0].snippet_hits[0];
+    let units: Vec<u16> = found[0].snippet.encode_utf16().collect();
+    assert_eq!(
+        String::from_utf16(&units[start..end])
+            .unwrap()
+            .to_lowercase(),
+        "collapsed"
+    );
     assert!(
-        library
-            .search(None, "no such words anywhere")
+        library::search(&[&library], None, "no such words anywhere")
             .unwrap()
             .is_empty()
     );
+    let section = &found[0].section;
+    assert!(
+        library::search(&[&library], Some(section), "collapsed parent")
+            .unwrap()
+            .iter()
+            .all(|found| found.section == *section)
+    );
+}
+
+#[test]
+fn search_lists_title_matches_of_every_notebook_first() {
+    let directory = tempfile::tempdir().unwrap();
+    let personal = Library::open(
+        &corpus("search/notebook"),
+        &directory.path().join("a"),
+        true,
+    )
+    .unwrap();
+    let other = Library::open(
+        &corpus("m6/native-features-01/notebook"),
+        &directory.path().join("b"),
+        true,
+    )
+    .unwrap();
+    let found = library::search(&[&other, &personal], None, "tom").unwrap();
+    assert_eq!(found[0].title, "Tomatoes");
+    assert_eq!(found[0].notebook, 1);
+    assert_eq!(found[0].title_hits, [[0, 3]]);
+    assert!(found[1..].iter().all(|found| !found.in_title));
+    assert_eq!(found.len(), 5);
 }
 
 #[test]
@@ -826,7 +863,7 @@ fn the_tags_summary_lists_tagged_paragraphs_and_opens_on_them() {
     let library = Arc::new(Library::open(&file, &directory.path().join("cache"), true).unwrap());
     let path = file.to_string_lossy().into_owned();
     let section = open(&library, &path);
-    let tagged = library.tagged(Some((&path, &section))).unwrap();
+    let tagged = library.tagged().unwrap();
     assert!(tagged.len() >= 9, "{}", tagged.len());
     assert!(
         tagged

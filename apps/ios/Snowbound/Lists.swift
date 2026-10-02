@@ -817,7 +817,7 @@ final class PagesViewController: UITableViewController {
     private(set) var section: Section?
     private var items: [Item] = []
     private var selected: String?
-    private let search = SearchViewController.controller()
+    private lazy var search = SearchViewController.controller { [weak self] in self?.section }
     /// Opens a page of the section.
     var onOpen: ((Section, String) -> Void)?
 
@@ -1026,27 +1026,61 @@ final class PagesViewController: UITableViewController {
     }
 }
 
-/// A page `sb_library_search` found.
+/// A page `sb_search` found.
 struct Found: Decodable {
+    let notebook: Int
     let section: String
     let page: String
     let title: String
+    let inTitle: Bool
+    let titleHits: [[Int]]
     let snippet: String
+    let snippetHits: [[Int]]
 }
 
-/// Every open notebook's pages holding a query, grouped by notebook, as Notes searches
-/// every folder.
-final class SearchViewController: UITableViewController, UISearchResultsUpdating {
-    private var found: [(notebook: Notebook, pages: [Found])] = []
+/// The desktop's search over every open notebook's pages: title matches, then body matches,
+/// each with its notebook and section. Searched from a section, it offers OneNote's scopes,
+/// starting at This Section.
+final class SearchViewController: UITableViewController, UISearchResultsUpdating, UISearchBarDelegate,
+    UISearchControllerDelegate
+{
+    private enum Scope: Int, CaseIterable {
+        case section, notebook, all
+
+        var title: String {
+            switch self {
+            case .section: "This Section"
+            case .notebook: "This Notebook"
+            case .all: "All Notebooks"
+            }
+        }
+    }
+
+    /// The section searched from, which the scopes narrow to.
+    private let place: () -> Section?
+    private weak var search: UISearchController?
+    private var found: [(found: Found, notebook: Notebook)] = []
     private var query = ""
     private var searching: DispatchWorkItem?
 
-    /// A search bar whose results this shows.
-    static func controller() -> UISearchController {
-        let results = SearchViewController(style: .insetGrouped)
+    private init(place: @escaping () -> Section?) {
+        self.place = place
+        super.init(style: .insetGrouped)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    /// A search bar whose results this shows, with scopes where `place` gives the section
+    /// it is searched from.
+    static func controller(place: (() -> Section?)? = nil) -> UISearchController {
+        let results = SearchViewController(place: place ?? { nil })
         let search = UISearchController(searchResultsController: results)
+        results.search = search
         search.searchResultsUpdater = results
-        search.searchBar.placeholder = "Search Notebooks"
+        search.delegate = results
+        search.searchBar.delegate = results
+        search.searchBar.placeholder = "Search"
+        if place != nil { search.searchBar.scopeButtonTitles = Scope.allCases.map(\.title) }
         return search
     }
 
@@ -1055,10 +1089,25 @@ final class SearchViewController: UITableViewController, UISearchResultsUpdating
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "found")
     }
 
+    func searchBar(_ searchBar: UISearchBar, selectedScopeButtonIndexDidChange selectedScope: Int) {
+        if let search { updateSearchResults(for: search) }
+    }
+
+    /// A scope chosen lasts for the search; the next starts at This Section again.
+    func didDismissSearchController(_ searchController: UISearchController) {
+        searchController.searchBar.selectedScopeButtonIndex = Scope.section.rawValue
+    }
+
     func updateSearchResults(for controller: UISearchController) {
         searching?.cancel()
         let query = controller.searchBar.text?.trimmingCharacters(in: .whitespaces) ?? ""
         guard !query.isEmpty else { return show([], query: query) }
+        let open = place()
+        let scope = open == nil ? .all : Scope(rawValue: controller.searchBar.selectedScopeButtonIndex) ?? .all
+        let notebooks = scope == .all ? Notebooks.all : open.map { [$0.notebook] } ?? []
+        let searched = notebooks.filter { $0.handle != nil }
+        let libraries = searched.map { Int(bitPattern: $0.handle) }
+        let section = scope == .section ? open?.tab.path : nil
         // Each keystroke waits for the next before the notebooks are read.
         let work = DispatchWorkItem { [weak self] in
             if self?.found.isEmpty == true {
@@ -1066,30 +1115,21 @@ final class SearchViewController: UITableViewController, UISearchResultsUpdating
                 loading.text = "Searching…"
                 self?.contentUnavailableConfiguration = loading
             }
-            let notebooks = Notebooks.all.compactMap { notebook -> (Notebook, Int, Int, String?)? in
-                guard let library = notebook.handle else { return nil }
-                // Open sections are searched as their edits leave them.
-                let open = Section.all.first { $0.notebook === notebook }
-                return (notebook, Int(bitPattern: library), open.map { Int(bitPattern: $0.handle) } ?? 0, open?.tab.path)
-            }
             background({
-                notebooks.map { notebook, library, open, path in
-                    let found = decode(
-                        [Found].self,
-                        sb_library_search(
-                            OpaquePointer(bitPattern: library), OpaquePointer(bitPattern: open), path, query))
-                    return (notebook: notebook, pages: found ?? [])
-                }
+                let pointers = libraries.map { OpaquePointer(bitPattern: $0) }
+                return decode([Found].self, sb_search(pointers, pointers.count, section, query)) ?? []
             }) { [weak self] found in
-                guard controller.searchBar.text?.trimmingCharacters(in: .whitespaces) == query else { return }
-                self?.show(found.filter { !$0.pages.isEmpty }, query: query)
+                let now = controller.searchBar.text?.trimmingCharacters(in: .whitespaces)
+                guard now == query, open == nil || controller.searchBar.selectedScopeButtonIndex == scope.rawValue
+                else { return }
+                self?.show(found.map { ($0, searched[$0.notebook]) }, query: query)
             }
         }
         searching = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.25, execute: work)
     }
 
-    private func show(_ found: [(notebook: Notebook, pages: [Found])], query: String) {
+    private func show(_ found: [(found: Found, notebook: Notebook)], query: String) {
         self.found = found
         self.query = query
         tableView.reloadData()
@@ -1097,49 +1137,71 @@ final class SearchViewController: UITableViewController, UISearchResultsUpdating
             found.isEmpty && !query.isEmpty ? UIContentUnavailableConfiguration.search() : nil
     }
 
-    override func numberOfSections(in tableView: UITableView) -> Int { found.count }
+    /// The results in the title's group or the body's, as the desktop's headings split them.
+    private func group(_ section: Int) -> ArraySlice<(found: Found, notebook: Notebook)> {
+        let titled = found.prefix { $0.found.inTitle }
+        return titled.isEmpty || section == 1 ? found.dropFirst(titled.count) : titled
+    }
+
+    override func numberOfSections(in tableView: UITableView) -> Int {
+        (found.first?.found.inTitle == true ? 1 : 0) + (found.last?.found.inTitle == false ? 1 : 0)
+    }
 
     override func tableView(_ tableView: UITableView, titleForHeaderInSection section: Int) -> String? {
-        found[section].notebook.name
+        let pages = group(section)
+        return "\(pages.first?.found.inTitle == true ? "Title" : "Body") contains: \(query) (\(pages.count))"
     }
 
     override func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
-        found[section].pages.count
+        group(section).count
+    }
+
+    private func result(_ indexPath: IndexPath) -> (found: Found, notebook: Notebook) {
+        let pages = group(indexPath.section)
+        return pages[pages.startIndex + indexPath.row]
     }
 
     override func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
-        let (notebook, pages) = found[indexPath.section]
-        let page = pages[indexPath.row]
+        let (page, notebook) = result(indexPath)
         let cell = tableView.dequeueReusableCell(withIdentifier: "found", for: indexPath)
         var content = UIListContentConfiguration.subtitleCell()
-        content.text = page.title.isEmpty ? "Untitled Page" : page.title
+        let font = UIFont.preferredFont(forTextStyle: .body)
+        content.attributedText =
+            page.title.isEmpty
+            ? NSAttributedString(string: "Untitled Page", attributes: [.font: font])
+            : marked(page.title, page.titleHits, font: font, color: .label)
         let tab = notebook.tabs.first { $0.path == page.section }
         content.image = UIImage(systemName: "rectangle.portrait.fill")
         content.imageProperties.tintColor = tab?.uiColor ?? .systemGray
-        content.secondaryAttributedText = highlighted(
-            [tab?.name ?? "", page.snippet].filter { !$0.isEmpty }.joined(separator: " · "))
-        content.secondaryTextProperties.numberOfLines = 2
+        // Where the page is, as the desktop names it: notebook, groups and section.
+        let groups: [String] = tab?.group.split(separator: "/").map(String.init) ?? []
+        let place = ([notebook.name] + groups + [tab?.name ?? ""]).filter { !$0.isEmpty }.joined(separator: " › ")
+        let detail = NSMutableAttributedString(
+            string: place + "\n",
+            attributes: [.font: UIFont.preferredFont(forTextStyle: .footnote), .foregroundColor: UIColor.secondaryLabel])
+        detail.append(
+            marked(
+                page.snippet, page.snippetHits, font: .preferredFont(forTextStyle: .subheadline),
+                color: .secondaryLabel))
+        content.secondaryAttributedText = detail
+        content.secondaryTextProperties.numberOfLines = 3
         cell.contentConfiguration = content
         return cell
     }
 
-    /// `text` with the query in bold where it occurs.
-    private func highlighted(_ text: String) -> NSAttributedString {
-        let font = UIFont.preferredFont(forTextStyle: .subheadline)
-        let attributed = NSMutableAttributedString(
-            string: text, attributes: [.font: font, .foregroundColor: UIColor.secondaryLabel])
-        var range = text.startIndex..<text.endIndex
-        while let match = text.range(of: query, options: .caseInsensitive, range: range) {
-            attributed.addAttributes(
-                [.font: font.withTraits(.traitBold), .foregroundColor: UIColor.label], range: NSRange(match, in: text))
-            range = match.upperBound..<text.endIndex
+    /// `text` with `hits`, UTF-16 ranges, marked in OneNote's yellow as the desktop marks them.
+    private func marked(_ text: String, _ hits: [[Int]], font: UIFont, color: UIColor) -> NSAttributedString {
+        let marked = NSMutableAttributedString(string: text, attributes: [.font: font, .foregroundColor: color])
+        for hit in hits where hit.count == 2 && hit[1] <= marked.length {
+            marked.addAttributes(
+                [.backgroundColor: UIColor(red: 1, green: 0.82, blue: 0, alpha: 0.45), .foregroundColor: UIColor.label],
+                range: NSRange(location: hit[0], length: hit[1] - hit[0]))
         }
-        return attributed
+        return marked
     }
 
     override func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        let (notebook, pages) = found[indexPath.section]
-        let page = pages[indexPath.row]
+        let (page, notebook) = result(indexPath)
         (view.window?.windowScene?.delegate as? SceneDelegate)?
             .open(page.section, of: notebook, page: page.page, reveal: .text(query))
     }

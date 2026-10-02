@@ -133,12 +133,8 @@ final class TagsViewController: UITableViewController {
         loading.text = "Finding Tags…"
         contentUnavailableConfiguration = loading
         guard let library = notebook.handle else { return }
-        let open = Section.all.first { $0.notebook === notebook }
-        let (pointer, section, path) = (Int(bitPattern: library), open.map { Int(bitPattern: $0.handle) } ?? 0, open?.tab.path)
-        background({
-            decode([Tagged].self, sb_library_tagged(OpaquePointer(bitPattern: pointer), OpaquePointer(bitPattern: section), path))
-                ?? []
-        }) { [weak self] tagged in
+        let pointer = Int(bitPattern: library)
+        background({ decode([Tagged].self, sb_library_tagged(OpaquePointer(bitPattern: pointer))) ?? [] }) { [weak self] tagged in
             self?.all = tagged
             self?.show()
         }

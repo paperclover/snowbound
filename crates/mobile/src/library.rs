@@ -993,37 +993,73 @@ const CHANGED: u32 = 2;
 const REJECTED: u32 = 4;
 
 #[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct Found {
+    /// Which of the notebooks searched holds the page.
+    pub(crate) notebook: usize,
     /// The section's catalog path.
     pub(crate) section: String,
     pub(crate) page: String,
     pub(crate) title: String,
+    /// Every word is in the title, as OneNote's "Title contains" lists it.
+    pub(crate) in_title: bool,
+    /// Where the words match `title`, as UTF-16 `[start, end]`.
+    pub(crate) title_hits: Vec<[usize; 2]>,
     /// The line around the first match.
     pub(crate) snippet: String,
+    pub(crate) snippet_hits: Vec<[usize; 2]>,
+}
+
+/// Pages of `libraries` holding every word of `query` in their title or text, as the desktop
+/// searches and lists them; only of the section at catalog `section` where given.
+pub(crate) fn search(
+    libraries: &[&Library],
+    section: Option<&str>,
+    query: &str,
+) -> Result<Vec<Found>> {
+    let query = Query::new(query);
+    let mut found = Vec::new();
+    for (notebook, library) in libraries.iter().enumerate() {
+        library.indexed(|index| {
+            let scope = |key: &str| section.is_none_or(|section| key == section);
+            found.extend(
+                index
+                    .search(&query, scope)
+                    .into_iter()
+                    .map(|found| (notebook, found)),
+            );
+        })?;
+    }
+    found.sort_by_key(|(_, found)| found.rank());
+    Ok(found
+        .into_iter()
+        .map(|(notebook, found)| Found {
+            notebook,
+            page: found.space.to_string(),
+            title: one_line(&found.title),
+            in_title: found.in_title,
+            title_hits: utf16(&found.title, found.title_hits),
+            snippet_hits: utf16(&found.snippet, found.snippet_hits),
+            snippet: found.snippet,
+            section: found.section,
+        })
+        .collect())
+}
+
+/// Byte ranges of `text` as UTF-16 `[start, end]`, as `NSRange` counts.
+fn utf16(text: &str, ranges: Vec<std::ops::Range<usize>>) -> Vec<[usize; 2]> {
+    let units = |end: usize| text[..end].encode_utf16().count();
+    ranges
+        .into_iter()
+        .map(|range| [units(range.start), units(range.end)])
+        .collect()
 }
 
 impl Library {
-    /// Pages of the notebook holding every word of `query` in their title or text, as the
-    /// desktop searches.
-    pub(crate) fn search(&self, open: Option<(&str, &Section)>, query: &str) -> Result<Vec<Found>> {
-        self.indexed(open, |index| {
-            index
-                .search(&Query::new(query), |_| true)
-                .into_iter()
-                .map(|found| Found {
-                    section: found.section,
-                    page: found.space.to_string(),
-                    title: one_line(&found.title),
-                    snippet: found.snippet,
-                })
-                .collect()
-        })
-    }
-
     /// The notebook's tagged paragraphs in page order, as OneNote's Tags Summary lists
     /// them: once for each of their tags.
-    pub(crate) fn tagged(&self, open: Option<(&str, &Section)>) -> Result<Vec<Tag>> {
-        self.indexed(open, |index| {
+    pub(crate) fn tagged(&self) -> Result<Vec<Tag>> {
+        self.indexed(|index| {
             index
                 .tagged(|_| true)
                 .into_iter()
@@ -1041,13 +1077,10 @@ impl Library {
         })
     }
 
-    /// `read` over the notebook's pages: the open section as its edits leave it, others as
-    /// stored, read again when their file changed.
-    fn indexed<T>(
-        &self,
-        open: Option<(&str, &Section)>,
-        read: impl FnOnce(&Index) -> T,
-    ) -> Result<T> {
+    /// `read` over the notebook's pages: the sections open as their edits leave them, others
+    /// as stored, read again when their file changed.
+    fn indexed<T>(&self, read: impl FnOnce(&Index) -> T) -> Result<T> {
+        let open = self.open_sections();
         let tabs: Vec<String> = self
             .tabs()?
             .into_iter()
@@ -1057,9 +1090,9 @@ impl Library {
         let mut indexed = self.index.lock().unwrap_or_else(|error| error.into_inner());
         let (checked, index) = &mut *indexed;
         for path in &tabs {
-            match open.filter(|(open, _)| open == path) {
-                Some((_, section)) => {
-                    let section = &section.shared.section;
+            match open.iter().find(|(open, _)| open == path) {
+                Some((_, shared)) => {
+                    let section = &shared.section;
                     let mut entries = Vec::new();
                     for (space, ..) in section.pages()? {
                         let modified = index.get(path, space).map_or(0, |entry| entry.modified);
@@ -1444,39 +1477,39 @@ pub unsafe extern "C" fn sb_library_new_section(
     .map_or(std::ptr::null_mut(), owned)
 }
 
-/// Pages of the notebook whose title or text holds `query`, as JSON: each with `section`
-/// (a catalog path), `page`, `title` and `snippet`. `open` is the section being edited, at
-/// catalog path `path`, or null. Reads the notebook's sections, so call it off the main
-/// thread.
+/// Pages of the `count` notebooks at `libraries` whose title or text holds `query`, title
+/// matches first and then the most recently changed, as JSON: each with `notebook` (its
+/// place in `libraries`), `section` (a catalog path), `page`, `title`, `inTitle`,
+/// `snippet`, and `titleHits` and `snippetHits`, UTF-16 `[start, end]`. Only the section
+/// at catalog path `section` where non-null. Open sections are searched as their edits leave
+/// them; reads the notebooks' sections, so call it off the main thread.
 ///
 /// # Safety
-/// `query` and a non-null `path` are NUL-terminated UTF-8.
+/// `libraries` holds `count` libraries; `query` and a non-null `section` are NUL-terminated
+/// UTF-8.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sb_library_search(
-    library: &Library,
-    open: Option<&Section>,
-    path: *const c_char,
+pub unsafe extern "C" fn sb_search(
+    libraries: *const &Library,
+    count: usize,
+    section: *const c_char,
     query: *const c_char,
 ) -> *mut c_char {
-    let path = optional(path).unwrap_or_default();
-    json(library.search(open.map(|section| (path.as_str(), section)), &string(query)))
+    // SAFETY: the caller passes `count` libraries.
+    let libraries = unsafe { std::slice::from_raw_parts(libraries, count) };
+    json(search(
+        libraries,
+        optional(section).as_deref(),
+        &string(query),
+    ))
 }
 
 /// The notebook's tagged paragraphs in page order as JSON, once for each of their tags:
 /// each with `section`, `page`, `title`, `paragraph`, `name`, `shape` (the tag's symbol, 0
-/// for a highlighting tag), `checked` and `text`. `open` and `path` as `sb_library_search`
-/// takes them; reads the notebook's sections, so call it off the main thread.
-///
-/// # Safety
-/// A non-null `path` is NUL-terminated UTF-8.
+/// for a highlighting tag), `checked` and `text`. Open sections are read as their edits
+/// leave them; reads the notebook's sections, so call it off the main thread.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn sb_library_tagged(
-    library: &Library,
-    open: Option<&Section>,
-    path: *const c_char,
-) -> *mut c_char {
-    let path = optional(path).unwrap_or_default();
-    json(library.tagged(open.map(|section| (path.as_str(), section))))
+pub extern "C" fn sb_library_tagged(library: &Library) -> *mut c_char {
+    json(library.tagged())
 }
 
 /// Unlocks the password-protected section at catalog `path` with `password`, as OneNote's

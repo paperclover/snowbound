@@ -32,8 +32,8 @@ char *sb_library_sections(const Library *library);
 int32_t sb_library_color(const Library *library);
 char *sb_library_new_section(const Library *library, const char *folder, const char *name, const char *author,
                              const char *date, const char *time);
-char *sb_library_search(const Library *library, const Section *open, const char *path, const char *query);
-char *sb_library_tagged(const Library *library, const Section *open, const char *path);
+char *sb_search(const Library *const *libraries, size_t count, const char *section, const char *query);
+char *sb_library_tagged(const Library *library);
 bool sb_library_unlock(const Library *library, const char *path, const char *password);
 void sb_library_lock_all(const Library *library);
 char *sb_library_sync_status(const Library *library);

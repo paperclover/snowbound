@@ -329,6 +329,13 @@ pub struct Found {
     pub snippet_hits: Vec<Range<usize>>,
 }
 
+impl Found {
+    /// Where OneNote lists the page: title matches first, then the most recently modified.
+    pub fn rank(&self) -> (bool, std::cmp::Reverse<u64>) {
+        (!self.in_title, std::cmp::Reverse(self.modified))
+    }
+}
+
 /// Pages of any number of sections, searchable together.
 #[derive(Default)]
 pub struct Index {
@@ -379,7 +386,7 @@ impl Index {
         if query.is_empty() {
             return Vec::new();
         }
-        let mut found: Vec<(usize, &Entry, bool)> = self
+        let mut found: Vec<Found> = self
             .entries
             .iter()
             .enumerate()
@@ -393,10 +400,6 @@ impl Index {
                     });
                 matches.then_some((order, entry, in_title))
             })
-            .collect();
-        found.sort_by_key(|(_, entry, in_title)| (!in_title, std::cmp::Reverse(entry.modified)));
-        found
-            .into_iter()
             .map(|(order, entry, in_title)| {
                 let (snippet, snippet_hits) = snippet(entry, query);
                 Found {
@@ -411,7 +414,9 @@ impl Index {
                     snippet_hits,
                 }
             })
-            .collect()
+            .collect();
+        found.sort_by_key(Found::rank);
+        found
     }
 
     /// The tagged paragraphs of the pages whose section and page `scope` accepts, in page
