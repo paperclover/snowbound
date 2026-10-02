@@ -447,6 +447,8 @@ enum Notebooks {
 
     private static let key = "notebooks"
     private static let hidden = "hidesOnDevice"
+    /// The notebooks' ids in the order the reader put them in.
+    private static let order = "notebookOrder"
     /// The Snowbound Guide's folder, in the app and in Documents once copied there.
     static let guide = "Snowbound Guide"
     /// Whether the list offers the guide; off until Clover has read it through.
@@ -478,13 +480,13 @@ enum Notebooks {
         if let data = UserDefaults.standard.data(forKey: key),
             let entries = try? JSONDecoder().decode([Entry].self, from: data)
         {
-            elsewhere = entries.compactMap { entry in
+            elsewhere = ordered(entries.compactMap { entry in
                 switch entry.source {
                 case .documents, .icloud: return nil
                 default: break
                 }
                 return Notebook(id: entry.id, name: entry.name, source: entry.source)
-            }
+            })
         } else {
             // The notebook the first version remembered from Files.
             if let bookmark = UserDefaults.standard.data(forKey: "notebook") {
@@ -522,14 +524,41 @@ enum Notebooks {
             return []
         }
         var added: [Notebook] = []
-        list = notebooks(in: folder).map { [list] name in
-            if let kept = list.first(where: { $0.id == prefix + name }) { return kept }
-            let notebook = Notebook(
-                id: prefix + name, name: (name as NSString).deletingPathExtension, source: source(name))
-            added.append(notebook)
-            return notebook
-        }
+        list = ordered(
+            notebooks(in: folder).map { [list] name in
+                if let kept = list.first(where: { $0.id == prefix + name }) { return kept }
+                let notebook = Notebook(
+                    id: prefix + name, name: (name as NSString).deletingPathExtension, source: source(name))
+                added.append(notebook)
+                return notebook
+            })
         return added
+    }
+
+    /// `list` in the reader's order, those it doesn't name after in their own.
+    private static func ordered(_ list: [Notebook]) -> [Notebook] {
+        let order = UserDefaults.standard.stringArray(forKey: order) ?? []
+        let rank = { (notebook: Notebook) in order.firstIndex(of: notebook.id) ?? order.count }
+        return list.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
+    }
+
+    /// The notebooks listed in the same place as `notebook`, in order.
+    static func siblings(of notebook: Notebook) -> [Notebook] {
+        [inCloud, onDevice, elsewhere].first { $0.contains { $0 === notebook } } ?? []
+    }
+
+    /// Puts `notebook` at `index` among the notebooks of its place, and keeps that order.
+    static func move(_ notebook: Notebook, to index: Int) {
+        func move(in list: inout [Notebook]) {
+            guard let at = list.firstIndex(where: { $0 === notebook }) else { return }
+            let moved = list.remove(at: at)
+            list.insert(moved, at: min(max(index, 0), list.count))
+        }
+        move(in: &inCloud)
+        move(in: &onDevice)
+        move(in: &elsewhere)
+        guard scripted == nil else { return }
+        UserDefaults.standard.set(all.map(\.id), forKey: order)
     }
 
     /// Whether Snowbound's folder in iCloud Drive holds other notebooks than the list shows, as

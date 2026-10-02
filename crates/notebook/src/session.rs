@@ -6,7 +6,7 @@ use crate::{
     EditStatus, Error, PendingEdit, Remote, Replica, Resolution, Result, SyncWorker, discover, fs,
 };
 use onestore::{
-    CommitError, ExGuid, PageCreation, RevisionIndex, Stamp, Store, Transaction,
+    CommitError, ExGuid, PageCreation, PageEdit, RevisionIndex, Stamp, Store, Transaction,
     document::Document,
     op::{Edit, Op, SectionOp},
     page::Page,
@@ -1722,6 +1722,39 @@ pub fn moved(page: &Page, author: &str) -> Result<Op> {
         creation,
         page: page.copy()?,
     }))
+}
+
+/// The edits putting the pages `moved` where `order` lists them, with their levels, in a
+/// section now listing `listed`: each goes before the next page of `order` that stays put
+/// and is still listed. Pages gone from the section are left out.
+pub fn arrange(
+    listed: &[(ExGuid, String, u32)],
+    order: &[(ExGuid, u32)],
+    moved: &[ExGuid],
+) -> Result<Vec<PageEdit>> {
+    let present = |space: &ExGuid| listed.iter().any(|(listed, ..)| listed == space);
+    let mut edits = Vec::new();
+    for (index, (space, level)) in order.iter().enumerate() {
+        if !moved.contains(space) || !present(space) {
+            continue;
+        }
+        let before = order[index + 1..]
+            .iter()
+            .map(|(space, _)| *space)
+            .find(|space| !moved.contains(space) && present(space));
+        edits.push(PageEdit::move_to(*space, before, *level)?);
+    }
+    Ok(edits)
+}
+
+/// Whether `page` holds nothing but an empty title, as the page a section left without
+/// pages gains does.
+pub fn blank(page: &Page) -> bool {
+    page.title.trim().is_empty()
+        && page
+            .objects
+            .iter()
+            .all(|object| matches!(object, onestore::page::PageObject::Title(_)))
 }
 
 fn component(name: &str) -> bool {

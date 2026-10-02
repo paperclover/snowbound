@@ -287,6 +287,17 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
         split.show(.primary)
     }
 
+    /// Lets go of the section shown where it is the section or group at `path` of `notebook`
+    /// or within it, as before its file moves; its path and page, to open once moved.
+    func release(_ path: String, of notebook: Notebook) -> (section: String, page: String?)? {
+        guard let section = pages.section, section.notebook === notebook,
+            section.tab.path == path || section.tab.path.hasPrefix(path + "/")
+        else { return nil }
+        let shown = (section.tab.path, Place.saved?.page)
+        close(notebook)
+        return shown
+    }
+
     /// Adds a page to the open section and opens it, its title ready for typing.
     func newPage(subpage: Bool = false) {
         guard let section = pages.section else { return }

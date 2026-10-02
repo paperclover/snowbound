@@ -6,11 +6,15 @@
 use crate::library::{entry_name, folders};
 use crate::{Command, Library, Loaded, State, UserEvent};
 use canvas::editor::CanvasEditor;
-use notebook::{Replica, discover::Folder};
+use notebook::{
+    Replica,
+    discover::Folder,
+    session::{arrange, blank},
+};
 use onestore::{
     ExGuid, PageCreation, PageEdit,
     op::{Edit, Op, SectionOp},
-    page::{Page, PageObject},
+    page::Page,
 };
 use std::{error::Error, sync::Arc};
 
@@ -285,15 +289,6 @@ fn drop_newest(steps: &mut Vec<Step>, page: ExGuid, count: usize) {
     }
 }
 
-/// Whether `page` holds nothing but its title, untitled.
-pub(crate) fn blank(page: &Page) -> bool {
-    page.title.trim().is_empty()
-        && page
-            .objects
-            .iter()
-            .all(|object| matches!(object, PageObject::Title(_)))
-}
-
 /// The page shown once `gone` leave the section listing `listed`: `prefer` if it stays,
 /// else the page after the first one gone, or before it, as OneNote 2010 shows.
 fn neighbor(
@@ -502,18 +497,7 @@ impl Site {
                 }
             }
             Change::Arrange { order, moved } => {
-                let moving = |space: &ExGuid| moved.contains(space) && at(*space).is_some();
-                let mut edits = Vec::new();
-                for (index, (space, level)) in order.iter().enumerate() {
-                    if !moving(space) {
-                        continue;
-                    }
-                    let before = order[index + 1..]
-                        .iter()
-                        .map(|(space, _)| *space)
-                        .find(|space| !moved.contains(space) && at(*space).is_some());
-                    edits.push(PageEdit::move_to(*space, before, *level)?);
-                }
+                let edits = arrange(&listed, &order, &moved)?;
                 let Some(show) = edits.first().map(PageEdit::space) else {
                     return Ok(None);
                 };

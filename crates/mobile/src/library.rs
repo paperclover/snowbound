@@ -931,6 +931,20 @@ impl Section {
         })
     }
 
+    /// Puts the pages `moved` where `order` lists them, at their levels, as one edit; false
+    /// where none of them is listed any more.
+    pub(crate) fn arrange(&self, order: &[(ExGuid, u32)], moved: &[ExGuid]) -> Result<bool> {
+        let edits = session::arrange(&self.shared.section.pages()?, order, moved)?;
+        if edits.is_empty() {
+            return Ok(false);
+        }
+        self.shared.apply(Edit {
+            at: filetime(),
+            ops: vec![Op::Section(SectionOp::Pages(edits))],
+        })?;
+        Ok(true)
+    }
+
     /// Applies the events since the last poll to the shared status.
     pub(crate) fn poll(&self) -> u32 {
         let mut flags = 0;
@@ -1205,6 +1219,130 @@ impl Library {
         Ok(())
     }
 
+    /// Runs `change` on the section at catalog `path`: through its session where one is open,
+    /// else through one opened for it and closed after, its edits left to the background.
+    fn with_section<T>(
+        &self,
+        path: &str,
+        change: impl FnOnce(&session::Section) -> Result<T>,
+    ) -> Result<T> {
+        if let Some((_, shared)) = self
+            .open_sections()
+            .into_iter()
+            .find(|(open, _)| open == path)
+        {
+            return change(&shared.section);
+        }
+        let section = self.section(path, || {})?;
+        let result = change(&section);
+        section.close()?;
+        result
+    }
+
+    /// Moves page `space` of the section at catalog `from` into the section at `to`, before
+    /// `before` at `level` (last without), as OneNote moves a page dropped on a section's tab:
+    /// it keeps its identity, title, date and content there. A section left without pages
+    /// gains one titled `date` and `time`; `discard`, the page `to` gained when this page
+    /// left it, goes while it holds nothing, as Undo takes the move back.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn move_page(
+        &self,
+        from: &str,
+        space: ExGuid,
+        to: &str,
+        before: Option<ExGuid>,
+        level: u32,
+        discard: Option<ExGuid>,
+        author: &str,
+        [date, time]: [&str; 2],
+    ) -> Result<MovedPage> {
+        if from == to {
+            return Err("The page is in that section already".into());
+        }
+        let (page, was) = self.with_section(from, |section| {
+            let listed = section.pages()?;
+            let at = (listed.iter().position(|(listed, ..)| *listed == space))
+                .ok_or("The page is not listed")?;
+            let next = listed.get(at + 1).map(|(next, ..)| *next);
+            Ok((section.page(space)?, (next, listed[at].2)))
+        })?;
+        let import = session::moved(&page, author)?;
+        let Op::Section(SectionOp::Import { creation, .. }) = &import else {
+            unreachable!("notebook::session::moved imports");
+        };
+        let arrived = creation.space();
+        self.with_section(to, |section| {
+            let listed = section.pages()?;
+            let has = |page: &ExGuid| listed.iter().any(|(space, ..)| space == page);
+            let mut ops = vec![import];
+            let before = before.filter(has);
+            if before.is_some() || level != 1 {
+                ops.push(Op::Section(SectionOp::Pages(vec![PageEdit::move_to(
+                    arrived, before, level,
+                )?])));
+            }
+            if let Some(discard) = discard.filter(has)
+                && session::blank(&section.page(discard)?)
+            {
+                ops.push(Op::Section(SectionOp::Delete(vec![discard])));
+            }
+            Ok(section.apply(
+                author,
+                Edit {
+                    at: filetime(),
+                    ops,
+                },
+            )?)
+        })?;
+        let added = self.with_section(from, |section| {
+            let mut ops = vec![Op::Section(SectionOp::Delete(vec![space]))];
+            let added = match section.pages()?.as_slice() {
+                [(only, ..)] if *only == space => {
+                    let fresh = dated(author, date, time)?;
+                    let added = fresh.space();
+                    ops.push(Op::Section(SectionOp::Create(fresh)));
+                    Some(added)
+                }
+                _ => None,
+            };
+            section.apply(
+                author,
+                Edit {
+                    at: filetime(),
+                    ops,
+                },
+            )?;
+            Ok(added)
+        })?;
+        let id = |space: Option<ExGuid>| space.map(|space| space.to_string());
+        Ok(MovedPage {
+            page: arrived.to_string(),
+            added: id(added),
+            before: id(was.0),
+            level: was.1,
+        })
+    }
+
+    /// Puts the section or group at catalog `path` into the group `folder` ("" for the
+    /// notebook's top), moving it there unless it is there, as OneNote moves one dragged
+    /// onto a group, then orders `folder` as `paths` lists its entries, as they are named
+    /// once moved; entries left out follow in their order. Returns its catalog path.
+    pub(crate) fn place(&self, path: &str, folder: &str, paths: &[String]) -> Result<String> {
+        let parent = path.rsplit_once('/').map_or("", |(parent, _)| parent);
+        self.with_notebook(true, |notebook| {
+            notebook.refresh()?;
+            let placed = match parent == folder {
+                true => path.to_owned(),
+                false => notebook.move_entry(path, folder)?,
+            };
+            if !paths.is_empty() {
+                let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+                notebook.reorder(folder, &paths)?;
+            }
+            Ok(placed)
+        })
+    }
+
     fn open_sections(&self) -> Vec<(String, Arc<Shared>)> {
         let mut open = self.open.lock().unwrap_or_else(|error| error.into_inner());
         open.retain(|(_, shared)| shared.strong_count() > 0);
@@ -1212,6 +1350,16 @@ impl Library {
             .filter_map(|(path, shared)| Some((path.clone(), shared.upgrade()?)))
             .collect()
     }
+}
+
+/// A page `Library::move_page` moved, by id: where it went, the page the section it left
+/// gained, and where it was there: before `before`, at `level`.
+#[derive(serde::Serialize)]
+pub(crate) struct MovedPage {
+    pub(crate) page: String,
+    pub(crate) added: Option<String>,
+    pub(crate) before: Option<String>,
+    pub(crate) level: u32,
 }
 
 #[derive(serde::Serialize)]
@@ -1475,6 +1623,63 @@ pub unsafe extern "C" fn sb_library_new_section(
         })
     }))
     .map_or(std::ptr::null_mut(), owned)
+}
+
+/// Moves page `id` of the section at catalog `from` into the section at `to` (`Library::move_page`),
+/// before page `before` at `level`, or last with `before` null; `discard`, unless null, is
+/// the page `to` gained when this page left it. Returns JSON with `page`, its id there,
+/// `added`, the page titled `date` and `time` that `from` gained, or null, and `before` and
+/// `level`, where it was in `from`; null when it cannot move. Writes to both sections, so
+/// call it off the main thread.
+///
+/// # Safety
+/// Every string is NUL-terminated UTF-8; `before` and `discard` may be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_library_move_page(
+    library: &Library,
+    from: *const c_char,
+    id: *const c_char,
+    to: *const c_char,
+    before: *const c_char,
+    level: u32,
+    discard: *const c_char,
+    author: *const c_char,
+    date: *const c_char,
+    time: *const c_char,
+) -> *mut c_char {
+    let space = |text: *const c_char| optional(text).map(|id| id.parse()).transpose();
+    json((|| {
+        library.move_page(
+            &string(from),
+            string(id).parse()?,
+            &string(to),
+            space(before)?,
+            level,
+            space(discard)?,
+            &string(author),
+            [&string(date), &string(time)],
+        )
+    })())
+}
+
+/// Puts the section or group at catalog `path` into the group at catalog path `folder` (""
+/// for the notebook's top), moving it unless it is there, then orders `folder` as `paths`, a
+/// JSON array of catalog paths as they are named after the move; entries left out follow
+/// in their order. Returns its catalog path, or null.
+///
+/// # Safety
+/// Every string is NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_library_place(
+    library: &Library,
+    path: *const c_char,
+    folder: *const c_char,
+    paths: *const c_char,
+) -> *mut c_char {
+    let placed = serde_json::from_str::<Vec<String>>(&string(paths))
+        .map_err(Into::into)
+        .and_then(|paths| library.place(&string(path), &string(folder), &paths));
+    report(placed).map_or(std::ptr::null_mut(), owned)
 }
 
 /// Pages of the `count` notebooks at `libraries` whose title or text holds `query`, title
@@ -1856,6 +2061,40 @@ pub unsafe extern "C" fn sb_section_delete_page(
         .map_err(Into::into)
         .and_then(|space| section.delete_page(space, &string(date), &string(time)));
     report(deleted).is_some()
+}
+
+/// Puts the pages `moved`, a JSON array of ids, where `order`, a JSON array of `{id, level}`
+/// listing the section's pages, places them, at their levels, as one edit: a page dragged
+/// to a new place, made a subpage or promoted, or put back as Undo does. False when none of
+/// them is listed any more.
+///
+/// # Safety
+/// `order` and `moved` are NUL-terminated UTF-8.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn sb_section_arrange(
+    section: &Section,
+    order: *const c_char,
+    moved: *const c_char,
+) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Placed {
+        id: String,
+        level: u32,
+    }
+    let arranged = (|| {
+        let order: Vec<Placed> = serde_json::from_str(&string(order))?;
+        let order = order
+            .into_iter()
+            .map(|placed| Ok((placed.id.parse()?, placed.level)))
+            .collect::<Result<Vec<_>>>()?;
+        let moved: Vec<String> = serde_json::from_str(&string(moved))?;
+        let moved = moved
+            .iter()
+            .map(|id| Ok(id.parse()?))
+            .collect::<Result<Vec<_>>>()?;
+        section.arrange(&order, &moved)
+    })();
+    report(arranged).unwrap_or(false)
 }
 
 /// Waits for every edit to be stored in the cache, then up to `seconds` for them to be

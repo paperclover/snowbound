@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 /// The places notebooks are kept, each listing its notebooks with their sections, as Files
 /// lists its locations and Notes each account's folders.
 final class NotebooksViewController: UICollectionViewController, UIDocumentPickerDelegate {
-    private enum Location: Hashable {
+    enum Location: Hashable {
         /// Snowbound's folder in iCloud Drive, where new notebooks go while iCloud Drive is on.
         case icloud
         /// Snowbound's Documents, which Files shows as Snowbound's folder.
@@ -13,7 +13,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         case elsewhere
     }
 
-    private enum Item: Hashable {
+    enum Item: Hashable {
         case location(Location)
         case notebook(String)
         /// A section group, by its `/`-separated path.
@@ -23,7 +23,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         case status(notebook: String)
     }
 
-    private var dataSource: UICollectionViewDiffableDataSource<Location, Item>!
+    var dataSource: UICollectionViewDiffableDataSource<Location, Item>!
     private var collapsed: Set<Item> = []
     /// What each notebook's row shows of its sync status, by notebook id.
     private var attention: [String: Sync.Attention] = [:]
@@ -63,6 +63,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         }
         let cell = UICollectionView.CellRegistration<UICollectionViewListCell, Item> { [weak self] cell, _, item in
             self?.configure(cell, item)
+            self?.arranging(cell, item)
         }
         dataSource = UICollectionViewDiffableDataSource(collectionView: collectionView) { view, indexPath, item in
             view.dequeueConfiguredReusableCell(using: cell, for: indexPath, item: item)
@@ -138,6 +139,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
             UIBarButtonItem(title: "More", image: UIImage(systemName: "ellipsis"), menu: more),
         ]
         navigationItem.searchController = SearchViewController.controller()
+        setUpArranging()
         let corner = Prototype.quickNote ? [QuickNote.item()] : []
         if #available(iOS 26, *) {
             // Search sits in the bottom toolbar, as Notes and Files put it.
@@ -151,7 +153,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         }
         NotificationCenter.default.addObserver(forName: Notebook.listed, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
-            reload()
+            reload(animated: true)
             var shown = dataSource.snapshot()
             shown.reconfigureItems(shown.itemIdentifiers)
             dataSource.apply(shown, animatingDifferences: false)
@@ -165,9 +167,9 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         navigationController?.setToolbarHidden(toolbarItems?.isEmpty != false, animated: false)
     }
 
-    private func notebook(_ id: String) -> Notebook? { Notebooks.all.first { $0.id == id } }
+    func notebook(_ id: String) -> Notebook? { Notebooks.all.first { $0.id == id } }
 
-    func reload() {
+    func reload(animated: Bool = false) {
         guard isViewLoaded else { return }
         if Prototype.welcome {
             let welcome = Prototype.welcome(
@@ -194,9 +196,12 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         } else {
             contentUnavailableConfiguration = nil
         }
-        var sections = NSDiffableDataSourceSnapshot<Location, Item>()
-        sections.appendSections(locations.map(\.0))
-        dataSource.apply(sections, animatingDifferences: false)
+        // Locations kept keep their rows, so a move animates.
+        if dataSource.snapshot().sectionIdentifiers != locations.map(\.0) {
+            var sections = NSDiffableDataSourceSnapshot<Location, Item>()
+            sections.appendSections(locations.map(\.0))
+            dataSource.apply(sections, animatingDifferences: false)
+        }
         for (location, notebooks) in locations {
             var list = NSDiffableDataSourceSectionSnapshot<Item>()
             let header = Item.location(location)
@@ -221,7 +226,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
                 }
             }
             list.expand(list.items.filter { !collapsed.contains($0) })
-            dataSource.apply(list, to: location, animatingDifferences: false)
+            dataSource.apply(list, to: location, animatingDifferences: animated)
         }
         showSelection()
         refreshSync()
@@ -583,10 +588,14 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
     override func collectionView(
         _ collectionView: UICollectionView, contextMenuConfigurationForItemsAt indexPaths: [IndexPath], point: CGPoint
     ) -> UIContextMenuConfiguration? {
-        guard indexPaths.count == 1, case .notebook(let id) = dataSource.itemIdentifier(for: indexPaths[0]),
-            let notebook = notebook(id)
-        else { return nil }
-        return UIContextMenuConfiguration(actionProvider: { [weak self] _ in self?.menu(for: notebook) })
+        guard indexPaths.count == 1, let item = dataSource.itemIdentifier(for: indexPaths[0]) else { return nil }
+        guard case .notebook(let id) = item, let notebook = notebook(id) else {
+            let moves = arrangeMenu(item)
+            return moves.isEmpty ? nil : UIContextMenuConfiguration(actionProvider: { _ in UIMenu(children: moves) })
+        }
+        return UIContextMenuConfiguration(actionProvider: { [weak self] _ in
+            UIMenu(children: (self?.menu(for: notebook).children ?? []) + (self?.arrangeMenu(item) ?? []))
+        })
     }
 
     override func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt indexPath: IndexPath) -> Bool {
@@ -807,14 +816,14 @@ extension UIFont {
 
 /// A section's pages, subpages indented, each page's conflict pages beneath it.
 final class PagesViewController: UITableViewController {
-    private struct Item {
+    struct Item {
         let row: Row
         let version: Row.Version?
         var id: String { version?.id ?? row.id }
     }
 
     private(set) var section: Section?
-    private var items: [Item] = []
+    private(set) var items: [Item] = []
     private var selected: String?
     private lazy var search = SearchViewController.controller { [weak self] in self?.section }
     /// Opens a page of the section.
@@ -847,6 +856,7 @@ final class PagesViewController: UITableViewController {
         }
         NotificationCenter.default.addObserver(
             self, selector: #selector(changed), name: Section.changed, object: nil)
+        setUpArranging()
         if Prototype.sectionStrip {
             for direction in [UISwipeGestureRecognizer.Direction.left, .right] {
                 let swipe = UISwipeGestureRecognizer(target: self, action: #selector(swiped))
@@ -981,6 +991,7 @@ final class PagesViewController: UITableViewController {
             }
         }
         cell.contentConfiguration = content
+        cell.accessibilityCustomActions = arrangeActions(item)
         return cell
     }
 
@@ -1014,6 +1025,7 @@ final class PagesViewController: UITableViewController {
                 actions.append(UIAction(title: "New Subpage", image: UIImage(systemName: "text.badge.plus")) { _ in
                     self?.newPage(under: item.row.id)
                 })
+                actions += self?.arrangeMenu(item) ?? []
             }
             actions.append(
                 UIAction(

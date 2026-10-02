@@ -32,6 +32,9 @@ char *sb_library_sections(const Library *library);
 int32_t sb_library_color(const Library *library);
 char *sb_library_new_section(const Library *library, const char *folder, const char *name, const char *author,
                              const char *date, const char *time);
+char *sb_library_move_page(const Library *library, const char *from, const char *id, const char *to, const char *before,
+                           uint32_t level, const char *discard, const char *author, const char *date, const char *time);
+char *sb_library_place(const Library *library, const char *path, const char *folder, const char *paths);
 char *sb_search(const Library *const *libraries, size_t count, const char *section, const char *query);
 char *sb_library_tagged(const Library *library);
 bool sb_library_unlock(const Library *library, const char *path, const char *password);
@@ -55,6 +58,7 @@ char *sb_section_pages(const Section *section);
 uint32_t sb_section_poll(const Section *section, uint8_t *status);
 char *sb_section_new_page(const Section *section, const char *parent, const char *date, const char *time);
 bool sb_section_delete_page(const Section *section, const char *id, const char *date, const char *time);
+bool sb_section_arrange(const Section *section, const char *order, const char *moved);
 char *sb_section_themes(const Section *section, const char *id);
 bool sb_section_set_theme(const Section *section, const char *id, uint8_t scope, const char *theme);
 bool sb_section_flush(const Section *section, double seconds);

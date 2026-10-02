@@ -446,7 +446,7 @@ fn notebook_tabs(library: &Library) -> Vec<(String, String)> {
 fn printed(pages: Vec<Page>) -> Vec<Page> {
     pages
         .into_iter()
-        .filter(|page| !crate::undo::blank(page))
+        .filter(|page| !notebook::session::blank(page))
         .collect()
 }
 

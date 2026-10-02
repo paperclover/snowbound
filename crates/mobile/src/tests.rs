@@ -1274,3 +1274,184 @@ fn a_movie_from_the_camera_becomes_the_desktop_s_avi() {
     assert_eq!((parsed.frames.len(), parsed.duration_ms()), (15, 1000));
     assert!(parsed.sound.is_some());
 }
+
+fn levels(section: &Section) -> Vec<(ExGuid, u32)> {
+    let pages = section.shared.section.pages().unwrap();
+    pages
+        .into_iter()
+        .map(|(space, _, level)| (space, level))
+        .collect()
+}
+
+#[test]
+fn pages_drag_indent_and_undo_as_one_edit_each() {
+    let (_directory, _root, _library, section) = notebook_open("Features.one");
+    let before = levels(&section);
+    assert!(before.len() > 2);
+    let last = before.last().unwrap().0;
+    let mut dragged = before.clone();
+    let moved = dragged.pop().unwrap();
+    dragged.insert(0, moved);
+    let revisions = section.shared.section.pending().unwrap().len();
+    assert!(section.arrange(&dragged, &[last]).unwrap());
+    assert_eq!(levels(&section), dragged);
+    assert_eq!(
+        section.shared.section.pending().unwrap().len(),
+        revisions + 1
+    );
+    let second = dragged[1].0;
+    let mut indented = dragged.clone();
+    indented[1].1 = 2;
+    assert!(section.arrange(&indented, &[second]).unwrap());
+    assert_eq!(levels(&section), indented);
+    assert!(section.arrange(&dragged, &[second]).unwrap());
+    assert!(section.arrange(&before, &[last]).unwrap());
+    assert_eq!(levels(&section), before);
+    assert!(!section.arrange(&before, &[ExGuid::default()]).unwrap());
+}
+
+#[test]
+fn a_page_moves_to_another_section_and_back_where_it_was() {
+    let (_directory, root, library, features) = notebook_open("Features.one");
+    let before = levels(&features);
+    let (space, level) = before[1];
+    let title = features.shared.section.page(space).unwrap().title;
+    let date = ["Thursday, October 1, 2026", "9:00 AM"];
+    let moved = library
+        .move_page(
+            "Features.one",
+            space,
+            "Empty.one",
+            None,
+            1,
+            None,
+            "Clover Test",
+            date,
+        )
+        .unwrap();
+    let arrived: ExGuid = moved.page.parse().unwrap();
+    assert_eq!(moved.added, None);
+    assert_eq!(moved.before, Some(before[2].0.to_string()));
+    assert_eq!(moved.level, level);
+    assert!(levels(&features).iter().all(|(page, _)| *page != space));
+    let empty = open(&library, "Empty.one");
+    let listed = empty.shared.section.pages().unwrap();
+    assert_eq!(listed.last().unwrap(), &(arrived, title.clone(), 1));
+    drop(empty);
+    let back = library
+        .move_page(
+            "Empty.one",
+            arrived,
+            "Features.one",
+            moved.before.map(|before| before.parse().unwrap()),
+            moved.level,
+            None,
+            "Clover Test",
+            date,
+        )
+        .unwrap()
+        .page
+        .parse()
+        .unwrap();
+    let mut returned = before.clone();
+    returned[1].0 = back;
+    assert_eq!(levels(&features), returned);
+    assert_eq!(features.shared.section.page(back).unwrap().title, title);
+    drop(features);
+    library.close(Duration::from_secs(20)).unwrap();
+    let arena = onestore::Arena::default();
+    let file = onestore::read_file(root.join("Features.one")).unwrap();
+    let stored = onestore::Section::open(&arena, file).unwrap();
+    assert_eq!(stored.page(back).unwrap().title, title);
+}
+
+#[test]
+fn a_sections_last_page_moving_leaves_a_page_that_undo_takes_out() {
+    let (_directory, _root, library, features) = notebook_open("Features.one");
+    let date = ["Thursday, October 1, 2026", "9:02 AM"];
+    let page = features.new_page(None, date[0], date[1]).unwrap();
+    let arrived: ExGuid = library
+        .move_page(
+            "Features.one",
+            page,
+            "Empty.one",
+            None,
+            1,
+            None,
+            "Clover Test",
+            date,
+        )
+        .unwrap()
+        .page
+        .parse()
+        .unwrap();
+    assert_eq!(levels(&open(&library, "Empty.one")), [(arrived, 1)]);
+    let returned = library
+        .move_page(
+            "Empty.one",
+            arrived,
+            "Features.one",
+            None,
+            1,
+            None,
+            "Clover Test",
+            date,
+        )
+        .unwrap();
+    let back = returned.page.parse().unwrap();
+    let added: ExGuid = returned.added.unwrap().parse().unwrap();
+    assert_eq!(levels(&open(&library, "Empty.one")), [(added, 1)]);
+    library
+        .move_page(
+            "Features.one",
+            back,
+            "Empty.one",
+            None,
+            1,
+            Some(added),
+            "Clover Test",
+            date,
+        )
+        .unwrap();
+    assert_eq!(levels(&open(&library, "Empty.one")).len(), 1);
+}
+
+#[test]
+fn sections_reorder_and_move_between_groups_and_back() {
+    let (_directory, root, library, features) = notebook_open("Features.one");
+    drop(features);
+    let top = |library: &Library| -> Vec<String> {
+        let tabs = library.tabs().unwrap();
+        tabs.into_iter()
+            .filter(|tab| tab.group.is_empty())
+            .map(|tab| tab.path)
+            .collect()
+    };
+    let before = top(&library);
+    let mut reversed = before.clone();
+    reversed.reverse();
+    assert_eq!(
+        library.place("Empty.one", "", &reversed).unwrap(),
+        "Empty.one"
+    );
+    assert_eq!(top(&library), reversed);
+    assert_eq!(
+        library.place("Empty.one", "Group A", &[]).unwrap(),
+        "Group A/Empty.one"
+    );
+    assert!(root.join("Group A/Empty.one").exists());
+    let tabs = library.tabs().unwrap();
+    let grouped: Vec<&str> = tabs
+        .iter()
+        .filter(|tab| tab.group == "Group A")
+        .map(|tab| tab.path.as_str())
+        .collect();
+    assert_eq!(grouped.last(), Some(&"Group A/Empty.one"));
+    assert_eq!(
+        library.place("Group A/Empty.one", "", &before).unwrap(),
+        "Empty.one"
+    );
+    assert_eq!(top(&library), before);
+    assert!(root.join("Empty.one").exists());
+    open(&library, "Empty.one");
+}
