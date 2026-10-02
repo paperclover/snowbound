@@ -1039,23 +1039,32 @@ impl State {
                         library.purge_recycle_bin();
                     }
                 }
+                // Where the notebook was left, or its first section.
                 let shown = notebooks
                     .iter()
                     .filter(|library| Some(&library.location) == current.as_ref())
                     .chain(&notebooks)
-                    .find_map(|library| Some((library, library.first_section()?)));
+                    .find_map(|library| {
+                        let left = stored.recent.iter().find(|place| {
+                            place.notebook == library.location && library.contains(&place.section)
+                        });
+                        match left {
+                            Some(place) => Some((library, place.section.clone(), Some(place.page))),
+                            None => Some((library, library.first_section()?, None)),
+                        }
+                    });
                 match shown {
-                    Some((library, path)) if !library.locked(&path) => {
+                    Some((library, path, left)) if !library.locked(&path) => {
                         let section = library.open(&path, notify(proxy.clone()))?;
                         let (opened, page) =
-                            read_session(section, Arc::clone(library), path, None)?;
+                            read_session(section, Arc::clone(library), path, left)?;
                         let (scene, editor) = PageScene::from_page(page, &mut engine)?;
                         session = Some(opened);
                         (editor, Some((scene, [0.0; 2])))
                     }
                     shown => {
                         // A first section still locked shows its locked page.
-                        locked = shown.map(|(library, path)| protection::Locked {
+                        locked = shown.map(|(library, path, _)| protection::Locked {
                             library: Arc::clone(library),
                             path,
                         });
@@ -1228,7 +1237,9 @@ impl State {
             opening: None,
             switching: None,
             places: HashMap::new(),
-            last_pages: HashMap::new(),
+            last_pages: (stored.recent.iter().rev())
+                .map(|place| (library::key(&place.notebook, &place.section), place.page))
+                .collect(),
             trail: {
                 let mut trail = navigation::Trail::default();
                 trail.recent = stored.recent;

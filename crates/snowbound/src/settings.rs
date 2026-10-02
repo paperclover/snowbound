@@ -46,7 +46,7 @@ pub struct Settings {
     pub servers: Vec<String>,
     /// Chords set in Options' Keyboard, by command, each list in place of its defaults.
     pub keys: std::collections::BTreeMap<String, Vec<String>>,
-    /// Pages shown lately, latest first, which the palette lists first.
+    /// Pages shown lately, latest first, which the palette lists first and a launch returns to.
     pub recent: Vec<crate::navigation::Place>,
     pub passwords: Passwords,
 }

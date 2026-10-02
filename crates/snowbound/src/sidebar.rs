@@ -1100,8 +1100,8 @@ impl crate::State {
         self.read_notebook(location, section, open, read);
     }
 
-    /// Shows `section`, or the first section, of the notebook at `location`, `open` or read
-    /// with `read`, in place of the notebook listed there.
+    /// Shows `section`, or where it was left, or the first section, of the notebook at
+    /// `location`, `open` or read with `read`, in place of the notebook listed there.
     pub(crate) fn read_notebook(
         &mut self,
         location: String,
@@ -1109,6 +1109,15 @@ impl crate::State {
         open: Option<Arc<Library>>,
         read: impl FnOnce(&str, &std::path::Path) -> Result<Library, String> + Send + 'static,
     ) {
+        let section = section.or_else(|| {
+            (self.trail.recent.iter())
+                .find(|place| place.notebook == location)
+                .map(|place| place.section.clone())
+        });
+        let left = section
+            .as_ref()
+            .and_then(|path| self.last_pages.get(&crate::library::key(&location, path)))
+            .copied();
         let (cache, notify) = (self.cache.clone(), crate::notify(self.proxy.clone()));
         self.load(move || {
             let library = match open {
@@ -1122,9 +1131,10 @@ impl crate::State {
             if let Err(error) = &library.notebook {
                 return Err(error.clone().into());
             }
-            let Some(path) = section
+            let Some((path, left)) = section
                 .filter(|path| library.contains(path))
-                .or_else(|| library.first_section())
+                .map(|path| (path, left))
+                .or_else(|| Some((library.first_section()?, None)))
             else {
                 // Shown once its sections arrive.
                 if library.downloading() {
@@ -1133,7 +1143,7 @@ impl crate::State {
                 return Err("This folder holds no notebook sections.".into());
             };
             let section = library.open(&path, notify)?;
-            let (session, page) = crate::read_session(section, library, path, None)?;
+            let (session, page) = crate::read_session(section, library, path, left)?;
             Ok(crate::Loaded::Section(Box::new(session), page))
         });
     }

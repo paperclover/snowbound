@@ -12,6 +12,11 @@ impl Scratch {
         let path = std::env::temp_dir().join(format!("snowbound-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(path.join("notebook")).unwrap();
+        std::fs::write(
+            path.join("settings.json"),
+            r#"{"user_name": "Snowbound Test"}"#,
+        )
+        .unwrap();
         Self(path)
     }
 }
@@ -22,7 +27,8 @@ impl Drop for Scratch {
     }
 }
 
-/// Runs `steps` against a copy of `notebook`'s files, then returns the trees each
+/// Runs `steps` against a copy of `notebook`'s files with the scratch's settings, then
+/// returns the trees each
 /// `accessibility` step named by the trailing word wrote.
 fn replay(scratch: &Scratch, notebook: Option<&Path>, steps: &[&str]) -> Vec<String> {
     let dir = &scratch.0;
@@ -46,11 +52,6 @@ fn replay(scratch: &Scratch, notebook: Option<&Path>, steps: &[&str]) -> Vec<Str
     }
     script += "quit\n";
     std::fs::write(dir.join("script"), script).unwrap();
-    std::fs::write(
-        dir.join("settings.json"),
-        r#"{"user_name": "Snowbound Test"}"#,
-    )
-    .unwrap();
     let status = Command::new(env!("CARGO_BIN_EXE_snowbound"))
         .env("SNOWBOUND_REPLAY", dir.join("script"))
         .arg("--notebook")
@@ -387,5 +388,47 @@ fn the_find_bar_keeps_room_for_the_query() {
     assert!(
         found.contains(r#"SearchInput "Find on Page" = "Alphazz" [focused]"#),
         "{found}"
+    );
+}
+
+/// A launch shows the page each notebook was left on, as the settings recall them: the
+/// notebook shown at once, and another as its section is opened.
+#[test]
+fn a_launch_returns_to_the_page_each_notebook_was_left_on() {
+    let scratch = Scratch::new("left-on");
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
+    let other = scratch.0.join("other");
+    std::fs::create_dir_all(&other).unwrap();
+    for entry in std::fs::read_dir(&source).unwrap() {
+        let entry = entry.unwrap();
+        std::fs::copy(entry.path(), other.join(entry.file_name())).unwrap();
+    }
+    let place = |notebook: &Path, page: &str| serde_json::json!({"notebook": notebook, "section": "Cross.one", "page": page});
+    let settings = serde_json::json!({
+        "user_name": "Snowbound Test",
+        "sidebar": true,
+        "notebooks": [other],
+        "recent": [
+            // Type over a row, then Delete a whole table.
+            place(&scratch.0.join("notebook"), "{F8285B5C-5410-4A62-B7DC-43E408FE82AE},1"),
+            place(&other, "{9F114CE9-F7D5-4234-B7C3-FF0D79615BB2},1"),
+        ],
+    });
+    std::fs::write(scratch.0.join("settings.json"), settings.to_string()).unwrap();
+    // The other notebook's section in the sidebar.
+    let mut steps = vec!["accessibility launched", "move 63 104", "press", "release"];
+    steps.extend(["wait 4000", "accessibility other"]);
+    let shown = |tree: &str| page_tabs(tree).into_iter().find(|tab| tab.starts_with('*'));
+    let [launched, other] = replay(&scratch, Some(&source), &steps).try_into().unwrap();
+    assert_eq!(
+        shown(&launched).as_deref(),
+        Some("*Type over a row"),
+        "{launched}"
+    );
+    assert_eq!(
+        shown(&other).as_deref(),
+        Some("*Delete a whole table"),
+        "{other}"
     );
 }
