@@ -134,6 +134,10 @@ new To Do box, and it has no command that converts a list. Make To-Do List, in
 the page's context menu and the palette, trades the selected paragraphs' bullets
 and numbers for the first check box tag in the user's list as one undo step;
 Make Bulleted List trades the tag back for a bullet (`corpus/to-do-list`).
+OneNote's Enter never carries a tag, and on an empty tagged paragraph it opens a
+plain one above (`corpus/structural-probe`). Snowbound's Enter continues a to-do
+list as a list continues: the new paragraph takes an unchecked copy of each check
+box, and Enter on an empty item drops them.
 
 An outline holding only pictures or files takes a paragraph after them where a
 click beside them lands, as OneNote 2010 adds one when typing there. It is

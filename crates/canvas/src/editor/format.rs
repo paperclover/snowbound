@@ -1329,23 +1329,53 @@ impl CanvasEditor {
     /// Checks the check boxes among `tags`, or clears them once all are checked; OneNote keeps
     /// a cleared box's completion time as zero.
     fn toggle_checks(&self, mut tags: Vec<&mut Tag>) {
-        let checkable = |tag: &Tag| {
-            matches!(
-                self.tag_kind(tag),
-                Some(Kind::TagDefinition { shape: Some(shape), .. })
-                    if crate::outline::checkable(*shape)
-            )
-        };
         let checked = tags
             .iter()
-            .filter(|tag| checkable(tag))
+            .filter(|tag| self.check_box(tag).is_some())
             .all(|tag| tag.status & 1 != 0);
         let completed = if checked { Some(0) } else { time32() };
         for tag in &mut tags {
-            if checkable(tag) && (tag.status & 1 != 0) == checked {
+            if self.check_box(tag).is_some() && (tag.status & 1 != 0) == checked {
                 tag.status ^= 1;
                 tag.completed = completed;
             }
+        }
+    }
+
+    /// The definition and shape of `tag` when it is a check box.
+    fn check_box(&self, tag: &Tag) -> Option<(&Kind<'static>, u16)> {
+        match self.tag_kind(tag)? {
+            kind @ Kind::TagDefinition {
+                shape: Some(shape), ..
+            } if crate::outline::checkable(*shape) => Some((kind, *shape)),
+            _ => None,
+        }
+    }
+
+    /// Enter in a to-do list: `opened` takes an unchecked copy of each check box of `from`.
+    pub(super) fn continue_checks(&self, from: &PageParagraph, opened: &mut PageParagraph) {
+        let created = time32();
+        let ParagraphContent::Text(text) = &mut opened.content else {
+            unreachable!()
+        };
+        for tag in tags(from).collect::<Vec<_>>().into_iter().rev() {
+            if let (Some((kind, shape)), Some(id)) = (self.check_box(tag), tag.definition) {
+                self.retag(
+                    [&mut opened.tags, &mut text.tags],
+                    kind,
+                    Some((id, shape, created)),
+                );
+            }
+        }
+    }
+
+    /// Enter on an empty to-do item ends the list: its check boxes go.
+    pub(super) fn end_checks(&self, node: &mut PageParagraph) {
+        let ParagraphContent::Text(text) = &mut node.content else {
+            unreachable!()
+        };
+        for tags in [&mut node.tags, &mut text.tags] {
+            tags.retain(|tag| self.check_box(tag).is_none());
         }
     }
 

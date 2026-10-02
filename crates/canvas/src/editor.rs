@@ -3625,7 +3625,9 @@ impl CanvasEditor {
     /// Enter as OneNote 2010 does (`evidence/structural-edits`): the new paragraph takes the
     /// level, lists and character formatting at the caret but no note tags. At a paragraph's
     /// start its tags stay with its text below; an empty paragraph opens a plain one above and
-    /// leaves the list it ends; a heading continues as body text.
+    /// leaves the list it ends; a heading continues as body text. Unlike OneNote, a to-do list
+    /// continues as lists do: the new paragraph takes unchecked copies of the check boxes, and
+    /// an empty item loses them.
     fn split(&mut self, engine: &mut TextEngine) -> Result<(), EditorError> {
         if let Some(split) = self.across(engine, Self::split)? {
             return Ok(split);
@@ -3673,14 +3675,22 @@ impl CanvasEditor {
             if next.is_none_or(|next| next.lists.is_empty()) {
                 tail.lists.clear();
             }
-        } else if empty(tail)
-            && let Some(following) = following
-        {
-            tail.style = self.style_named(&following)?;
-            // The heading's run formatting carries over under the body style (`c9-h1-*`).
-            let run = format.over(&self.style_format(head.style)?);
-            tail.text_mut().unwrap().text =
-                Paragraph::new(String::new(), run.inherit(&self.style_format(tail.style)?));
+            self.end_checks(tail);
+        } else {
+            if start.offset == 0 {
+                self.continue_checks(tail, head);
+            } else {
+                self.continue_checks(head, tail);
+            }
+            if empty(tail)
+                && let Some(following) = following
+            {
+                tail.style = self.style_named(&following)?;
+                // The heading's run formatting carries over under the body style (`c9-h1-*`).
+                let run = format.over(&self.style_format(head.style)?);
+                tail.text_mut().unwrap().text =
+                    Paragraph::new(String::new(), run.inherit(&self.style_format(tail.style)?));
+            }
         }
         let caret = TextPosition {
             paragraph: start.paragraph + 1,

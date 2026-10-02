@@ -261,12 +261,26 @@ fn replay(
     caret: (usize, Offset),
     steps: &[(Key, &str)],
 ) -> CanvasEditor {
+    let steps = steps
+        .iter()
+        .map(|(key, name)| (*key, summary(name).trim_end().to_owned()))
+        .collect::<Vec<_>>();
+    expect(engine, before, caret, &steps)
+}
+
+/// [`replay`] against outlines given in the summaries' form.
+fn expect(
+    engine: &mut TextEngine,
+    before: &str,
+    caret: (usize, Offset),
+    steps: &[(Key, String)],
+) -> CanvasEditor {
     let mut editor = open(engine, before);
     place(&mut editor, caret);
     let original = editor.active_outline().document.clone();
     for (key, after) in steps {
         press(&mut editor, engine, *key);
-        assert_eq!(render(&editor), summary(after).trim_end(), "{after}");
+        assert_eq!(&render(&editor), after);
         let outline = editor.active_outline();
         let fresh = OutlineLayout::flow(
             outline.document.nodes().iter(),
@@ -323,9 +337,9 @@ const KINDS: [&str; 9] = [
 ];
 
 #[test]
-fn enter_carries_level_lists_and_children_but_never_tags() {
+fn enter_carries_level_lists_and_children_but_no_other_tags() {
     let mut engine = TextEngine::default();
-    for kind in KINDS {
+    for kind in KINDS.into_iter().filter(|kind| !CHECKED.contains(kind)) {
         let prefix = first_run(kind);
         replay(
             &mut engine,
@@ -392,6 +406,81 @@ fn enter_carries_level_lists_and_children_but_never_tags() {
         (1, Offset::End),
         &[(Key::Enter, "c10-enter-end-1")],
     );
+}
+
+/// The kinds with a To Do box, whose Enter departs from OneNote 2010's.
+const CHECKED: [&str; 3] = ["todo", "done", "tagbullet"];
+
+/// Enter continues a to-do list with unchecked items and an empty item ends it, as Enter does
+/// a bulleted list; OneNote 2010 gives the new paragraph no tag and keeps an empty item's.
+#[test]
+fn enter_continues_a_to_do_list_unchecked_and_an_empty_item_ends_it() {
+    let mut engine = TextEngine::default();
+    for kind in CHECKED {
+        let (level, tag, list) = match kind {
+            "todo" => ("  L1", "To Do", ""),
+            "done" => ("  L1", "To Do[x]", ""),
+            _ => ("    L2", "To Do", "bullet"),
+        };
+        // Below `Above`, a paragraph per `(tag, list, text)`.
+        let page = |lines: &[(&str, &str, &str)]| {
+            std::iter::once("  L1 [] [] qs0 Above".to_owned())
+                .chain(
+                    lines
+                        .iter()
+                        .map(|(tag, list, text)| format!("{level} [{tag}] [{list}] qs0 {text}")),
+                )
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim_end()
+                .to_owned()
+        };
+        let mut enter = |caret, [split, typed]: [&[(&str, &str, &str)]; 2], text| {
+            expect(
+                &mut engine,
+                &target(kind),
+                caret,
+                &[(Key::Enter, page(split)), (Key::Type(text), page(typed))],
+            );
+        };
+        enter(
+            (1, Offset::End),
+            [
+                &[(tag, list, "Target text"), ("To Do", list, "")],
+                &[(tag, list, "Target text"), ("To Do", list, "New")],
+            ],
+            "New",
+        );
+        enter(
+            (1, Offset::Back(4)),
+            [
+                &[(tag, list, "Target "), ("To Do", list, "text")],
+                &[(tag, list, "Target "), ("To Do", list, "Xtext")],
+            ],
+            "X",
+        );
+        enter(
+            (1, Offset::Start),
+            [
+                &[("To Do", list, ""), (tag, list, "Target text")],
+                &[("To Do", list, ""), (tag, list, "XTarget text")],
+            ],
+            "X",
+        );
+        let item = (tag, list, "Target text");
+        expect(
+            &mut engine,
+            &summary(&format!("c3-{kind}-0")),
+            (2, Offset::Start),
+            &[
+                (Key::Enter, page(&[item, ("", "", ""), ("", "", "")])),
+                (
+                    Key::Enter,
+                    page(&[item, ("", "", ""), ("", "", ""), ("", "", "")]),
+                ),
+            ],
+        );
+    }
 }
 
 #[test]
@@ -710,7 +799,11 @@ fn a_split_keeps_every_tag_above_and_a_join_takes_the_upper_tags() {
     };
     editor.select([at(4); 2].into()).unwrap();
     editor.enter(&mut engine, false).unwrap();
-    assert_eq!(render(&editor), summary("c9-multitag-1").trim_end());
+    // OneNote 2010 leaves the lower half untagged (`c9-multitag-1`); its To Do continues here.
+    assert_eq!(
+        render(&editor),
+        "  L1 [] [] qs0 Alpha\n  L1 [To Do,Important[x]] [] qs0 Two \n  L1 [To Do] [] qs0 tags"
+    );
     editor.delete(&mut engine, true).unwrap();
     assert_eq!(render(&editor), summary("c9-multitag-2").trim_end());
     editor.select([at(0); 2].into()).unwrap();

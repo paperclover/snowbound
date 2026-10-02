@@ -67,11 +67,14 @@ fn custom_tags_store_what_customize_tags_stores() {
             .into()
     };
     let list = list();
-    for (paragraph, (text, places)) in TAGGED.iter().enumerate() {
+    for (paragraph, (text, _)) in TAGGED.iter().enumerate() {
         if paragraph > 0 {
             editor.enter(&mut engine, false).unwrap();
         }
         editor.insert(&mut engine, text).unwrap();
+    }
+    // Tagged once typed, as Enter would continue a check box.
+    for (paragraph, (_, places)) in TAGGED.iter().enumerate() {
         editor.select(at(paragraph)).unwrap();
         for &place in *places {
             let tag = list[usize::from(place)].clone();
@@ -82,10 +85,6 @@ fn custom_tags_store_what_customize_tags_stores() {
         if paragraph == 2 {
             editor.format(&mut engine, Formatting::Check).unwrap();
         }
-        let offset = text.len() as u32;
-        editor
-            .select([TextPosition { paragraph, offset }; 2].into())
-            .unwrap();
     }
     let arena = onestore::Arena::default();
     let mut section = onestore::Section::open(&arena, source.to_vec()).unwrap();

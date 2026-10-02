@@ -1155,6 +1155,9 @@ mod tests {
                 editor.enter(&mut engine, false).unwrap();
             }
             editor.insert(&mut engine, text).unwrap();
+        }
+        // Tagged once typed, as Enter would continue a check box.
+        for (paragraph, tag) in list.iter().take(lines.len()).enumerate() {
             editor
                 .select(
                     [TextPosition {
@@ -1164,15 +1167,11 @@ mod tests {
                         .into(),
                 )
                 .unwrap();
-            let formatting = Formatting::Tag(list[paragraph].clone(), paragraph as u16);
+            let formatting = Formatting::Tag(tag.clone(), paragraph as u16);
             editor.format(&mut engine, formatting).unwrap();
             if paragraph == 2 {
                 editor.format(&mut engine, Formatting::Check).unwrap();
             }
-            let offset = text.len() as u32;
-            editor
-                .select([TextPosition { paragraph, offset }; 2].into())
-                .unwrap();
         }
         let arena = onestore::Arena::default();
         let mut section = onestore::Section::open(&arena, source.to_vec()).unwrap();

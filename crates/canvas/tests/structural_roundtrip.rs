@@ -123,6 +123,43 @@ fn apply(
 }
 
 /// Every paragraph on the page, cells' included, by identity.
+/// `page` with its tags' places in their elements' property arenas, which a read assigns,
+/// cleared.
+fn settled(mut page: Page) -> Page {
+    fn walk(list: &mut [PageParagraph]) {
+        for paragraph in list {
+            for tag in &mut paragraph.tags {
+                tag.extra_set = 0;
+            }
+            match &mut paragraph.content {
+                ParagraphContent::Text(text) => {
+                    for tag in &mut text.tags {
+                        tag.extra_set = 0;
+                    }
+                }
+                ParagraphContent::Table(table) => {
+                    for cell in table.rows.iter_mut().flat_map(|row| &mut row.cells) {
+                        walk(&mut cell.paragraphs);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for object in &mut page.objects {
+        match object {
+            PageObject::Outline(outline) => walk(&mut outline.paragraphs),
+            PageObject::Title(title) => {
+                for outline in &mut title.outlines {
+                    walk(&mut outline.paragraphs);
+                }
+            }
+            _ => {}
+        }
+    }
+    page
+}
+
 fn paragraphs(page: &Page) -> BTreeMap<ExGuid, PageParagraph> {
     fn walk(list: &[PageParagraph], out: &mut BTreeMap<ExGuid, PageParagraph>) {
         for paragraph in list {
@@ -346,10 +383,10 @@ fn sweep(
                 }
                 // An untitled page's title follows its first line as the writer stores it.
                 let rereads = |reread: &Page| {
-                    Page {
+                    settled(Page {
                         title: after.title.clone(),
                         ..reread.clone()
-                    } == after
+                    }) == settled(after.clone())
                 };
                 let arena = Arena::default();
                 let mut stored = Section::open(&arena, section.clone()).unwrap();
@@ -502,11 +539,11 @@ fn edit(section: &mut Vec<u8>, title: &str, keys: &[(Caret, Press)], engine: &mu
         .find(|(id, _)| *id == space)
         .unwrap();
     assert_eq!(
-        Page {
+        settled(Page {
             title: after.title.clone(),
             ..reread.clone()
-        },
-        after,
+        }),
+        settled(after),
         "{title}"
     );
     *section = saved;

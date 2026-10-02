@@ -104,16 +104,135 @@ fn lists_become_to_do_lists_and_back_one_revision_each() {
     let written = section.image();
     let reread = Section::open(&arena, written.clone()).unwrap();
     assert_eq!(items(&reread.page(space).unwrap(), &mut engine), expected);
-    if let Some(directory) = std::env::var_os("SNOWBOUND_TO_DO_LIST_EXPORT") {
-        let directory = std::path::PathBuf::from(directory);
-        std::fs::create_dir(&directory).unwrap();
-        std::fs::write(directory.join("lists.one"), &written).unwrap();
-        let file_id = Store::parse(&written).unwrap().header.file_id;
-        std::fs::write(
-            directory.join("Open Notebook.onetoc2"),
-            onestore::create_table_of_contents("Open Notebook.onetoc2", &[("lists.one", file_id)])
-                .unwrap(),
+    export("SNOWBOUND_TO_DO_LIST_EXPORT", &written);
+}
+
+/// Writes section `written` and a table of contents to the new directory `variable` names.
+fn export(variable: &str, written: &[u8]) {
+    let Some(directory) = std::env::var_os(variable) else {
+        return;
+    };
+    let directory = std::path::PathBuf::from(directory);
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("lists.one"), written).unwrap();
+    let file_id = Store::parse(written).unwrap().header.file_id;
+    std::fs::write(
+        directory.join("Open Notebook.onetoc2"),
+        onestore::create_table_of_contents("Open Notebook.onetoc2", &[("lists.one", file_id)])
+            .unwrap(),
+    )
+    .unwrap();
+}
+
+/// Each top-level paragraph's text and its tags' check states.
+fn checks(page: &Page) -> Vec<(String, Vec<bool>)> {
+    page.objects
+        .iter()
+        .find_map(|object| match object {
+            PageObject::Outline(outline) => Some(&outline.paragraphs),
+            _ => None,
+        })
+        .unwrap()
+        .iter()
+        .filter(|node| node.level == 1)
+        .map(|node| {
+            let text = node.text().unwrap();
+            let checked = text.tags.iter().map(|tag| tag.status & 1 == 1).collect();
+            (text.text.text().to_owned(), checked)
+        })
+        .collect()
+}
+
+/// Enter after a checked To Do opens an unchecked one, and Enter on that empty item ends the
+/// list, each Enter one undo step and one revision. `SNOWBOUND_TO_DO_ENTER_EXPORT` names a new
+/// directory receiving the candidate for a cold reopen.
+#[test]
+fn enter_continues_a_to_do_list_and_twice_ends_it() {
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, LISTS.to_vec()).unwrap();
+    let space = section.pages().unwrap()[0].0;
+    let page = section.page(space).unwrap();
+    let mut engine = TextEngine::default();
+    let mut editor = CanvasEditor::from_page(page.clone(), &mut engine).unwrap();
+    editor.focus_outline(body(&page)).unwrap();
+    let mut at_time = 134_000_000_000_000_000;
+    let mut publish = |editor: &mut CanvasEditor| {
+        let ops = editor
+            .take_ops()
+            .unwrap()
+            .into_iter()
+            .map(|op| Op::Page { space, op })
+            .collect::<Vec<_>>();
+        at_time += 10_000_000;
+        section.apply("Author", &Edit { at: at_time, ops }).unwrap();
+    };
+    let end = |paragraph, offset| [TextPosition { paragraph, offset }; 2].into();
+    editor
+        .select(
+            [
+                at(0),
+                TextPosition {
+                    paragraph: 1,
+                    offset: 14,
+                },
+            ]
+            .into(),
         )
         .unwrap();
+    editor
+        .format(
+            &mut engine,
+            Formatting::ToDoList(NoteTag::defaults()[0].clone(), 0),
+        )
+        .unwrap();
+    editor.select(end(0, 0)).unwrap();
+    editor.format(&mut engine, Formatting::Check).unwrap();
+    publish(&mut editor);
+
+    editor.select(end(0, 11)).unwrap();
+    editor.enter(&mut engine, false).unwrap();
+    publish(&mut editor);
+    editor.insert(&mut engine, "Next task").unwrap();
+    publish(&mut editor);
+    editor.select(end(2, 14)).unwrap();
+    for _ in 0..2 {
+        editor.enter(&mut engine, false).unwrap();
+        publish(&mut editor);
     }
+    editor.insert(&mut engine, "After the list").unwrap();
+    publish(&mut editor);
+
+    let expected = [
+        ("Bullet item", vec![true]),
+        ("Next task", vec![false]),
+        ("First numbered", vec![false]),
+        ("", vec![]),
+        ("After the list", vec![]),
+        ("Second numbered", vec![]),
+        ("Restarted at three", vec![]),
+        ("Plain again", vec![]),
+    ]
+    .map(|(text, checked)| (text.to_owned(), checked));
+    assert_eq!(checks(&section.page(space).unwrap()), expected);
+    section.seal().unwrap();
+    let written = section.image();
+    let reread = Section::open(&arena, written.clone()).unwrap();
+    assert_eq!(checks(&reread.page(space).unwrap()), expected);
+    for _ in 0..3 {
+        assert!(editor.undo(&mut engine).unwrap());
+    }
+    assert_eq!(
+        checks(&editor.page().unwrap())
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .take(4)
+            .collect::<Vec<_>>(),
+        [
+            "Bullet item",
+            "Next task",
+            "First numbered",
+            "Second numbered"
+        ]
+    );
+    export("SNOWBOUND_TO_DO_ENTER_EXPORT", &written);
 }
