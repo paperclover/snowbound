@@ -369,3 +369,23 @@ fn renaming_a_section_from_its_tab_types_into_the_sidebar_at_once() {
         "{typed}"
     );
 }
+
+/// Finding on the page leaves the query room beside the match count: a press just past
+/// where the count ends lands in the field.
+#[test]
+fn the_find_bar_keeps_room_for_the_query() {
+    let scratch = Scratch::new("find-room");
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
+    let mut steps = vec!["modifiers command", "key f", "modifiers", "wait 200"];
+    steps.extend(["type Alpha", "wait 400", "move 600 600", "press", "release"]);
+    steps.extend(["wait 200", "move 1000 52", "press", "release", "wait 200"]);
+    steps.extend(["type zz", "wait 200", "accessibility found"]);
+    let [found] = replay(&scratch, Some(&notebook), &steps)
+        .try_into()
+        .unwrap();
+    assert!(
+        found.contains(r#"SearchInput "Find on Page" = "Alphazz" [focused]"#),
+        "{found}"
+    );
+}

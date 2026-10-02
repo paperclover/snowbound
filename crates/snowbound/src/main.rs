@@ -2886,11 +2886,22 @@ impl State {
                 ..Spec::default()
             },
         );
+        // Finding widens the box over the tab row's spare room, for the match count beside
+        // the query.
+        let wide = if finding {
+            PAGE_LIST + 120.0
+        } else {
+            PAGE_LIST
+        };
+        let width = ui::Extent {
+            size: ui::Size::Pixels(wide),
+            strictness: PAGE_LIST / wide,
+        };
         for folded in [false, true].into_iter().take(if finding { 1 } else { 2 }) {
             self.ui.open(
                 folded,
                 Spec {
-                    size: [if folded { children() } else { px(PAGE_LIST) }, px(TAB_ROW)],
+                    size: [if folded { children() } else { width }, px(TAB_ROW)],
                     pad: [0.0, (TAB_ROW - ui::shell::TOOL) / 2.0],
                     gap: 3.0,
                     ..Spec::default()

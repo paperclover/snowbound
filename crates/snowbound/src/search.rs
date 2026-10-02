@@ -1144,7 +1144,15 @@ impl State {
         self.ui.leaf(
             "count",
             Spec {
-                size: [fit(), px(ui::shell::TOOL)],
+                // It shortens once the query has given up all it may.
+                size: [
+                    ui::Extent {
+                        size: ui::Size::Text,
+                        strictness: 0.5,
+                    },
+                    px(ui::shell::TOOL),
+                ],
+                overflow: ui::Overflow::Ellipsis,
                 inset: [0.0, 3.0, 0.0, 3.0],
                 text: Some(&label),
                 fill: Some(draw::srgb(0xff, 0xe0, 0x5a)),
@@ -1177,7 +1185,15 @@ impl State {
             &mut self.search.query,
             "",
             Spec {
-                size: [fill(), px(ui::shell::TOOL)],
+                // Wider than the box ever is, so it takes all there is, yet keeps 72 for a
+                // few words of the query.
+                size: [
+                    ui::Extent {
+                        size: ui::Size::Pixels(1000.0),
+                        strictness: 72.0 / 1000.0,
+                    },
+                    px(ui::shell::TOOL),
+                ],
                 pad: [4.0, 0.0],
                 role: Some(Role::SearchInput),
                 ..Spec::default()
