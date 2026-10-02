@@ -538,22 +538,31 @@ fn gap(ui: &mut Ui, tree: &mut Tree, folder: &str, before: Option<&str>) {
 }
 
 /// Opens the boxes a notebook's or group's rows ease open and shut in, where they show:
-/// the caller builds the rows and closes both.
+/// the caller builds the rows and closes both. Rows appearing with the tree, as the sidebar
+/// opens or a notebook's sections arrive, show as they stand; only a toggle eases.
 fn unfolding(ui: &mut Ui, part: impl std::hash::Hash, unfolded: bool) -> bool {
     let outer = ui.id(part);
-    let rows = ui
-        .rect(outer.child("rows"))
-        .map_or(0.0, |rect| rect[3] - rect[1]);
-    let height = ui.animate(outer, if unfolded { rows } else { 0.0 });
-    if !unfolded && height == 0.0 {
-        return false;
-    }
+    let height = if ui.lasted(outer.child("shown"), true).is_zero() {
+        if !unfolded {
+            return false;
+        }
+        ui::children()
+    } else {
+        let rows = ui
+            .rect(outer.child("rows"))
+            .map_or(0.0, |rect| rect[3] - rect[1]);
+        let height = ui.animate(outer, if unfolded { rows } else { 0.0 });
+        if !unfolded && height == 0.0 {
+            return false;
+        }
+        px(height)
+    };
     ui.open_as(
         outer,
         Spec {
             flags: Flags::CLIP,
             axis: Axis::Y,
-            size: [fill(), px(height)],
+            size: [fill(), height],
             ..Spec::default()
         },
     );
