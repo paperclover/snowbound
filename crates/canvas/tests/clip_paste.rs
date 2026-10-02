@@ -16,6 +16,7 @@ use onestore::{
 };
 
 const ONENOTE: &str = include_str!("../../../corpus/clipboard/onenote-2010.html");
+const WORD: &str = include_str!("../../../corpus/clipboard/word-2010.html");
 
 /// Each paragraph of a body outline: its level, list kind, text and bold runs.
 fn outline(page: &Page, outline: &Outline) -> Vec<String> {
@@ -23,8 +24,9 @@ fn outline(page: &Page, outline: &Outline) -> Vec<String> {
         for node in nodes {
             let list = match node.lists.last().map(|id| &page.definitions[id].kind) {
                 Some(Kind::List {
-                    bullet: Some(_), ..
-                }) => "• ",
+                    format: Some(format),
+                    ..
+                }) if !format.contains('\u{fffd}') => "• ",
                 Some(Kind::List { .. }) => "# ",
                 _ => "",
             };
@@ -305,6 +307,74 @@ fn several_lines_pasted_from_the_title_go_into_the_body() {
         std::fs::write(
             directory.join("Open Notebook.onetoc2"),
             onestore::create_table_of_contents("Open Notebook.onetoc2", &[("clips.one", file_id)])
+                .unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+/// Word 2010's lists (`corpus/clipboard/word-2010.html`) paste as lists that the section
+/// stores and reads back. `CANVAS_WORD_LIST_EXPORT` names a directory receiving the section
+/// as a notebook, for a cold reopen in OneNote 2010.
+#[test]
+fn words_lists_paste_and_store() {
+    let source = onestore::create_section("word.one", "Word lists", "Author").unwrap();
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, source.clone()).unwrap();
+    let (space, ..) = section.pages().unwrap()[0].clone();
+    let mut engine = TextEngine::default();
+    let mut editor = CanvasEditor::from_page(section.page(space).unwrap(), &mut engine).unwrap();
+    editor
+        .place_caret(&mut engine, [72.0, 120.0], 400.0)
+        .unwrap();
+    editor
+        .paste_pieces(&mut engine, html_pieces(WORD, 0x409, |_, _| None))
+        .unwrap();
+    let ops = editor.take_ops().unwrap();
+    let ops = ops.into_iter().map(|op| Op::Page { space, op }).collect();
+    section
+        .apply(
+            "Author",
+            &Edit {
+                at: 133_000_000_000_000_000,
+                ops,
+            },
+        )
+        .unwrap();
+
+    let mut image = source;
+    section.seal().unwrap().unwrap().apply(&mut image).unwrap();
+    let arena = Arena::default();
+    let reopened = Section::open(&arena, image.clone()).unwrap();
+    let page = reopened.page(space).unwrap();
+    assert_eq!(
+        bodies(&page),
+        [
+            vec!["Word lists"],
+            vec![
+                "• Bullet one",
+                "  • Bullet nested",
+                "    • Bullet deeper",
+                "• Bullet two",
+                "Plain paragraph",
+                "# Number one",
+                "  # Number nested",
+                "    # Number deeper",
+                "# Number two",
+                "Last plain",
+            ]
+        ]
+    );
+    assert_eq!(bodies(&page), bodies(&editor.page().unwrap()));
+
+    if let Some(directory) = std::env::var_os("CANVAS_WORD_LIST_EXPORT") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("word.one"), &image).unwrap();
+        let file_id = Store::parse(&image).unwrap().header.file_id;
+        std::fs::write(
+            directory.join("Open Notebook.onetoc2"),
+            onestore::create_table_of_contents("Open Notebook.onetoc2", &[("word.one", file_id)])
                 .unwrap(),
         )
         .unwrap();

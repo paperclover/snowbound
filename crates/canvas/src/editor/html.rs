@@ -104,7 +104,10 @@ pub(super) fn list_tag(kind: &Kind) -> (&'static str, &'static str) {
     let Kind::List { bullet, format, .. } = kind else {
         return ("ul", "disc");
     };
-    if bullet.is_some() {
+    let sequence = format
+        .as_deref()
+        .and_then(|format| format.split('\u{fffd}').nth(1)?.chars().next());
+    if bullet.is_some() || sequence.is_none() {
         let kind = match ListStyle::of(kind) {
             Some(ListStyle::Bullet(3)) => "circle",
             Some(ListStyle::Bullet(11 | 14)) => "square",
@@ -112,9 +115,6 @@ pub(super) fn list_tag(kind: &Kind) -> (&'static str, &'static str) {
         };
         return ("ul", kind);
     }
-    let sequence = format
-        .as_deref()
-        .and_then(|format| format.split('\u{fffd}').nth(1)?.chars().next());
     let kind = match sequence.map(u32::from) {
         Some(1) => "I",
         Some(2) => "i",
@@ -257,6 +257,8 @@ pub fn html_pieces(
         tables: Vec::new(),
         lists: Vec::new(),
         item: None,
+        word: None,
+        sequences: BTreeMap::new(),
         open: Vec::new(),
         runs: Vec::new(),
         shown: false,
@@ -267,13 +269,22 @@ pub fn html_pieces(
     reader.pieces
 }
 
+/// A paragraph Word marks as a list item, its `mso-list` list and level, and the marker Word
+/// wrote before its text, in the marker's font.
+struct WordItem {
+    list: String,
+    level: usize,
+    marker: String,
+    font: Option<String>,
+}
+
 /// A paragraph or table read, before it becomes a clip's.
 enum Block {
     Text {
         runs: Vec<(String, Format)>,
         /// How many lists it sits in, its own not counted.
         depth: usize,
-        list: Option<ListStyle>,
+        list: Option<Box<Definition>>,
     },
     Table {
         rows: Vec<Vec<Vec<Block>>>,
@@ -296,6 +307,8 @@ struct Open {
     name: String,
     format: Format,
     link: Option<usize>,
+    /// Whether it holds a Word list item's marker (`mso-list:Ignore`).
+    marker: bool,
 }
 
 struct Reader<F> {
@@ -307,6 +320,10 @@ struct Reader<F> {
     lists: Vec<ListStyle>,
     /// The list of the item whose text has yet to come.
     item: Option<ListStyle>,
+    /// The Word list item being read, as `mso-list` names it.
+    word: Option<WordItem>,
+    /// The number sequence each Word list level (`mso-list` list and level) began with.
+    sequences: BTreeMap<(String, usize), char>,
     open: Vec<Open>,
     runs: Vec<(String, Format)>,
     /// Whether the paragraph read so far shows anything.
@@ -366,6 +383,10 @@ impl<F: FnMut(&str, [Option<f32>; 2]) -> Option<Piece>> Reader<F> {
             let end = tag_end(after);
             let tag = &after[..end];
             rest = after.get(end + 1..).unwrap_or("");
+            // Declarations and Word's `<![if ...]>` conditions.
+            if tag.starts_with('!') {
+                continue;
+            }
             let (closing, tag) = match tag.strip_prefix('/') {
                 Some(tag) => (true, tag),
                 None => (false, tag),
@@ -393,6 +414,25 @@ impl<F: FnMut(&str, [Option<f32>; 2]) -> Option<Piece>> Reader<F> {
         let block = BLOCKS.contains(&name);
         if block || matches!(name, "br" | "table" | "tr" | "td" | "th" | "ul" | "ol") {
             self.paragraph();
+        }
+        let list = style(tag, "mso-list");
+        if block && let Some(list) = &list {
+            let mut words = list.split_whitespace();
+            if let (Some(id), Some(Ok(level))) = (
+                words.next(),
+                words
+                    .next()
+                    .and_then(|level| level.strip_prefix("level"))
+                    .map(str::parse::<usize>),
+            ) && level > 0
+            {
+                self.word = Some(WordItem {
+                    list: id.to_owned(),
+                    level,
+                    marker: String::new(),
+                    font: None,
+                });
+            }
         }
         match name {
             "br" => return,
@@ -479,6 +519,7 @@ impl<F: FnMut(&str, [Option<f32>; 2]) -> Option<Piece>> Reader<F> {
             name: name.to_owned(),
             format,
             link,
+            marker: list.is_some_and(|list| list.eq_ignore_ascii_case("ignore")),
         });
     }
 
@@ -547,6 +588,16 @@ impl<F: FnMut(&str, [Option<f32>; 2]) -> Option<Piece>> Reader<F> {
 
     fn text(&mut self, text: &str) {
         let format = self.format();
+        if self.open.iter().any(|open| open.marker) {
+            if let Some(item) = &mut self.word {
+                let shown = text.trim_matches(|c: char| c.is_whitespace() || c == '\u{a0}');
+                if !shown.is_empty() && item.marker.is_empty() {
+                    item.font = format.font.clone();
+                }
+                item.marker.push_str(shown);
+            }
+            return;
+        }
         for c in text.chars() {
             if c.is_whitespace() && c != '\u{a0}' {
                 if self.shown && self.space.is_none() {
@@ -580,13 +631,76 @@ impl<F: FnMut(&str, [Option<f32>; 2]) -> Option<Piece>> Reader<F> {
         for open in &mut self.open {
             open.link = None;
         }
-        let list = self.item.take();
-        let depth = self.lists.len() - usize::from(list.is_some() && !self.lists.is_empty());
         runs.retain(|(text, _)| !text.is_empty());
         if runs.is_empty() {
             runs.push((String::new(), self.format()));
         }
+        let (list, depth) = match self.word.take() {
+            Some(item) => {
+                let depth = self.lists.len() + item.level - 1;
+                (Some(Box::new(self.word_list(item, &runs[0].1))), depth)
+            }
+            None => {
+                let list = self.item.take();
+                let depth =
+                    self.lists.len() - usize::from(list.is_some() && !self.lists.is_empty());
+                (
+                    list.map(|style| Box::new(list_definition(style, &runs[0].1))),
+                    depth,
+                )
+            }
+        };
         self.sink().push(Block::Text { runs, depth, list });
+    }
+
+    /// The list OneNote 2010 made of a Word list item whose text begins in `format` (lab,
+    /// 2026-10-02): a marker without a number is a bullet in Word's glyph and font; a number
+    /// keeps Word's punctuation, in the sequence its list level began with.
+    fn word_list(&mut self, item: WordItem, format: &Format) -> Definition {
+        let mut definition = list_definition(ListStyle::NUMBER, format);
+        let Kind::List {
+            font, format: list, ..
+        } = &mut definition.kind
+        else {
+            unreachable!("a number is a list")
+        };
+        let marker = item.marker;
+        let alphanumeric = |c: char| c.is_ascii_alphanumeric();
+        let token = marker
+            .find(alphanumeric)
+            .zip(marker.rfind(alphanumeric))
+            .map(|(start, end)| start..end + 1);
+        let digits = token
+            .as_ref()
+            .is_some_and(|token| marker[token.clone()].bytes().any(|b| b.is_ascii_digit()));
+        let Some(number) = token.filter(|token| digits || token.len() < marker.len()) else {
+            *font = item.font;
+            *list = Some(marker);
+            return definition;
+        };
+        let token = &marker[number.clone()];
+        let sequence = *self
+            .sequences
+            .entry((item.list, item.level))
+            .or_insert_with(|| {
+                let roman = token == "i"
+                    || token == "I"
+                    || token.len() > 1 && token.chars().all(|c| "ivxlcdmIVXLCDM".contains(c));
+                let upper = token.starts_with(|c: char| c.is_ascii_uppercase());
+                match (digits, roman, upper) {
+                    (true, ..) => '\u{0}',
+                    (_, true, true) => '\u{1}',
+                    (_, true, false) => '\u{2}',
+                    (_, false, true) => '\u{3}',
+                    (_, false, false) => '\u{4}',
+                }
+            });
+        *list = Some(format!(
+            "{}\u{fffd}{sequence}{}",
+            &marker[..number.start],
+            &marker[number.end..]
+        ));
+        definition
     }
 
     /// Where a block read goes: the open cell, else the clip.
@@ -643,11 +757,10 @@ fn nodes(
         let level = (depth(&block) - least + 1) as u32;
         let mut paragraph = match block {
             Block::Text { runs, list, .. } => {
-                let first = runs[0].1.clone();
                 let mut paragraph = node(Paragraph::from_runs(runs), Format::default())?;
-                if let Some(style) = list {
+                if let Some(list) = list {
                     let id = new_id()?;
-                    definitions.insert(id, list_definition(style, &first));
+                    definitions.insert(id, *list);
                     paragraph.lists = vec![id];
                 }
                 paragraph
@@ -1060,6 +1173,83 @@ mod tests {
                 "  | 1,0: a2",
                 "  | 1,1: b2",
                 "last line",
+            ]
+        );
+    }
+
+    /// Word 2010's list paragraphs (`corpus/clipboard/word-2010.html`) paste as the lists
+    /// OneNote 2010 made of them (lab, 2026-10-02): each level nested under the item above,
+    /// a bullet in Word's own glyph and font, a number in Word's sequence and punctuation.
+    #[test]
+    fn words_lists_paste_as_lists() {
+        let html = include_str!("../../../../corpus/clipboard/word-2010.html");
+        let [clip] = &clips(html)[..] else {
+            panic!("one clip")
+        };
+        assert_eq!(
+            clip.outline(),
+            [
+                "• Bullet one",
+                "  • Bullet nested",
+                "    • Bullet deeper",
+                "• Bullet two",
+                "Plain paragraph",
+                "1. Number one",
+                "  a. Number nested",
+                "    i. Number deeper",
+                "1. Number two",
+                "Last plain",
+            ]
+        );
+        let lists = crate::document::leaves(&clip.paragraphs, None)
+            .filter_map(
+                |(.., node)| match &clip.definitions[node.lists.first()?].kind {
+                    Kind::List {
+                        font,
+                        format,
+                        bullet,
+                        ..
+                    } => Some((font.clone(), format.clone().unwrap(), *bullet)),
+                    _ => None,
+                },
+            )
+            .collect::<Vec<_>>();
+        let bullet = |font: &str, glyph: &str| (Some(font.to_owned()), glyph.to_owned(), None);
+        let number = |format: &str| (None, format.to_owned(), None);
+        assert_eq!(
+            lists,
+            [
+                bullet("Symbol", "\u{b7}"),
+                bullet("Courier New", "o"),
+                bullet("Wingdings", "\u{a7}"),
+                bullet("Symbol", "\u{b7}"),
+                number("\u{fffd}\u{0}."),
+                number("\u{fffd}\u{4}."),
+                number("\u{fffd}\u{2}."),
+                number("\u{fffd}\u{0}."),
+            ]
+        );
+    }
+
+    /// LibreOffice writes lists as nested `ul` and `ol` around paragraphs, leaving items
+    /// unclosed.
+    #[test]
+    fn libreoffices_lists_paste_as_lists() {
+        let clip = &clips(
+            "<ul>\n\t<li><p style=\"margin-bottom: 0in\">Bullet one</p>\n\t<ul>\n\t\t\
+             <li><p>Bullet nested</p>\n\t</ul>\n\t<li><p>Bullet two</p>\n</ul>\n<ol>\n\t\
+             <li><p>Number one</p>\n\t<ol type=\"a\">\n\t\t<li><p>Number nested</p>\n\t\
+             </ol>\n\t<li><p>Number two</p>\n</ol>",
+        )[0];
+        assert_eq!(
+            clip.outline(),
+            [
+                "• Bullet one",
+                "  • Bullet nested",
+                "• Bullet two",
+                "1. Number one",
+                "  a. Number nested",
+                "1. Number two",
             ]
         );
     }

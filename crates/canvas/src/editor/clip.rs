@@ -307,15 +307,13 @@ fn outline(
     use super::format::AUTOMATIC;
     for node in nodes {
         let mut line = format!("{prefix}{}", "  ".repeat(node.level as usize - 1));
-        match node.lists.last().map(|list| &definitions[list].kind) {
-            Some(Kind::List {
-                bullet: Some(_), ..
-            }) => line.push_str("• "),
-            Some(kind @ Kind::List { .. }) => {
-                let (_, kind) = super::html::list_tag(kind);
-                line.push_str(&format!("{kind}. "));
+        if let Some(kind @ Kind::List { .. }) =
+            node.lists.last().map(|list| &definitions[list].kind)
+        {
+            match super::html::list_tag(kind) {
+                ("ul", _) => line.push_str("• "),
+                (_, kind) => line.push_str(&format!("{kind}. ")),
             }
-            _ => {}
         }
         let mut tags = node.tags.clone();
         match &node.content {
