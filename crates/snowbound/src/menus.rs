@@ -575,7 +575,10 @@ impl State {
                         } else {
                             crate::art::SECTION_GROUP
                         },
-                        tint: None,
+                        tint: place
+                            .path
+                            .is_empty()
+                            .then(|| crate::notebook_color(library.color())),
                     })
                     .collect()
             }

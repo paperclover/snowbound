@@ -139,8 +139,8 @@ impl State {
             .iter()
             .map(|&(color, text)| Item {
                 text,
-                icon: Some(art::SECTION),
-                tint: Some(theme.section(crate::section_color(Some(color))).accent),
+                icon: Some(art::SWATCH),
+                tint: Some(crate::notebook_color(Some(color))),
                 current: Some(color) == shown,
                 ..Item::default()
             })

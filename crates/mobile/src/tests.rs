@@ -105,7 +105,7 @@ fn a_notebook_folder_lists_sections_in_order_with_groups_and_colours() {
 }
 
 #[test]
-fn a_new_notebook_opens_with_one_section_and_refuses_a_taken_name() {
+fn a_new_notebook_opens_with_one_section_in_its_colour_and_refuses_a_taken_name() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().join("Mine");
     let cache = directory.path().join("cache");
@@ -128,6 +128,7 @@ fn a_new_notebook_opens_with_one_section_and_refuses_a_taken_name() {
     let tabs = library.tabs().unwrap();
     assert_eq!(tabs.len(), 1);
     assert!(tabs[0].readable);
+    assert_eq!(library::sb_library_color(&library), 0x91baae);
     assert!(!create(&mut error));
     assert!(!error.is_null());
     unsafe { sb_string_free(error) };

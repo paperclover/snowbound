@@ -29,6 +29,7 @@ bool sb_notebook_create(const char *path, const char *cache, const char *author,
                         char **error);
 bool sb_notebook_moved(const char *cache, const char *from, const char *to, char **error);
 char *sb_library_sections(const Library *library);
+int32_t sb_library_color(const Library *library);
 char *sb_library_new_section(const Library *library, const char *folder, const char *name, const char *author,
                              const char *date, const char *time);
 char *sb_library_search(const Library *library, const Section *open, const char *path, const char *query);

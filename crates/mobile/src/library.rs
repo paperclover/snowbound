@@ -541,6 +541,11 @@ impl Library {
         Ok(unlocked)
     }
 
+    /// The notebook's colour, COLORREF, as its table of contents held it when last read.
+    fn color(&self) -> Option<u32> {
+        self.notebook().as_ref()?.catalog().toc.as_ref()?.color
+    }
+
     /// The notebook's sections, read again.
     pub(crate) fn tabs(&self) -> Result<Vec<Tab>> {
         if let Place::File(file) = &self.place {
@@ -1403,6 +1408,15 @@ pub unsafe extern "C" fn sb_notebook_moved(
 #[unsafe(no_mangle)]
 pub extern "C" fn sb_library_sections(library: &Library) -> *mut c_char {
     json(library.tabs())
+}
+
+/// The notebook's colour as `0xRRGGBB`, as its sections were last read; -1 where it has none.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_library_color(library: &Library) -> i32 {
+    library.color().map_or(-1, |color| {
+        let [red, green, blue] = srgb(color);
+        i32::from_be_bytes([0, red, green, blue])
+    })
 }
 
 /// Creates a section named `name` in the group at catalog path `folder` ("" for the

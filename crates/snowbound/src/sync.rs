@@ -249,6 +249,8 @@ pub(crate) fn control(ui: &mut Ui, session: &Session, update: &update::Status, t
 /// What the popup shows of the notebook.
 struct Facts<'a> {
     name: &'a str,
+    /// The notebook's colour, COLORREF.
+    color: Option<u32>,
     /// The notebook's folder or address in full.
     location: &'a str,
     place: Vec<String>,
@@ -679,6 +681,7 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
             size: [fill(), px(line)],
             text: Some(facts.name),
             icon: Some(art::NOTEBOOK),
+            tint: Some(crate::notebook_color(facts.color)),
             bold: true,
             overflow: Overflow::Ellipsis,
             ..Spec::default()
@@ -1026,6 +1029,7 @@ impl State {
         };
         let facts = Facts {
             name: &library.name,
+            color: library.color(),
             location: &library.location,
             place: library.place(),
             notice: library.notice.as_deref(),
@@ -1132,6 +1136,7 @@ mod tests {
     fn facts(sections: Vec<(String, SyncStatus)>) -> Facts<'static> {
         Facts {
             name: "OneNote",
+            color: None,
             location: "/Volumes/clover/Documents/OneNote",
             place: ["zenith", "clover", "Documents"]
                 .map(str::to_owned)

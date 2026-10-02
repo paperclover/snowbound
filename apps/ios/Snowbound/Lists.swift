@@ -232,7 +232,8 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         case .notebook(let id):
             guard let notebook = notebook(id) else { break }
             content.text = notebook.name
-            content.image = UIImage(systemName: "book.closed")
+            content.image = UIImage(systemName: "book.closed.fill")
+            content.imageProperties.tintColor = notebook.color
             if case .server(let server) = notebook.source { content.secondaryText = server.host }
             let more = UIButton(type: .system)
             more.setImage(UIImage(systemName: "ellipsis.circle"), for: .normal)

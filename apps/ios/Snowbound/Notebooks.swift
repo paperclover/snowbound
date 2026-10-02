@@ -175,6 +175,8 @@ final class Notebook {
     private(set) var name: String
     private(set) var handle: OpaquePointer?
     private(set) var tabs: [Tab] = []
+    /// The notebook's colour, which tints its book in the list; none where it has none.
+    private(set) var color: UIColor?
     /// Why the notebook could not be opened, while it cannot.
     private(set) var problem: String?
     /// The Files location being read, held open while the notebook is.
@@ -288,8 +290,12 @@ final class Notebook {
             return done()
         }
         let pointer = Int(bitPattern: handle)
-        background({ decode([Tab].self, sb_library_sections(OpaquePointer(bitPattern: pointer))) }) { [self] tabs in
+        background({ () -> ([Tab]?, Int32) in
+            let library = OpaquePointer(bitPattern: pointer)
+            return (decode([Tab].self, sb_library_sections(library)), sb_library_color(library))
+        }) { [self] (tabs, color) in
             if let tabs { self.tabs = tabs }
+            self.color = color < 0 ? nil : UIColor(rgb: [16, 8, 0].map { UInt8(truncatingIfNeeded: color >> $0) })
             download()
             done()
         }

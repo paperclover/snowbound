@@ -97,6 +97,7 @@ impl State {
                 .map(|library| Row {
                     text: library.name.clone(),
                     icon: Some(art::NOTEBOOK),
+                    tint: Some(crate::notebook_color(library.color())),
                     target: Some(Target::Notebook(Arc::clone(library))),
                     ..Row::default()
                 }),
@@ -287,6 +288,7 @@ impl State {
                             .to_owned(),
                         after: "Closed".to_owned(),
                         icon: Some(art::NOTEBOOK),
+                        tint: Some(crate::notebook_color(None)),
                         target: Some(target),
                         ..Row::default()
                     });

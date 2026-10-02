@@ -1373,7 +1373,7 @@ impl State {
     }
 
     /// The notebook the open section, or the notebook showing none, belongs to.
-    fn notebook(&self) -> Option<&Arc<crate::Library>> {
+    pub(crate) fn notebook(&self) -> Option<&Arc<crate::Library>> {
         self.session
             .as_ref()
             .map(|session| &session.library)

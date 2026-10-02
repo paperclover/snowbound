@@ -28,6 +28,11 @@ pub const INFO: &[&str] = art!("icons/info");
 pub const ITALIC: &[&str] = art!("icons/italic");
 pub const LINK: &[&str] = art!("icons/link");
 pub const NOTEBOOK: &[&str] = art!("icons/notebook");
+/// A notebook iCloud Drive keeps: its glyph with a cloud at the corner.
+pub const NOTEBOOK_ICLOUD: &[&str] = &[
+    NOTEBOOK[0],
+    include_str!("../assets/icons/icloud-badge.svg"),
+];
 pub const NUMBERING: &[&str] = art!("icons/numbering");
 pub const OPTIONS: &[&str] = art!("icons/options");
 pub const OUTDENT: &[&str] = art!("icons/outdent");
@@ -67,6 +72,7 @@ pub const RECORD_AUDIO: &[&str] = art!("icons/record-audio");
 pub const RECORD_VIDEO: &[&str] = art!("icons/record-video");
 pub const SCREEN_CLIPPING: &[&str] = art!("icons/screen-clipping");
 pub const SPELLING: &[&str] = art!("icons/spelling");
+pub const SWATCH: &[&str] = art!("icons/swatch");
 pub const SYMBOL: &[&str] = art!("icons/symbol");
 pub const SYNC_BUSY: &[&str] = art!("icons/sync-busy");
 pub const SYNC_DONE: &[&str] = art!("icons/sync-done");

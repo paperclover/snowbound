@@ -368,8 +368,9 @@ pub struct Spec<'a> {
     pub hover_border: Option<[f32; 4]>,
     pub radius: f32,
     pub shape: Shape,
-    /// 16 px artwork before the label, tinted with the label's colour.
+    /// 16 px artwork before the label, tinted with `tint` or else the label's colour.
     pub icon: Option<&'static [&'static str]>,
+    pub tint: Option<[f32; 4]>,
     /// A 16 px picture in the icon's place beside a label; without one, the picture fills
     /// the box inside its padding.
     pub image: Option<&'a RasterImage>,
@@ -522,6 +523,7 @@ struct Built {
     radius: f32,
     shape: Shape,
     icon: Option<&'static [&'static str]>,
+    tint: [f32; 4],
     image: Option<RasterImage>,
     pad: [f32; 2],
     gap: f32,
@@ -1705,7 +1707,7 @@ impl Ui {
             self.display.push(Display::Icon {
                 sources,
                 origin: [x, top],
-                tint: node.color,
+                tint: node.tint,
             });
             x += ICON + ICON_GAP;
         } else if let Some(image) = &node.image {
@@ -2030,6 +2032,7 @@ impl Built {
             radius: spec.radius,
             shape: spec.shape,
             icon: spec.icon,
+            tint: spec.tint.or(spec.color).unwrap_or(text),
             image: spec.image.cloned(),
             pad: spec.pad,
             gap: spec.gap,

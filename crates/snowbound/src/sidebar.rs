@@ -208,11 +208,14 @@ fn sidebar(
             ui.id(("notebook", index)),
             Row {
                 label: &library.name,
-                icon: Leading::Icon(if library.in_icloud() {
-                    art::ICLOUD
-                } else {
-                    art::NOTEBOOK
-                }),
+                icon: Leading::Notebook(
+                    if library.in_icloud() {
+                        art::NOTEBOOK_ICLOUD
+                    } else {
+                        art::NOTEBOOK
+                    },
+                    library.color(),
+                ),
                 depth: 0,
                 dim: library.notebook.is_err(),
                 fold: Some(unfolded),
@@ -250,9 +253,24 @@ fn sidebar(
         },
     );
     for (part, icon, label, chosen) in [
-        ("new", art::PLUS, "New Notebook", Action::NewNotebook),
-        ("open", art::NOTEBOOK, "Open Existing", Action::OpenNotebook),
-        ("options", art::OPTIONS, "Options", Action::Options),
+        (
+            "new",
+            Leading::Icon(art::PLUS),
+            "New Notebook",
+            Action::NewNotebook,
+        ),
+        (
+            "open",
+            Leading::Notebook(art::NOTEBOOK, None),
+            "Open Existing",
+            Action::OpenNotebook,
+        ),
+        (
+            "options",
+            Leading::Icon(art::OPTIONS),
+            "Options",
+            Action::Options,
+        ),
     ] {
         let (row, _) = tree_row(
             ui,
@@ -260,7 +278,7 @@ fn sidebar(
             ui.id(part),
             Row {
                 label,
-                icon: Leading::Icon(icon),
+                icon,
                 depth: 0,
                 dim: false,
                 fold: None,
@@ -584,8 +602,21 @@ fn entry(ui: &Ui, tree: &mut Tree, notebook: usize, path: &str, id: Id, group: b
 #[derive(Clone, Copy)]
 enum Leading {
     Icon(&'static [&'static str]),
+    /// A notebook's glyph, drawn in its colour (COLORREF).
+    Notebook(&'static [&'static str], Option<u32>),
     /// A section's tab, drawn in its colour.
     Section([f32; 4]),
+}
+
+impl Leading {
+    /// The art and the colour its `currentColor` paints in `theme`.
+    fn art(self, theme: &Theme) -> (&'static [&'static str], [f32; 4]) {
+        match self {
+            Self::Icon(icon) => (icon, theme.text),
+            Self::Notebook(icon, color) => (icon, crate::notebook_color(color)),
+            Self::Section(section) => (art::SECTION, theme.section(section).accent),
+        }
+    }
 }
 
 struct Row<'a> {
@@ -633,10 +664,7 @@ fn tree_row(ui: &mut Ui, tree: &mut Tree, id: Id, row: Row) -> (Signal, bool) {
         }
     }
     let color = if row.dim { theme.text_dim } else { theme.text };
-    let (icon, [red, green, blue, _]) = match row.icon {
-        Leading::Icon(icon) => (icon, theme.text),
-        Leading::Section(section) => (art::SECTION, theme.section(section).accent),
-    };
+    let (icon, [red, green, blue, _]) = row.icon.art(theme);
     // Coloured art keeps its colours, so a dim row fades its icon.
     let alpha = if row.dim { 0.5 } else { 1.0 };
     ui.leaf(
@@ -814,7 +842,7 @@ impl crate::State {
 
     /// The notebook button, floating at the body's corner over the section tabs' row, `height`
     /// tall as it eases, or over the sidebar's header while that is open.
-    pub(crate) fn sidebar_button(&mut self, theme: &Theme, height: f32) {
+    pub(crate) fn sidebar_button(&mut self, height: f32) {
         if self.temporary {
             return;
         }
@@ -839,7 +867,8 @@ impl crate::State {
                 ..Spec::default()
             },
         );
-        if ui::shell::tool_button(&mut self.ui, "button", art::NOTEBOOK, theme.text, None).clicked {
+        let tint = crate::notebook_color(self.notebook().and_then(|library| library.color()));
+        if ui::shell::tool_button(&mut self.ui, "button", art::NOTEBOOK, tint, None).clicked {
             self.sidebar = !self.sidebar;
             self.save_settings();
         }
@@ -1155,7 +1184,7 @@ impl crate::State {
         #[cfg(target_os = "linux")]
         let install = crate::desktop::installable().then_some((
             "install",
-            art::PLUS,
+            Leading::Icon(art::PLUS),
             "Install Snowbound",
             crate::Command::Install,
         ));
@@ -1169,19 +1198,19 @@ impl crate::State {
             [
                 (
                     "new",
-                    art::PLUS,
+                    Leading::Icon(art::PLUS),
                     "New Notebook",
                     crate::Command::NewNotebook,
                 ),
                 (
                     "open",
-                    art::NOTEBOOK,
+                    Leading::Notebook(art::NOTEBOOK, None),
                     "Open Existing",
                     crate::Command::OpenNotebook,
                 ),
                 (
                     "server",
-                    art::SERVER,
+                    Leading::Icon(art::SERVER),
                     "Open Notebook from Server…",
                     crate::Command::OpenFromServer(None),
                 ),
@@ -1189,7 +1218,7 @@ impl crate::State {
             .into_iter()
             .chain(crate::guide::OFFERED.then_some((
                 "guide",
-                art::PAGE,
+                Leading::Icon(art::PAGE),
                 "Open the Snowbound Guide",
                 crate::Command::OpenGuide,
             )))
@@ -1214,7 +1243,7 @@ impl crate::State {
         } else {
             (
                 "No sections in this notebook",
-                vec![("new", art::PLUS, "New Section", new)],
+                vec![("new", Leading::Icon(art::PLUS), "New Section", new)],
             )
         };
         self.notice(id, title, &[], buttons);
@@ -1227,7 +1256,7 @@ impl crate::State {
         id: ui::Id,
         title: &str,
         servers: &[String],
-        buttons: Vec<(&str, &'static [&'static str], &str, crate::Command)>,
+        buttons: Vec<(&str, Leading, &str, crate::Command)>,
     ) {
         const BUTTON: [f32; 2] = [240.0, 32.0];
         let theme = self.page_area_theme();
@@ -1266,12 +1295,14 @@ impl crate::State {
         );
         let mut chosen = None;
         for (part, icon, label, command) in buttons {
+            let (icon, tint) = icon.art(&theme);
             let button = self.ui.leaf(
                 part,
                 Spec {
                     flags: Flags::CLICKABLE,
                     size: [fill(), px(BUTTON[1])],
                     icon: Some(icon),
+                    tint: Some(tint),
                     text: Some(label),
                     fill: Some(theme.chip),
                     hover_fill: Some(theme.hover()),
