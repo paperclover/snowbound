@@ -35,7 +35,6 @@ web-time = "1.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 notebook = { path = "../notebook", features = ["smb"] }
-arboard = { version = "3.6.1", default-features = false }
 accesskit_winit = { version = "0.34.0", default-features = false, features = ["rwh_06"] }
 # Updates: fetched over HTTPS, verified with ed25519 and SHA-256. The browser updates by
 # reloading.
@@ -61,7 +60,7 @@ objc2-foundation = { version = "0.2.2", default-features = false, features = ["N
 block2 = "0.5.1"
 
 [target.'cfg(not(any(target_os = "macos", target_arch = "wasm32")))'.dependencies]
-# Clipboard bitmaps; macOS reads the pasteboard's PNG and TIFF itself.
+# macOS reads and writes the pasteboard itself.
 arboard = { version = "3.6.1", default-features = false, features = ["image-data"] }
 
 [target.'cfg(windows)'.dependencies]

@@ -1,7 +1,7 @@
 use crate::commands;
 use canvas::date::DateField;
 use objc2::{
-    ClassType, DeclaredClass,
+    ClassType, DeclaredClass, class,
     declare::ClassBuilder,
     declare_class, msg_send, msg_send_id, mutability,
     rc::{Allocated, Retained},
@@ -176,36 +176,63 @@ pub fn traffic_lights(window: &Window) -> [[f32; 2]; 3] {
     }
 }
 
-pub struct Clipboard(arboard::Clipboard);
+/// The general pasteboard.
+pub struct Clipboard(Retained<AnyObject>);
 
 impl Clipboard {
-    pub fn new(_: &Window) -> Result<Self, arboard::Error> {
-        arboard::Clipboard::new().map(Self)
+    pub fn new(_: &Window) -> Result<Self, &'static str> {
+        let board: Option<Retained<AnyObject>> =
+            unsafe { msg_send_id![class!(NSPasteboard), generalPasteboard] };
+        board.map(Self).ok_or("No pasteboard is available")
     }
 
-    pub fn set_text(&mut self, text: String) -> Result<(), arboard::Error> {
-        self.0.set_text(text)
+    pub fn set_text(&mut self, text: String) -> Result<(), &'static str> {
+        let set: bool = unsafe {
+            let _: isize = msg_send![&self.0, clearContents];
+            let (text, kind) = (NSString::from_str(&text), NSString::from_str(TEXT));
+            msg_send![&self.0, setString: &*text, forType: &*kind]
+        };
+        set.then_some(()).ok_or("The pasteboard refused the text")
     }
 
-    pub fn get_text(&mut self) -> Result<String, arboard::Error> {
-        self.0.get_text()
+    pub fn get_text(&mut self) -> Result<String, &'static str> {
+        self.string(TEXT).ok_or("The pasteboard holds no text")
     }
 
+    /// The files copied, as Finder puts them on the pasteboard.
     pub fn get_files(&mut self) -> Vec<std::path::PathBuf> {
-        self.0.get().file_list().unwrap_or_default()
+        objc2::rc::autoreleasepool(|_| unsafe {
+            let url: *const AnyObject = (class!(NSURL) as *const AnyClass).cast();
+            let classes: Retained<AnyObject> = msg_send_id![class!(NSArray), arrayWithObject: url];
+            let yes: Retained<AnyObject> = msg_send_id![class!(NSNumber), numberWithBool: true];
+            let key = NSString::from_str("NSPasteboardURLReadingFileURLsOnlyKey");
+            let options: Retained<AnyObject> =
+                msg_send_id![class!(NSDictionary), dictionaryWithObject: &*yes, forKey: &*key];
+            let urls: Option<Retained<AnyObject>> =
+                msg_send_id![&self.0, readObjectsForClasses: &*classes, options: &*options];
+            let Some(urls) = urls else {
+                return Vec::new();
+            };
+            let count: usize = msg_send![&urls, count];
+            (0..count)
+                .filter_map(|index| {
+                    let url: Retained<AnyObject> = msg_send_id![&urls, objectAtIndex: index];
+                    let path: Option<Retained<NSString>> = msg_send_id![&url, path];
+                    Some(path?.to_string().into())
+                })
+                .collect()
+        })
     }
 
     pub fn get_html(&mut self) -> Option<String> {
-        self.0.get().html().ok()
+        self.string("public.html")
     }
 
     /// The pasteboard's PNG as copied, keeping its resolution, or else its TIFF as a PNG.
     pub fn get_picture(&mut self) -> Option<Vec<u8>> {
         unsafe {
-            let board: Retained<AnyObject> =
-                msg_send_id![AnyClass::get("NSPasteboard")?, generalPasteboard];
             let data = |kind: &str| -> Option<Retained<AnyObject>> {
-                msg_send_id![&board, dataForType: &*NSString::from_str(kind)]
+                msg_send_id![&self.0, dataForType: &*NSString::from_str(kind)]
             };
             let png = match data("public.png") {
                 Some(png) => png,
@@ -214,7 +241,26 @@ impl Clipboard {
             Some(ns_data_bytes(&png))
         }
     }
+
+    /// The first item's string of `kind`, where the pasteboard's own `stringForType:` joins
+    /// every item's.
+    fn string(&self, kind: &str) -> Option<String> {
+        objc2::rc::autoreleasepool(|_| unsafe {
+            let items: Option<Retained<AnyObject>> = msg_send_id![&self.0, pasteboardItems];
+            let items = items?;
+            let count: usize = msg_send![&items, count];
+            let kind = NSString::from_str(kind);
+            (0..count).find_map(|index| {
+                let item: Retained<AnyObject> = msg_send_id![&items, objectAtIndex: index];
+                let string: Option<Retained<NSString>> = msg_send_id![&item, stringForType: &*kind];
+                Some(string?.to_string())
+            })
+        })
+    }
 }
+
+/// NSPasteboardTypeString.
+const TEXT: &str = "public.utf8-plain-text";
 
 /// TIFF `data` as PNG data, keeping its resolution.
 unsafe fn tiff_png(data: &AnyObject) -> Option<Retained<AnyObject>> {
@@ -1492,7 +1538,37 @@ pub fn input_language() -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::library::{Login, Mount};
+
+    /// Text, a page and files read back as written, from a pasteboard of the test's own,
+    /// never the user's.
+    #[test]
+    fn the_pasteboard_reads_back_text_pages_and_files() {
+        let board: Retained<AnyObject> =
+            unsafe { msg_send_id![class!(NSPasteboard), pasteboardWithUniqueName] };
+        let mut clipboard = Clipboard(board.clone());
+        clipboard.set_text("Notes \u{2713}".into()).unwrap();
+        assert_eq!(clipboard.get_text().unwrap(), "Notes \u{2713}");
+        assert_eq!(clipboard.get_html(), None);
+        assert!(clipboard.get_files().is_empty());
+        unsafe {
+            let _: isize = msg_send![&board, clearContents];
+            let html = NSString::from_str("<p>Page</p>");
+            let _: bool =
+                msg_send![&board, setString: &*html, forType: &*NSString::from_str("public.html")];
+        }
+        assert_eq!(clipboard.get_html().as_deref(), Some("<p>Page</p>"));
+        let path = "/tmp/Notes and Plans/Plans.one";
+        unsafe {
+            let url = objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(path));
+            let urls: Retained<AnyObject> = msg_send_id![class!(NSArray), arrayWithObject: &*url];
+            let _: isize = msg_send![&board, clearContents];
+            let _: bool = msg_send![&board, writeObjects: &*urls];
+        }
+        assert_eq!(clipboard.get_files(), [std::path::PathBuf::from(path)]);
+        unsafe { msg_send![&board, releaseGlobally] }
+    }
 
     #[link(name = "Security", kind = "framework")]
     unsafe extern "C" {
