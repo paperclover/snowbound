@@ -19,7 +19,7 @@ parley.workspace = true
 # std's clock where there is one; the browser's on wasm32-unknown-unknown, whose std has none.
 web-time = "1.1"
 
-base64 = { version = "0.22.1", optional = true }
+base64 = { version = "0.23.1", default-features = false, features = ["std"], optional = true }
 bytemuck = { version = "1.25", features = ["derive"], optional = true }
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "tiff"], optional = true }
 linebender_resource_handle = { version = "0.1.1", optional = true }
