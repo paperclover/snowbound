@@ -22,6 +22,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use ureq::tls::{Certificate, RootCerts, TlsConfig};
 
 /// Where the builds are published.
 const BASE: &str = "https://file.paperclover.net/shr/snowbound/";
@@ -473,7 +475,17 @@ fn download(_: &str, _: u64) -> Result<Vec<u8>, String> {
 /// The `Fetch` the app uses.
 #[cfg(not(target_arch = "wasm32"))]
 fn download(path: &str, limit: u64) -> Result<Vec<u8>, String> {
+    let system = rustls_native_certs::load_native_certs().certs;
+    let bundled = webpki_root_certs::TLS_SERVER_ROOT_CERTS;
+    let roots = (system.iter().chain(bundled))
+        .map(|der| Certificate::from_der(der).to_owned())
+        .collect();
     let agent: ureq::Agent = ureq::Agent::config_builder()
+        .tls_config(
+            TlsConfig::builder()
+                .root_certs(RootCerts::Specific(Arc::new(roots)))
+                .build(),
+        )
         .timeout_global(Some(Duration::from_secs(10 * 60)))
         .timeout_connect(Some(Duration::from_secs(30)))
         .build()

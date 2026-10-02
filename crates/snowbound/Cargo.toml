@@ -37,6 +37,10 @@ accesskit_winit = { version = "0.34.0", default-features = false, features = ["r
 # Updates: fetched over HTTPS, verified with ed25519 and SHA-256. The browser updates by
 # reloading.
 ureq = { version = "3.4", default-features = false, features = ["rustls"] }
+# The system's roots, so a proxy's or company's own certificate authority is trusted, then
+# Mozilla's for a system whose store is missing or stale.
+rustls-native-certs = "0.8"
+webpki-root-certs = "1.0"
 ring = "0.17"
 
 # The browser: see arc/platforms.md.
