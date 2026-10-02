@@ -3127,3 +3127,30 @@ fn a_loose_dialog_fits_its_contents_to_the_window_and_its_side_stretches_to_its_
         "row 10 at {row}, the list's top at {top}"
     );
 }
+
+#[test]
+fn a_box_squeezed_past_its_inset_paints_empty_not_inverted() {
+    let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
+    frame(&mut ui, |ui| {
+        ui.leaf(
+            "row",
+            Spec {
+                size: [px(100.0), px(4.0)],
+                fill: Some([1.0; 4]),
+                gradient: Some([0.5, 0.5, 0.5, 1.0]),
+                inset: [0.0, 0.0, 0.0, 10.0],
+                ..Spec::default()
+            },
+        );
+    });
+    let rect = ui.display.iter().find_map(|item| match item {
+        Display::Rect { rect, .. } => Some(*rect),
+        _ => None,
+    });
+    let [left, top, right, bottom] = rect.expect("the row paints");
+    assert!(
+        right >= left && bottom >= top,
+        "{:?}",
+        [left, top, right, bottom]
+    );
+}

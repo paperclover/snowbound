@@ -1589,12 +1589,10 @@ impl Ui {
         });
         let border = blend(node.border, node.hover_border);
         let [left, top, right, bottom] = node.inset;
-        let painted = [
-            rect[0] + left,
-            rect[1] + top,
-            rect[2] - right,
-            rect[3] - bottom,
-        ];
+        // A box squeezed smaller than its inset, or than nothing as it eases shut, paints
+        // empty rather than inverted.
+        let [x, y] = [rect[0] + left, rect[1] + top];
+        let painted = [x, y, (rect[2] - right).max(x), (rect[3] - bottom).max(y)];
         let size = [painted[2] - painted[0], painted[3] - painted[1]];
         if let Some(color) = node.shadow {
             let (own, menu);
