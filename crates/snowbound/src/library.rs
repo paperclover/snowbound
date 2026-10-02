@@ -371,6 +371,9 @@ impl Library {
                     }
                 });
         }
+        #[cfg(target_arch = "wasm32")]
+        let mut notice = crate::platform::lock_notice(location);
+        #[cfg(not(target_arch = "wasm32"))]
         let mut notice = None;
         if let Some(mount) = crate::platform::smb_mount(Path::new(location)) {
             match crate::platform::smb_login(&mount)

@@ -46,6 +46,14 @@ extern "C" {
     pub fn download(name: &str, bytes: &[u8], kind: &str);
     #[wasm_bindgen(js_name = pickFiles)]
     fn pick_files(purpose: &str, accept: &str);
+    /// Asks for a notebook: a folder of the user's where the browser can be given one
+    /// (`mounted`), else files to copy in (`files`).
+    #[wasm_bindgen(js_name = pickNotebook)]
+    fn pick_notebook_files();
+    /// The folders of the user's the browser was given before and may still reach:
+    /// `[root, files]`, the files as `loadFiles` gives them.
+    #[wasm_bindgen(js_name = loadFolders, catch)]
+    async fn load_folders() -> Result<js_sys::Array, JsValue>;
     #[wasm_bindgen(js_name = dateText)]
     fn date_strings(ms: f64) -> Vec<String>;
     #[wasm_bindgen(js_name = shortDate)]
@@ -59,7 +67,9 @@ extern "C" {
     #[wasm_bindgen(js_name = openLink)]
     fn open_link(url: &str);
     /// Writes changes out: `[path]` removed, `[path, null]` a folder, and `[path, length,
-    /// [[offset, bytes], ...]]` a file's new length and the ranges that changed.
+    /// [[offset, bytes], ...]]` a file's new length and the ranges that changed; with a
+    /// fourth `true`, a section committed under a folder of the user's, written only where
+    /// nothing else wrote the file since it was read (`refreshed` answers).
     #[wasm_bindgen(js_name = storeFiles)]
     fn store_files(changes: js_sys::Array);
 }
@@ -70,6 +80,8 @@ const CACHE: &str = "/Cache";
 /// The metric-compatible faces `index.html` fetched, which only this page load holds.
 const FONTS: &str = "/Fonts";
 const SETTINGS: &str = "/Settings";
+/// Where folders of the user's given to the browser are mirrored (`glue.js` mounts them).
+const FOLDERS: &str = "/Folders";
 /// Files chosen to insert, open or paste, kept where the page links them from.
 const CHOSEN: &str = "/Chosen";
 /// How long changed files wait to be written out, so a burst of edits writes once.
@@ -535,7 +547,7 @@ pub fn pick_file(_: &str, types: &[&str]) -> Option<PathBuf> {
 
 /// Asks for notebooks, sections or packages to open; they open once read.
 pub fn pick_notebook(_: &str) -> Option<PathBuf> {
-    pick_files("open", ".one,.onetoc2,.onepkg");
+    pick_notebook_files();
     None
 }
 
@@ -565,6 +577,14 @@ pub fn alert(message: &str, detail: &str) {
 
 pub fn inform(message: &str, detail: &str) {
     alert(message, detail);
+}
+
+/// What the sync popup says of a notebook in a folder of the user's, which the browser
+/// writes without the locks OneNote takes.
+pub fn lock_notice(location: &str) -> Option<String> {
+    location.starts_with(&format!("{FOLDERS}/")).then(|| {
+        "This folder isn’t locked while you edit. Edit each section in one app at a time.".into()
+    })
 }
 
 /// Servers are reached through a relay in a later phase; none is mounted here.
@@ -681,6 +701,12 @@ pub async fn start(module: JsValue, fonts: Vec<js_sys::Uint8Array>) -> Result<()
     canvas.set_width(host(|host| host.size.width));
     canvas.set_height(host(|host| host.size.height));
     restore(load_files().await?);
+    for folder in load_folders().await?.iter() {
+        let folder = js_sys::Array::from(&folder);
+        let root = folder.get(0).as_string().unwrap_or_default();
+        notebook::fs::mount(&root);
+        restore(folder.get(1).into());
+    }
     let state = open(fonts)
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
@@ -735,6 +761,17 @@ fn store() {
             ),
         };
         changes.push(&entry);
+    }
+    for (path, image) in notebook::fs::committed() {
+        changes.push(&js_sys::Array::of4(
+            &JsValue::from_str(&path.to_string_lossy()),
+            &(image.len() as f64).into(),
+            &js_sys::Array::of1(&js_sys::Array::of2(
+                &0.into(),
+                &js_sys::Uint8Array::from(image.as_slice()),
+            )),
+            &true.into(),
+        ));
     }
     if changes.length() > 0 {
         store_files(changes);
@@ -934,6 +971,43 @@ pub fn files(purpose: &str, files: js_sys::Array) {
             }
         }
     }
+}
+
+/// A folder of the user's given to the browser, mirrored at `root` with `files` as
+/// `loadFiles` gives them, opened as a notebook.
+#[wasm_bindgen]
+pub fn mounted(root: String, files: js_sys::Array) {
+    notebook::fs::mount(&root);
+    restore(files);
+    send(UserEvent::Open(vec![root.into()]));
+}
+
+/// A path under a folder of the user's as it now stands there, after Snowbound wrote it or
+/// after something else did: a file's bytes, null for a folder, undefined where it went. The
+/// sections' synchronization takes it up.
+#[wasm_bindgen]
+pub fn refreshed(path: String, bytes: JsValue, modified: f64) {
+    notebook::fs::restore(
+        path,
+        if bytes.is_undefined() {
+            notebook::fs::Saved::Gone
+        } else if bytes.is_null() {
+            notebook::fs::Saved::Directory
+        } else {
+            notebook::fs::Saved::File(js_sys::Uint8Array::new(&bytes).to_vec(), modified)
+        },
+    );
+    send(UserEvent::Then(Box::new(|state| {
+        state.publish_now(Duration::ZERO);
+        for background in state
+            .notebooks
+            .iter()
+            .filter_map(|library| library.background.as_ref())
+        {
+            background.wake();
+        }
+        Ok(())
+    })));
 }
 
 /// Writes `[name, bytes]` pairs into `folder` under names not yet taken, returning the paths.

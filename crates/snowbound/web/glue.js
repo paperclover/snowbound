@@ -132,10 +132,159 @@ export function loadFiles() {
   });
 }
 
-/** Writes `[path]` (removed), `[path, null]` (a folder) and `[path, length, ranges]` entries. */
+/** Writes `[path]` (removed), `[path, null]` (a folder) and `[path, length, ranges]` entries;
+ * those under a folder of the user's go there, a committed section only where nothing else
+ * wrote it since it was read. */
 export function storeFiles(changes) {
-  const buffers = changes.flatMap(([, , ranges]) => (ranges ?? []).map(([, bytes]) => bytes.buffer));
-  storage.postMessage({ kind: "store", changes }, buffers);
+  const kept = changes.filter(([path]) => !folderOf(path));
+  for (const change of changes) if (folderOf(change[0])) serially(() => writeFolder(change));
+  if (kept.length)
+    storage.postMessage(
+      { kind: "store", changes: kept },
+      kept.flatMap(([, , ranges]) => (ranges ?? []).map(([, bytes]) => bytes.buffer)),
+    );
+}
+
+// Folders of the user's, through the File System Access API (Chromium): mirrored in
+// `notebook::fs` under FOLDERS, their handles kept in IndexedDB to reach them again.
+const FOLDERS = "/Folders";
+const folders = new Map();
+let writing = Promise.resolve();
+const serially = (work) =>
+  (writing = writing.then(work).catch((error) => console.error("Writing to the folder", error)));
+const folderOf = (path) =>
+  [...folders.keys()].find((root) => path === root || path.startsWith(`${root}/`));
+const stamp = (file) => `${file.size}:${file.lastModified}`;
+
+function kept(mode, act) {
+  return new Promise((resolve, reject) => {
+    const open = indexedDB.open("snowbound-folders", 1);
+    open.onupgradeneeded = () => open.result.createObjectStore("folders", { keyPath: "root" });
+    open.onerror = () => reject(open.error);
+    open.onsuccess = () => {
+      const request = act(open.result.transaction("folders", mode).objectStore("folders"));
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    };
+  });
+}
+
+/** Every file and folder below `dir`, at `path`: `[path, File or null]`. */
+async function walk(dir, path, out = []) {
+  for await (const [name, entry] of dir.entries()) {
+    const at = `${path}/${name}`;
+    if (entry.kind === "directory") {
+      out.push([at, null]);
+      await walk(entry, at, out);
+    } else out.push([at, await entry.getFile()]);
+  }
+  return out;
+}
+
+/** Mirrors the folder `handle` at `root`: its files as `loadFiles` gives them. */
+async function mirror(root, handle) {
+  const known = new Map();
+  folders.set(root, { handle, known });
+  const files = [
+    [FOLDERS, null, 0],
+    [root, null, 0],
+  ];
+  for (const [path, file] of await walk(handle, root)) {
+    known.set(path, file ? stamp(file) : "folder");
+    files.push(file ? [path, new Uint8Array(await file.arrayBuffer()), file.lastModified] : [path, null, 0]);
+  }
+  return files;
+}
+
+/** The folders given before that the browser may still reach: `[root, files]`. Each other
+ * folder offers to reconnect, which needs a click. */
+export async function loadFolders() {
+  const out = [];
+  for (const { root, handle } of await kept("readonly", (store) => store.getAll())) {
+    if ((await handle.queryPermission({ mode: "readwrite" })) === "granted")
+      out.push([root, await mirror(root, handle)]);
+    else {
+      const button = Object.assign(document.createElement("button"), {
+        className: "reconnect",
+        textContent: `Reconnect “${handle.name}”`,
+      });
+      button.onclick = async () => {
+        if ((await handle.requestPermission({ mode: "readwrite" })) === "granted") location.reload();
+      };
+      document.body.append(button);
+    }
+  }
+  // Other apps' writes reach the page once they land, as a watch would report them.
+  setInterval(() => serially(look), 3000);
+  return out;
+}
+
+/** Hands the page what changed in each folder since it was last read. */
+async function look() {
+  for (const [root, folder] of folders) {
+    const seen = new Map();
+    for (const [path, file] of await walk(folder.handle, root)) {
+      seen.set(path, file ? stamp(file) : "folder");
+      if (folder.known.get(path) !== seen.get(path))
+        wasm.refreshed(path, file ? new Uint8Array(await file.arrayBuffer()) : null, file?.lastModified ?? 0);
+    }
+    for (const path of folder.known.keys()) if (!seen.has(path)) wasm.refreshed(path, undefined, 0);
+    folder.known = seen;
+  }
+}
+
+async function locate(path) {
+  const root = folderOf(path);
+  const parts = path.slice(root.length).split("/").filter(Boolean);
+  let dir = folders.get(root).handle;
+  for (const name of parts.slice(0, -1)) dir = await dir.getDirectoryHandle(name, { create: true });
+  return [dir, parts.at(-1), folders.get(root)];
+}
+
+async function writeFolder([path, length, ranges, committed]) {
+  if (folders.has(path)) return;
+  const [dir, name, folder] = await locate(path);
+  if (length === undefined) {
+    await dir.removeEntry(name, { recursive: true }).catch(() => {});
+    for (const known of [...folder.known.keys()])
+      if (known === path || known.startsWith(`${path}/`)) folder.known.delete(known);
+    return;
+  }
+  if (length === null) {
+    await dir.getDirectoryHandle(name, { create: true });
+    folder.known.set(path, "folder");
+    return;
+  }
+  const handle = await dir.getFileHandle(name, { create: true });
+  const before = await handle.getFile();
+  if (committed && folder.known.get(path) !== stamp(before)) {
+    // Another app wrote the section since it was read: the commit stands on what it found
+    // no longer, so the page takes the file as it is and its edits go again on top.
+    folder.known.set(path, stamp(before));
+    return wasm.refreshed(path, new Uint8Array(await before.arrayBuffer()), before.lastModified);
+  }
+  const writable = await handle.createWritable({ keepExistingData: !committed });
+  for (const [offset, bytes] of ranges) await writable.write({ type: "write", position: offset, data: bytes });
+  await writable.truncate(length);
+  await writable.close();
+  const after = await handle.getFile();
+  folder.known.set(path, stamp(after));
+  if (committed) wasm.refreshed(path, ranges[0][1], after.lastModified);
+}
+
+/** Asks for a notebook: its folder where the browser can be given one, else files to copy in. */
+export function pickNotebook() {
+  if (!window.showDirectoryPicker) return pickFiles("open", ".one,.onetoc2,.onepkg");
+  showDirectoryPicker({ id: "notebook", mode: "readwrite" })
+    .then(async (handle) => {
+      for (const [root, folder] of folders)
+        if (await folder.handle.isSameEntry(handle)) return wasm.mounted(root, []);
+      let root = `${FOLDERS}/${handle.name}`;
+      for (let number = 2; folders.has(root); number++) root = `${FOLDERS}/${handle.name} ${number}`;
+      await kept("readwrite", (store) => store.put({ root, handle }));
+      wasm.mounted(root, await mirror(root, handle));
+    })
+    .catch((error) => error.name === "AbortError" || console.error("Opening the folder", error));
 }
 
 export function requestFrame() {

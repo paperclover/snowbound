@@ -79,13 +79,31 @@ struct Files {
     nodes: BTreeMap<PathBuf, Node>,
     /// Paths written, made or removed since the host last asked.
     changed: BTreeSet<PathBuf>,
+    /// Folders the host mirrors from elsewhere (`mount`).
+    mounts: BTreeSet<PathBuf>,
+    /// Images committed under a mount, waiting for the host to write them (`committed`).
+    committed: BTreeMap<PathBuf, Vec<u8>>,
 }
 
 thread_local! {
     static FILES: RefCell<Files> = RefCell::new(Files {
         nodes: BTreeMap::from([(PathBuf::from("/"), Node::Directory)]),
-        changed: BTreeSet::new(),
+        ..Files::default()
     });
+}
+
+/// Mirrors the folder at `root` from somewhere only the host reaches, as a folder on the
+/// user's disk. A commit to a section there goes to the host (`committed`) and stands only
+/// once the host has written it and put the file back (`restore`): until then it is uncertain,
+/// as a commit whose answer was lost, so an edit counts as published only once it is on disk.
+pub fn mount(root: impl AsRef<Path>) {
+    let root = normal(root.as_ref());
+    with(|files| files.mounts.insert(root));
+}
+
+/// The images committed under mounts since the last call, latest per file.
+pub fn committed() -> Vec<(PathBuf, Vec<u8>)> {
+    with(|files| std::mem::take(&mut files.committed).into_iter().collect())
 }
 
 /// What a path holds, as the host keeps it.
@@ -93,15 +111,39 @@ pub enum Saved {
     Directory,
     /// The bytes, and when they last changed in milliseconds since 1970.
     File(Vec<u8>, f64),
+    /// Nothing: what was there went, with what it held.
+    Gone,
 }
 
-/// Puts what the host kept at `path` back, as it was before the page last closed.
+/// Puts what the host kept at `path` back, as it was before the page last closed or as it
+/// now stands where it is kept.
 pub fn restore(path: impl AsRef<Path>, saved: Saved) {
     let path = normal(path.as_ref());
     FILES.with_borrow_mut(|files| {
-        let node = match saved {
-            Saved::Directory => Node::Directory,
-            Saved::File(bytes, modified) => {
+        let node = match (saved, files.nodes.get(&path)) {
+            (Saved::Gone, _) => {
+                let gone: Vec<PathBuf> = files
+                    .nodes
+                    .range(path.clone()..)
+                    .take_while(|(each, _)| each.starts_with(&path))
+                    .map(|(each, _)| each.clone())
+                    .collect();
+                for each in gone {
+                    if let Some(Node::File(data)) = files.nodes.remove(&each) {
+                        data.borrow_mut().path = None;
+                    }
+                }
+                return;
+            }
+            (Saved::Directory, _) => Node::Directory,
+            (Saved::File(bytes, modified), Some(Node::File(data))) => {
+                let mut held = data.borrow_mut();
+                held.bytes = bytes;
+                held.modified = modified;
+                held.unwritten = Some(Vec::new());
+                return;
+            }
+            (Saved::File(bytes, modified), _) => {
                 Node::File(Data::new(bytes, modified, path.clone(), Some(Vec::new())))
             }
         };
@@ -122,7 +164,7 @@ pub enum Change {
 
 /// Whether any path changed since `changes` was last called.
 pub fn changed() -> bool {
-    FILES.with_borrow(|files| !files.changed.is_empty())
+    FILES.with_borrow(|files| !files.changed.is_empty() || !files.committed.is_empty())
 }
 
 /// The paths changed since the last call, each with how; a folder before what it holds.
@@ -754,12 +796,41 @@ fn not_committed(error: io::Error) -> CommitError {
     }
 }
 
-pub fn commit_file(transaction: &Transaction, path: impl AsRef<Path>) -> Result<(), CommitError> {
-    transaction.commit(&mut writable(path).map_err(not_committed)?)
+fn mounted(path: &Path) -> bool {
+    with(|files| files.mounts.iter().any(|root| path.starts_with(root)))
 }
 
+pub fn commit_file(transaction: &Transaction, path: impl AsRef<Path>) -> Result<(), CommitError> {
+    let path = normal(path.as_ref());
+    if !mounted(&path) {
+        return transaction.commit(&mut writable(&path).map_err(not_committed)?);
+    }
+    let mut image = File {
+        data: Rc::new(RefCell::new(Data {
+            bytes: read(&path).map_err(not_committed)?,
+            modified: now(),
+            path: None,
+            unwritten: None,
+        })),
+        position: 0,
+        append: false,
+    };
+    transaction.commit(&mut image)?;
+    let image = std::mem::take(&mut image.data.borrow_mut().bytes);
+    with(|files| files.committed.insert(path, image));
+    Err(CommitError {
+        state: CommitState::Unknown,
+        error: io::Error::new(ErrorKind::WouldBlock, "Writing the section to its folder"),
+    })
+}
+
+/// A mounted file is durable as the host puts it back, and keeps the version its commit wrote.
 pub fn confirm_file(path: impl AsRef<Path>, base: &Stamp) -> Result<(), CommitError> {
-    onestore::confirm(&mut writable(path).map_err(not_committed)?, base)
+    let mut file = writable(&path).map_err(not_committed)?;
+    if mounted(&normal(path.as_ref())) {
+        return base.check(&mut file).map_err(not_committed);
+    }
+    onestore::confirm(&mut file, base)
 }
 
 pub fn place_file(path: impl AsRef<Path>, ancestor: [u8; 16], name: &str) -> io::Result<()> {

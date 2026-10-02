@@ -711,13 +711,19 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
                 ..Spec::default()
             },
         );
-        text(
-            ui,
-            "text",
-            &format!("Using the system’s connection. Snowbound couldn’t sign in: {notice}"),
-            theme.text_dim,
-        );
-        picked.sign_in = ui::button(ui, "sign-in", "Sign In…").clicked;
+        // The browser's notice is its folders' lack of locks; it reaches no server to sign in to.
+        #[cfg(target_arch = "wasm32")]
+        text(ui, "text", notice, theme.text_dim);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            text(
+                ui,
+                "text",
+                &format!("Using the system’s connection. Snowbound couldn’t sign in: {notice}"),
+                theme.text_dim,
+            );
+            picked.sign_in = ui::button(ui, "sign-in", "Sign In…").clicked;
+        }
         ui.close();
     }
     ui.close();

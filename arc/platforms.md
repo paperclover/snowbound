@@ -161,6 +161,12 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   `/Cache`. A storage worker keeps them in the origin's private file system, writing the
   byte ranges each burst changed through OPFS's synchronous handles, which only workers get.
   One tab at a time holds them.
+- Open Notebook, where the browser has the File System Access API (Chromium), opens a folder
+  of the user's: mirrored under `/Folders`, its handle kept in IndexedDB, other apps' writes
+  read every few seconds. A browser takes no locks, so a commit there stands only once the
+  page has written the file and found nothing else wrote it since it was read; until then
+  it is uncertain, as one whose answer was lost, and it goes again on top of another app's
+  write. The sync popup says the folder isn't locked.
 - Menus are the kit's own, as on Linux, with the PC's chords and ⌘ for Ctrl on a Mac; the
   browser keeps its own window and tab chords. Dialogs are the browser's; Open and Insert
   ask for files to copy in; printing downloads the PDF. Servers, recording and accessibility
