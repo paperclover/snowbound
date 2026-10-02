@@ -434,6 +434,20 @@ fn glass_frame(
             extend_frame(hwnd);
             None
         }
+        // Transparent frames show the window's GDI surface, which the desktop fills white
+        // until painted; black is clear over the extended frame.
+        wm::WM_ERASEBKGND => {
+            let mut client = RECT::default();
+            unsafe {
+                wm::GetClientRect(hwnd, &mut client);
+                Gdi::FillRect(
+                    wparam as Gdi::HDC,
+                    &client,
+                    Gdi::GetStockObject(Gdi::BLACK_BRUSH),
+                );
+            }
+            Some(1)
+        }
         _ => None,
     }
 }
