@@ -13,6 +13,10 @@ wgpu = "30.0.1"
 [patch.crates-io]
 sctk-adwaita = { path = "vendor/sctk-adwaita" }
 
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
 # Shaping, rasterization and GPU submission stay optimised in debug builds, where
 # unoptimised dependencies alone drop frames.
 [profile.dev.package."*"]

@@ -22,8 +22,7 @@ PUBLISHED = Path('/Volumes/clover/Documents/Public/Snowbound/web')
 # copyparty lists the folder itself, so the app is at its index.html.
 URL = 'https://file.paperclover.net/shr/snowbound/web/index.html'
 # Size over speed where it costs little: the module is most of the first load.
-PROFILE = ['--config', 'profile.release.lto=true', '--config', 'profile.release.codegen-units=1',
-           '--config', 'profile.release.opt-level="s"']
+PROFILE = ['--config', 'profile.release.opt-level="s"']
 
 
 def run(command, **kwargs):
