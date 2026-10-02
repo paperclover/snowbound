@@ -17,7 +17,9 @@ command -v zig >/dev/null || { echo "zig is required as the cross linker" >&2; e
 triple=$arch-unknown-linux-gnu
 rustup target add "$triple" >/dev/null
 variable=$(echo "$triple" | tr - _)
+# The build id ties an executable to its published .debug file.
 env "CARGO_TARGET_$(echo "$triple" | tr 'a-z-' 'A-Z_')_LINKER=$here/cc.sh" \
     "CC_$variable=$here/cc.sh" "AR_$variable=$here/ar.sh" \
     ZIG_TARGET="$arch-linux-gnu.2.17" \
-    cargo "$command" --target "$triple" "$@"
+    cargo "$command" --target "$triple" \
+    --config "target.$triple.rustflags=['-C','link-arg=-Wl,--build-id']" "$@"

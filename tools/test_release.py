@@ -66,19 +66,19 @@ class ReleaseTest(unittest.TestCase):
             def signing(platform, developer_id, notarize):
                 commands.clear()
                 with tempfile.TemporaryDirectory() as stage:
-                    build_mac(platform, Path(stage), developer_id, notarize)
+                    build_mac(platform, Path(stage), developer_id, notarize, Path(stage) / 'symbols.zip')
                     build = commands[0]
-                    return (build[build.index(f'{stage}/Snowbound.app') + 1:],
+                    return (build[build.index(f'{stage}/Snowbound.dSYM') + 1:],
                             [command[1] for command in commands[1:]])
 
             self.assertEqual(signing('macos-aarch64', True, ['--key-id', 'K']),
                              (['--sign', 'developer-id', '--sign-identity', release['IDENTITY'], '--arch', 'aarch64'],
-                              ['-c', 'notarytool', 'stapler', '-c']))
+                              ['-c', '-c', 'notarytool', 'stapler', '-c']))
             self.assertEqual(signing('macos-x86_64', True, ['--key-id', 'K']),
                              (['--sign', 'developer-id', '--sign-identity', release['IDENTITY'], '--arch', 'x86_64'],
-                              ['-c', 'notarytool', 'stapler', '-c']))
-            self.assertEqual(signing('macos-aarch64', False, None), (['--sign', 'ad-hoc', '--arch', 'aarch64'], ['-c']))
-            self.assertEqual(signing('macos-10.6', True, ['--key-id', 'K']), (['--snow-leopard'], ['-c']))
+                              ['-c', '-c', 'notarytool', 'stapler', '-c']))
+            self.assertEqual(signing('macos-aarch64', False, None), (['--sign', 'ad-hoc', '--arch', 'aarch64'], ['-c', '-c']))
+            self.assertEqual(signing('macos-10.6', True, ['--key-id', 'K']), (['--snow-leopard'], ['-c', '-c']))
         finally:
             scope['run'] = run
 

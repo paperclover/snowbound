@@ -29,6 +29,10 @@ latest.json                    {"macos-aarch64": "2026-09-29-r10", "macos-x86_64
   snowbound-2026-09-29-r10-linux-aarch64
   snowbound-2026-09-29-r10-windows-x86_64.exe
   snowbound-2026-09-29-r10-windows-aarch64.exe
+  Snowbound-2026-09-29-r10-macos-aarch64.dSYM.zip    debug info, optional: one per archive
+  snowbound-2026-09-29-r10-linux-x86_64.debug.zip
+  snowbound-2026-09-29-r10-windows-x86_64.debug.zip
+  ...
 ```
 
 A build folder is written once, under a hidden `.2026-09-29.r10.partial` name renamed into
@@ -154,13 +158,24 @@ and Instruments name functions; Cargo's release profile strips only debug info
 `.cargo/config.toml` builds every target with frame pointers, and Rust's
 standard library ships with them. The symbols cost about a fifth: Linux x86_64
 grows from 53 to 62 MB, Windows x86_64 from 55 to 72 MB, and the macOS app
-already carried them. Line tables would take an executable to some 250 MB, and
-a dSYM adds 34 MB zipped per Mac architecture, so neither ships; build with
-`CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` for files and lines. Windows
-tools that read only PDBs see no names: the Rust targets here emit DWARF, from
-which lld's PDB keeps only global symbols. glibc's `backtrace_symbols_fd` reads only
-dynamic symbols, so for a signal Linux's crash log starts the executable again
-with `--symbolize` to name its frames from the symbol table.
+already carried them.
+
+The release builds with line tables, then moves them out of each executable
+into the build folder's zipped symbol files, which neither `latest.json` nor
+`build.json` names, so the app never downloads them: a dSYM for each Mac
+(matched by its UUID; `build_macos.py --dsym`), and for Linux and Windows a
+DWARF `.debug` file, which the executable names in its `.gnu_debuglink` (and on
+Linux by its build id). Unzipped beside the executable, or the dSYM beside the
+app, they give lldb, gdb, `perf`, Instruments and `llvm-symbolizer` files,
+lines and inlined calls. They run about 35 MB zipped per Mac, 55 MB per Linux
+and 40 MB per Windows architecture. Windows gets DWARF rather than a PDB: rustc
+emits CodeView only for MSVC targets, and lld builds a PDB's functions and lines
+from CodeView alone, so from these DWARF objects its PDB holds only the global
+symbols, which few Rust functions are; WPA and Visual Studio see no names.
+
+glibc's `backtrace_symbols_fd` reads only dynamic symbols, so for a signal
+Linux's crash log starts the executable again with `--symbolize` to name its
+frames from the symbol table.
 
 ## In the app
 

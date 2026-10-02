@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -141,6 +142,15 @@ def sign(files):
     return output.split()
 
 
+def split_debug(executable, debug):
+    """Moves `executable`'s debug info to `debug`, which its debug link then names."""
+    sysroot = subprocess.check_output(['rustc', '--print', 'sysroot'], text=True).strip()
+    host = re.search(r'^host: (\S+)$', subprocess.check_output(['rustc', '-vV'], text=True), re.M)[1]
+    objcopy = Path(sysroot) / 'lib/rustlib' / host / 'bin/rust-objcopy'
+    run([objcopy, '--only-keep-debug', executable, debug])
+    run([objcopy, '--strip-debug', f'--add-gnu-debuglink={debug}', executable])
+
+
 def zip_bundle(bundle, archive):
     run(['ditto', '-c', '-k', '--norsrc', '--noextattr', '--noqtn', '--noacl', '--keepParent', bundle, archive])
 
@@ -155,8 +165,9 @@ def notary():
     return arguments if signs_in else None
 
 
-def build_mac(platform, folder, developer_id, notarize):
-    """The zipped app, which build_macos.py signs; 10.6's stays unsigned, as it predates Developer ID."""
+def build_mac(platform, folder, developer_id, notarize, symbols):
+    """The zipped app, which build_macos.py signs; 10.6's stays unsigned, as it predates Developer ID.
+    Its zipped dSYM goes to `symbols`."""
     bundle = folder / 'Snowbound.app'
     if platform == 'macos-10.6':
         signing = ['--snow-leopard']
@@ -166,7 +177,9 @@ def build_mac(platform, folder, developer_id, notarize):
         signing = ['--sign', 'ad-hoc']
     if platform != 'macos-10.6':
         signing += ['--arch', platform.removeprefix('macos-')]
-    run([sys.executable, ROOT / 'tools/canvas/build_macos.py', '--release', '--output', bundle, *signing])
+    dsym = folder / 'Snowbound.dSYM'
+    run([sys.executable, ROOT / 'tools/canvas/build_macos.py', '--release', '--output', bundle, '--dsym', dsym, *signing])
+    zip_bundle(dsym, symbols)
     archive = folder / 'archive.zip'
     if notarize and platform != 'macos-10.6':
         zip_bundle(bundle, archive)
@@ -234,12 +247,16 @@ def main():
         stage.mkdir(parents=True)
         # The app reads its version from this as it compiles.
         os.environ['SNOWBOUND_BUILD'] = name(version)
+        # For the symbol files; the executables shed it.
+        os.environ['CARGO_PROFILE_RELEASE_DEBUG'] = 'line-tables-only'
         built = {}
+        symbols = []
         for platform in args.platforms:
             if platform.startswith('macos'):
                 work = stage / platform
                 work.mkdir()
-                built[platform] = build_mac(platform, work, developer_id, notarize)
+                symbols.append(stage / f'Snowbound-{name(version)}-{platform}.dSYM.zip')
+                built[platform] = build_mac(platform, work, developer_id, notarize, symbols[-1])
         linux = [platform.removeprefix('linux-') for platform in args.platforms if platform.startswith('linux')]
         if linux:
             built |= build_linux(linux)
@@ -252,6 +269,12 @@ def main():
             prefix = 'Snowbound' if platform.startswith('macos') else 'snowbound'
             files[platform] = stage / f'{prefix}-{name(version)}-{platform}{source.suffix}'
             shutil.copy2(source, files[platform])
+            if not platform.startswith('macos'):
+                debug = stage / f'{prefix}-{name(version)}-{platform}.debug'
+                split_debug(files[platform], debug)
+                symbols.append(debug.with_name(f'{debug.name}.zip'))
+                with zipfile.ZipFile(symbols[-1], 'w', zipfile.ZIP_DEFLATED) as archive:
+                    archive.write(debug, debug.name)
         signatures = sign(files.values())
         build = {
             'version': name(version),
@@ -270,7 +293,7 @@ def main():
         partial = target.with_name(f'.{target.name}.partial')
         shutil.rmtree(partial, ignore_errors=True)
         partial.mkdir()
-        for file in [*files.values(), stage / 'build.json', stage / 'build.json.sig']:
+        for file in [*files.values(), *symbols, stage / 'build.json', stage / 'build.json.sig']:
             # copy() keeps the Linux executables executable for anyone running them off the share.
             shutil.copy(file, partial / file.name)
         partial.rename(target)

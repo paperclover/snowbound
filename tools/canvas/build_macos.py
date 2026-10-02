@@ -15,6 +15,7 @@ import tempfile
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--release', action='store_true')
 parser.add_argument('--output', type=Path, help='Create a separate bundle at a new .app path')
+parser.add_argument('--dsym', type=Path, help="Move the executable's debug info into a dSYM at this path")
 parser.add_argument('--bundle-id', help="Bundle identifier for the separate app; the app's own otherwise")
 host = 'aarch64' if platform.machine() == 'arm64' else 'x86_64'
 parser.add_argument('--arch', choices=['aarch64', 'x86_64'], default=host, help="The app's architecture; this Mac's by default")
@@ -107,6 +108,9 @@ binary.parent.mkdir(parents=True, exist_ok=True)
 pending = binary.with_suffix('.next')
 shutil.copy2(built / ('release' if args.release else 'debug') / 'snowbound', pending)
 pending.replace(binary)
+if args.dsym:
+    subprocess.run(['dsymutil', binary, '-o', args.dsym], check=True)
+    subprocess.run(['strip', '-S', binary], check=True)
 icons = root / 'crates/snowbound/assets/icon'
 resources = bundle / 'Contents/Resources'
 resources.mkdir(exist_ok=True)
