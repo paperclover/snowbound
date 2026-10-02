@@ -205,7 +205,7 @@ fn undo_walks_back_through_new_pages_and_their_titles() {
     let mut steps = Vec::new();
     for title in ["type One", "type Two"] {
         steps.extend(chord("modifiers command", "key n"));
-        steps.extend([title, "wait 300"].map(String::from));
+        steps.extend(["settle", title, "wait 300"].map(String::from));
     }
     steps.extend(chord("modifiers command control", "key Left"));
     steps.push("accessibility back".into());

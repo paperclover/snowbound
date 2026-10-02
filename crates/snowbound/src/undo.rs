@@ -23,8 +23,10 @@ pub struct Timeline {
     redo: Vec<Step>,
     /// Editors of pages left holding history, the longest left first.
     parked: Vec<(ExGuid, CanvasEditor)>,
-    /// Actions on their way, while which Undo and Redo wait.
+    /// Actions on their way.
     busy: usize,
+    /// Presses of Undo, or Redo when true, that wait for an action or page on its way.
+    waiting: std::collections::VecDeque<bool>,
 }
 
 enum Step {
@@ -185,9 +187,6 @@ impl Timeline {
         depth: [usize; 2],
         here: &Here,
     ) -> Option<Next> {
-        if self.busy > 0 {
-            return None;
-        }
         self.edited(page, depth, false);
         let steps = if redo { &mut self.redo } else { &mut self.undo };
         let at = steps.iter().rposition(|step| match step {
@@ -235,10 +234,9 @@ impl Timeline {
     /// Whether Undo, or `redo` Redo, has an action to take `here`.
     pub fn reaches(&self, redo: bool, here: &Here) -> bool {
         let steps = if redo { &self.redo } else { &self.undo };
-        self.busy == 0
-            && steps
-                .iter()
-                .any(|step| matches!(step, Step::Action(action) if action.applies(here)))
+        steps
+            .iter()
+            .any(|step| matches!(step, Step::Action(action) if action.applies(here)))
     }
 
     /// Keeps the editor of page `page`, just left, for its history.
@@ -815,21 +813,47 @@ impl State {
         })
     }
 
-    /// Whether Undo, or `redo` Redo, has something to take.
+    /// Whether no action, page or command is on its way, which Undo and Redo wait for.
+    pub(crate) fn settled(&self) -> bool {
+        self.undo.busy == 0 && self.switching.is_none() && self.commands.is_empty()
+    }
+
+    /// Whether Undo, or `redo` Redo, has something to take, or may once what is on its way
+    /// lands.
     pub(crate) fn can_step(&self, redo: bool) -> bool {
         let editor = &self.view.editor;
-        (if redo {
-            editor.can_redo()
-        } else {
-            editor.can_undo()
-        }) || self
-            .here()
-            .is_some_and(|here| self.undo.reaches(redo, &here))
+        !self.settled()
+            || (if redo {
+                editor.can_redo()
+            } else {
+                editor.can_undo()
+            })
+            || self
+                .here()
+                .is_some_and(|here| self.undo.reaches(redo, &here))
+    }
+
+    /// Undo, or `redo` Redo, once what is on its way lands.
+    pub(crate) fn step(&mut self, redo: bool) -> Result<(), Box<dyn Error>> {
+        self.undo.waiting.push_back(redo);
+        self.take_waiting()
+    }
+
+    /// Takes the Undo and Redo presses waiting, while nothing is on its way.
+    pub(crate) fn take_waiting(&mut self) -> Result<(), Box<dyn Error>> {
+        while self.settled()
+            && let Some(redo) = self.undo.waiting.pop_front()
+        {
+            if self.can_step(redo) {
+                self.take(redo)?;
+            }
+        }
+        Ok(())
     }
 
     /// Undo, or `redo` Redo: the open page's last edit or the last action made where the
     /// user is, whichever came last.
-    pub(crate) fn step(&mut self, redo: bool) -> Result<(), Box<dyn Error>> {
+    fn take(&mut self, redo: bool) -> Result<(), Box<dyn Error>> {
         self.persist()?;
         let depth = self.view.editor.history_depth();
         // A page kept in no notebook has only its own history.
@@ -876,7 +900,7 @@ impl State {
                 .ok_or("That notebook is closed")?;
             let Some((structure, undo)) = restructuring(&library, &change) else {
                 return match taken {
-                    Some(redo) => self.step(redo),
+                    Some(redo) => self.take(redo),
                     None => Ok(()),
                 };
             };
@@ -895,6 +919,7 @@ impl State {
         let shown = session.space;
         let proxy = self.proxy.clone();
         self.undo.busy += 1;
+        self.switching = Some((None, web_time::Instant::now()));
         self.load(move || {
             let applied = site.change(change, shown);
             let show = match &applied {
@@ -908,7 +933,10 @@ impl State {
                 let Some(applied) = applied else {
                     // What it would change is gone: Undo goes on to the step before.
                     return match taken {
-                        Some(redo) if stale => state.step(redo),
+                        Some(redo) if stale => {
+                            state.undo.waiting.push_front(redo);
+                            Ok(())
+                        }
                         _ => Ok(()),
                     };
                 };
@@ -1079,8 +1107,7 @@ mod tests {
         assert!(!timeline.reaches(false, &here()));
     }
 
-    /// Redo takes back the last undone first; a new edit ends what actions it held, and
-    /// waits while an action is on its way.
+    /// Redo takes back the last undone first; a new edit ends what actions it held.
     #[test]
     fn redo_mirrors_undo_and_new_edits_end_it() {
         let mut timeline = Timeline::default();
@@ -1098,9 +1125,6 @@ mod tests {
         timeline.stepped(shown, true);
         timeline.stepped(shown, false);
         assert!(!timeline.reaches(true, &here()));
-        timeline.record(created(page(3)));
-        timeline.busy = 1;
-        assert!(timeline.next(false, shown, [0, 1], &here()).is_none());
     }
 
     const AUTHOR: &str = "Rust Author";

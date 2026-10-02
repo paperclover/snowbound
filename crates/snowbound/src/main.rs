@@ -363,8 +363,9 @@ enum Replay {
     Pinch(f32),
     /// Paints the next frame into a PNG as well as the window.
     Snapshot(PathBuf),
-    /// Writes the window's accessibility tree as text.
-    Accessibility(PathBuf),
+    /// Waits for nothing to be on its way, then writes the window's accessibility tree as
+    /// text where given, and answers.
+    Settle(Option<PathBuf>, std::sync::mpsc::Sender<()>),
     /// A frame during a wait, as a visible window's display would ask for.
     Tick,
     Appearance(winit::window::Theme),
@@ -883,6 +884,9 @@ struct State {
     strip_held: bool,
     /// Where a replay asked the next frame to be written.
     snapshot: Option<PathBuf>,
+    /// A replay waiting for nothing to be on its way, and where it wants the accessibility
+    /// tree written then.
+    replay_settle: Option<(Option<PathBuf>, std::sync::mpsc::Sender<()>)>,
     /// `SNOWBOUND_FRAMES`: a directory every frame drawn is also written to, named by
     /// milliseconds since the window opened.
     frames: Option<(PathBuf, Instant)>,
@@ -1226,6 +1230,7 @@ impl State {
             strip_press: None,
             strip_held: false,
             snapshot: None,
+            replay_settle: None,
             frames: std::env::var_os("SNOWBOUND_FRAMES").map(|dir| (dir.into(), Instant::now())),
             initial,
             initial_date,
@@ -1284,6 +1289,9 @@ impl State {
     fn frame(&mut self) -> Result<(), Box<dyn Error>> {
         let start = Instant::now();
         if let Err(error) = self.open_loaded() {
+            eprintln!("{error}");
+        }
+        if let Err(error) = self.take_waiting() {
             eprintln!("{error}");
         }
         lap("open", start);
@@ -5706,11 +5714,7 @@ impl State {
                         }
                     }
                     Replay::Snapshot(path) => self.snapshot = Some(path),
-                    Replay::Accessibility(path) => {
-                        if let Err(error) = self.write_accessibility(&path) {
-                            eprintln!("{error}");
-                        }
-                    }
+                    Replay::Settle(path, settled) => self.replay_settle = Some((path, settled)),
                     Replay::Tick | Replay::Quit => {}
                     Replay::Appearance(appearance) => {
                         self.window.set_theme(Some(appearance));
@@ -5725,6 +5729,16 @@ impl State {
                 // A covered window gets no redraws, so each step draws its own frame.
                 if let Err(error) = self.frame() {
                     eprintln!("{error}");
+                }
+                if self.settled()
+                    && let Some((path, settled)) = self.replay_settle.take()
+                {
+                    if let Some(path) = path
+                        && let Err(error) = self.write_accessibility(&path)
+                    {
+                        eprintln!("{error}");
+                    }
+                    let _ = settled.send(());
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]
@@ -6041,10 +6055,12 @@ fn write_png(path: &Path, size: [u32; 2], pixels: &[u8]) -> Result<(), Box<dyn E
 /// Feeds a development script to the window from another thread, one command per line
 /// in logical pixels: `move X Y`, `press [right]`, `release [right]`, `wheel DX DY`,
 /// `pressure LEVEL|none`, `pinch FACTOR`, `key NAME`, `type TEXT`, `modifiers [shift]
-/// [control] [command]`, `wait MILLISECONDS`, `snapshot PNG_PATH`, `accessibility TEXT_PATH`,
-/// `appearance light|dark`, `resize WIDTH HEIGHT` and `quit`.
+/// [control] [command]`, `wait MILLISECONDS`, `snapshot PNG_PATH`, `settle` and
+/// `accessibility TEXT_PATH` (which wait for what is on its way), `appearance light|dark`,
+/// `resize WIDTH HEIGHT` and `quit`.
 #[cfg(not(target_arch = "wasm32"))]
 fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dyn Error>> {
+    let (settle, settled) = std::sync::mpsc::channel();
     let mut steps = Vec::new();
     for line in script.lines().filter(|line| !line.trim().is_empty()) {
         let (command, rest) = line.split_once(' ').unwrap_or((line, ""));
@@ -6113,7 +6129,8 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
                     .map_err(|_| "resize takes WIDTH HEIGHT")?,
             )),
             "snapshot" => Ok(Replay::Snapshot(rest.into())),
-            "accessibility" => Ok(Replay::Accessibility(rest.into())),
+            "settle" => Ok(Replay::Settle(None, settle.clone())),
+            "accessibility" => Ok(Replay::Settle(Some(rest.into()), settle.clone())),
             "appearance" => Ok(Replay::Appearance(match rest {
                 "light" => winit::window::Theme::Light,
                 "dark" => winit::window::Theme::Dark,
@@ -6129,7 +6146,18 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
                     if let Replay::Input(ui::Event::Button { at, .. }) = &mut replay {
                         *at = Instant::now();
                     }
+                    let settling = matches!(replay, Replay::Settle(..));
                     let _ = proxy.send_event(UserEvent::Replay(replay));
+                    // Frames tick until settled; a minute bounds a page that never lands.
+                    let start = Instant::now();
+                    while settling
+                        && start.elapsed().as_secs() < 60
+                        && settled
+                            .recv_timeout(std::time::Duration::from_micros(16_667))
+                            .is_err()
+                    {
+                        let _ = proxy.send_event(UserEvent::Replay(Replay::Tick));
+                    }
                 }
                 Err(duration) => {
                     // Ticks keep a 60 Hz display's pace, dropping those a slow frame missed.
