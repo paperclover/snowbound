@@ -21,16 +21,12 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         case section(notebook: String, path: String)
         /// Opening, or why the notebook cannot be.
         case status(notebook: String)
-        case newNotebook, openFolder, connect
-        /// Copies the Snowbound Guide to On My iPhone and opens it, until it is there.
-        case guide
-        /// New Notebook in iCloud Drive, and the way to it while iCloud Drive is off.
-        case newInCloud, turnOnICloud
     }
 
     private var dataSource: UICollectionViewDiffableDataSource<Location, Item>!
     private var collapsed: Set<Item> = []
-    private lazy var sync = SyncIndicator(in: self)
+    /// What each notebook's row shows of its sync status, by notebook id.
+    private var attention: [String: Sync.Attention] = [:]
     private var selected: Item?
     var onOpen: ((Tab, Notebook) -> Void)?
 
@@ -77,42 +73,82 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         let add = UIMenu(children: [
             UIDeferredMenuElement.uncached { [weak self] provide in
                 guard let self else { return provide([]) }
-                var actions: [UIMenuElement] = []
-                if ICloud.documents != nil || Notebooks.showsOnDevice {
-                    actions.append(
-                        UIAction(title: "New Notebook…", image: UIImage(systemName: "plus")) { [weak self] _ in
-                            self?.newNotebook(inCloud: ICloud.documents != nil)
+                var places: [UIMenuElement] = []
+                if ICloud.documents != nil {
+                    places.append(
+                        UIAction(title: "iCloud Drive", image: UIImage(systemName: "icloud")) { [weak self] _ in
+                            self?.newNotebook(inCloud: true)
+                        })
+                } else if !ICloud.signedIn {
+                    places.append(
+                        UIAction(title: "Turn On iCloud Drive", image: UIImage(systemName: "icloud")) { _ in
+                            if let settings = URL(string: UIApplication.openSettingsURLString) {
+                                UIApplication.shared.open(settings)
+                            }
                         })
                 }
-                actions += [
+                places.append(
+                    UIAction(title: Self.device, image: UIImage(systemName: "iphone")) { [weak self] _ in
+                        self?.newNotebook(inCloud: false)
+                    })
+                var actions: [UIMenuElement] = [
+                    UIMenu(title: "New Notebook", options: .displayInline, children: places),
+                    UIAction(title: "Open from Server…", image: UIImage(systemName: "server.rack")) { [weak self] _ in
+                        self?.connect()
+                    },
                     UIAction(title: "Open Folder…", image: UIImage(systemName: "folder")) { [weak self] _ in
                         self?.openFolder()
                     },
-                    UIAction(title: "Connect to Server…", image: UIImage(systemName: "server.rack")) { [weak self] _ in
-                        self?.connect()
-                    },
                 ]
-                var more: [UIMenuElement] = []
+                let copied = Notebooks.onDevice.contains { $0.source == .documents(path: Notebooks.guide) }
+                if Notebooks.guideOffered && !copied {
+                    actions.append(
+                        UIAction(title: "Open the Snowbound Guide", image: UIImage(systemName: "book")) { [weak self] _ in
+                            self?.openGuide()
+                        })
+                }
+                provide(actions)
+            }
+        ])
+        let more = UIMenu(children: [
+            UIDeferredMenuElement.uncached { [weak self] provide in
+                var actions: [UIMenuElement] = [
+                    UIAction(title: "Sync Status…", image: UIImage(systemName: "arrow.triangle.2.circlepath")) {
+                        [weak self] _ in self.map(SyncViewController.present)
+                    }
+                ]
                 if !Notebooks.showsOnDevice {
-                    more.append(
+                    actions.append(
                         UIAction(title: "Show \(Self.device)", image: UIImage(systemName: "eye")) { [weak self] _ in
                             self?.showOnDevice(true)
                         })
                 }
-                more.append(
+                actions.append(
                     UIAction(title: "Personalize…", image: UIImage(systemName: "person.crop.circle")) { [weak self] _ in
                         guard let self else { return }
                         Author.ask(from: self) {}
                     })
-                more.append(Appearance.menu())
-                more.append(Editing.fontMenu())
-                provide(actions + [UIMenu(options: .displayInline, children: more)])
+                actions.append(Appearance.menu())
+                actions.append(Editing.fontMenu())
+                provide(actions)
             }
         ])
-        navigationItem.rightBarButtonItem = UIBarButtonItem(
-            title: "Add Notebook", image: UIImage(systemName: "plus"), menu: add)
+        navigationItem.rightBarButtonItems = [
+            UIBarButtonItem(title: "Add Notebook", image: UIImage(systemName: "plus"), menu: add),
+            UIBarButtonItem(title: "More", image: UIImage(systemName: "ellipsis"), menu: more),
+        ]
         navigationItem.searchController = SearchViewController.controller()
-        toolbarItems = [.flexibleSpace(), sync, .flexibleSpace()]
+        let corner = Prototype.quickNote ? [QuickNote.item()] : []
+        if #available(iOS 26, *) {
+            // Search sits in the bottom toolbar, as Notes and Files put it.
+            navigationItem.preferredSearchBarPlacement = .integrated
+            toolbarItems = [navigationItem.searchBarPlacementBarButtonItem] + (corner.isEmpty ? [] : [.fixedSpace()] + corner)
+        } else {
+            toolbarItems = corner.isEmpty ? [] : [.flexibleSpace()] + corner
+        }
+        for name in [Sync.changed, Section.changed] {
+            NotificationCenter.default.addObserver(self, selector: #selector(refreshSync), name: name, object: nil)
+        }
         NotificationCenter.default.addObserver(forName: Notebook.listed, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             reload()
@@ -126,7 +162,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         navigationController?.navigationBar.prefersLargeTitles = true
-        navigationController?.setToolbarHidden(false, animated: false)
+        navigationController?.setToolbarHidden(toolbarItems?.isEmpty != false, animated: false)
     }
 
     private func notebook(_ id: String) -> Notebook? { Notebooks.all.first { $0.id == id } }
@@ -140,23 +176,32 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
             contentUnavailableConfiguration = welcome
             if welcome != nil { return dataSource.apply(.init(), animatingDifferences: false) }
         }
-        let copied = Notebooks.onDevice.contains { $0.source == .documents(path: Notebooks.guide) }
-        let guide: [Item] = Notebooks.guideOffered && !copied ? [.guide] : []
-        let cloud: [(Location, [Notebook], [Item])] =
-            ICloud.documents != nil
-            ? [(.icloud, Notebooks.inCloud, [.newInCloud])]
-            : ICloud.signedIn ? [] : [(.icloud, [], [.turnOnICloud])]
-        let locations: [(Location, [Notebook], [Item])] =
-            cloud + (Notebooks.showsOnDevice ? [(.onDevice, Notebooks.onDevice, [.newNotebook])] : [])
-            + [(.elsewhere, Notebooks.elsewhere, [.openFolder, .connect] + guide)]
+        // A place with no notebooks is left out; the Add Notebook menu reaches every place.
+        let locations: [(Location, [Notebook])] = [
+            (.icloud, Notebooks.inCloud), (.onDevice, Notebooks.onDevice), (.elsewhere, Notebooks.elsewhere),
+        ].filter { !$0.1.isEmpty }
+        if locations.isEmpty {
+            var empty = UIContentUnavailableConfiguration.empty()
+            empty.text = "No Notebooks"
+            empty.secondaryText = "Create a notebook, or open one from a server or folder."
+            var button = UIButton.Configuration.borderedProminent()
+            button.title = "New Notebook"
+            empty.button = button
+            empty.buttonProperties.primaryAction = UIAction { [weak self] _ in
+                self?.newNotebook(inCloud: ICloud.documents != nil)
+            }
+            contentUnavailableConfiguration = empty
+        } else {
+            contentUnavailableConfiguration = nil
+        }
         var sections = NSDiffableDataSourceSnapshot<Location, Item>()
         sections.appendSections(locations.map(\.0))
         dataSource.apply(sections, animatingDifferences: false)
-        for (location, notebooks, actions) in locations {
+        for (location, notebooks) in locations {
             var list = NSDiffableDataSourceSectionSnapshot<Item>()
             let header = Item.location(location)
             list.append([header])
-            list.append(notebooks.map { .notebook($0.id) } + actions, to: header)
+            list.append(notebooks.map { .notebook($0.id) }, to: header)
             for notebook in notebooks {
                 let parent = Item.notebook(notebook.id)
                 guard notebook.handle != nil else {
@@ -179,6 +224,36 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
             dataSource.apply(list, to: location, animatingDifferences: false)
         }
         showSelection()
+        refreshSync()
+    }
+
+    /// Reads every notebook's sync status, marks the rows it changed, and tells of a notebook
+    /// that has just stopped syncing with edits waiting.
+    @objc private func refreshSync() {
+        Sync.status { [weak self] notebooks in
+            guard let self else { return }
+            var changed: [Item] = []
+            for (notebook, sections) in notebooks {
+                let before = attention[notebook.id]
+                let after = Sync.attention(sections)
+                guard before != after else { continue }
+                attention[notebook.id] = after
+                changed.append(.notebook(notebook.id))
+                // The list is off screen on a phone while a page shows.
+                if let toast = Sync.toast(notebook.name, from: before, to: after),
+                    let window = splitViewController?.view.window ?? view.window
+                {
+                    SyncToast.show(toast.title, toast.detail, in: window) { [weak self] in
+                        self.map(SyncViewController.present)
+                    }
+                }
+            }
+            var shown = dataSource.snapshot()
+            let items = changed.filter { shown.indexOfItem($0) != nil }
+            guard !items.isEmpty else { return }
+            shown.reconfigureItems(items)
+            dataSource.apply(shown, animatingDifferences: false)
+        }
     }
 
     /// Lists Documents and iCloud Drive again and opens the notebooks new there; `opened` runs
@@ -234,13 +309,23 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
             content.text = notebook.name
             content.image = UIImage(systemName: "book.closed.fill")
             content.imageProperties.tintColor = notebook.color
-            if case .server(let server) = notebook.source { content.secondaryText = server.host }
+            var details: [String] = []
+            if case .server(let server) = notebook.source { details.append(server.host) }
+            if let state = attention[id]?.state {
+                details.append(Sync.label(state))
+                let mark = UIImageView(image: UIImage(systemName: Sync.symbol(state)))
+                mark.tintColor = state == .notConnected || Sync.offline ? .secondaryLabel : .systemOrange
+                mark.preferredSymbolConfiguration = UIImage.SymbolConfiguration(textStyle: .body)
+                accessories.append(.customView(configuration: .init(customView: mark, placement: .trailing(displayed: .always))))
+            }
+            content.secondaryText = details.isEmpty ? nil : details.joined(separator: " · ")
+            content.secondaryTextProperties.color = .secondaryLabel
             let more = UIButton(type: .system)
             more.setImage(UIImage(systemName: "ellipsis.circle"), for: .normal)
             more.accessibilityLabel = "More"
             more.showsMenuAsPrimaryAction = true
             more.menu = menu(for: notebook)
-            accessories = [
+            accessories += [
                 .customView(configuration: .init(customView: more, placement: .trailing(displayed: .always))),
                 .outlineDisclosure(options: .init(style: .cell)),
             ]
@@ -276,32 +361,25 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
                 spinner.startAnimating()
                 accessories = [.customView(configuration: .init(customView: spinner, placement: .trailing()))]
             }
-        case .turnOnICloud:
-            content.text = "Turn On iCloud Drive"
-            content.secondaryText = "Keep notebooks in iCloud to use them on all your devices."
-            content.image = UIImage(systemName: "icloud")
-            content.textProperties.color = .tintColor
-        case .newInCloud:
-            content.text = "New Notebook…"
-            content.image = UIImage(systemName: "plus")
-            content.textProperties.color = .tintColor
-        case .guide:
-            content.text = "Open the Snowbound Guide"
-            content.image = UIImage(systemName: "book")
-            content.textProperties.color = .tintColor
-        case .newNotebook, .openFolder, .connect:
-            content.text =
-                item == .newNotebook ? "New Notebook…" : item == .openFolder ? "Open Folder…" : "Connect to Server…"
-            content.image = UIImage(
-                systemName: item == .newNotebook ? "plus" : item == .openFolder ? "folder" : "server.rack")
-            content.textProperties.color = .tintColor
         }
         cell.contentConfiguration = content
         cell.accessories = accessories
     }
 
     private func menu(for notebook: Notebook) -> UIMenu {
-        var actions = [
+        // Why the notebook isn't syncing and when it last did, while it isn't.
+        let status: [UIMenuElement] =
+            attention[notebook.id].map { attention in
+                let details = UIAction(
+                    title: Sync.label(attention.state), subtitle: attention.detail.isEmpty ? nil : attention.detail,
+                    image: UIImage(systemName: Sync.symbol(attention.state))
+                ) { [weak self] _ in self.map(SyncViewController.present) }
+                let now = UIAction(title: "Sync Now", image: UIImage(systemName: "arrow.clockwise")) { _ in
+                    if let handle = notebook.handle { sb_library_sync_now(handle) }
+                }
+                return [UIMenu(options: .displayInline, children: [details, now])]
+            } ?? []
+        let actions = [
             UIAction(title: "New Section…", image: UIImage(systemName: "plus.rectangle.portrait")) {
                 [weak self] _ in self?.newSection(in: notebook)
             },
@@ -317,7 +395,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
                 Notebooks.remove(notebook)
                 self?.reload()
             }
-            return UIMenu(children: actions + [close])
+            return UIMenu(children: status + actions + [close])
         }
         let file = [
             UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { [weak self] _ in
@@ -337,7 +415,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         let delete = UIAction(title: "Delete", image: UIImage(systemName: "trash"), attributes: .destructive) {
             [weak self] _ in self?.delete(folder, of: notebook)
         }
-        return UIMenu(children: [
+        return UIMenu(children: status + [
             UIMenu(options: .displayInline, children: actions), UIMenu(options: .displayInline, children: file), delete,
         ])
     }
@@ -538,13 +616,6 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
                 collapsed.remove(item)
             }
             dataSource.apply(list, to: location)
-        case .newNotebook: newNotebook(inCloud: false)
-        case .newInCloud: newNotebook(inCloud: true)
-        case .turnOnICloud:
-            if let settings = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(settings) }
-        case .openFolder: openFolder()
-        case .connect: connect()
-        case .guide: openGuide()
         case .location: break
         }
         return false
@@ -745,7 +816,6 @@ final class PagesViewController: UITableViewController {
 
     private(set) var section: Section?
     private var items: [Item] = []
-    private lazy var sync = SyncIndicator(in: self)
     private var selected: String?
     private let search = SearchViewController.controller()
     /// Opens a page of the section.
@@ -767,12 +837,15 @@ final class PagesViewController: UITableViewController {
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "page")
         navigationItem.searchController = search
         navigationItem.hidesSearchBarWhenScrolling = false
-        let compose = UIBarButtonItem(
-            title: "New Page", image: UIImage(systemName: "square.and.pencil"),
+        let add = UIBarButtonItem(
+            title: "New Page", image: UIImage(systemName: "plus"),
             primaryAction: UIAction { [weak self] _ in self?.newPage(under: nil) })
-        toolbarItems = [
-            .flexibleSpace(), sync, .flexibleSpace(), compose,
-        ]
+        if #available(iOS 26, *) {
+            navigationItem.preferredSearchBarPlacement = .integrated
+            toolbarItems = [navigationItem.searchBarPlacementBarButtonItem, .fixedSpace(), add]
+        } else {
+            toolbarItems = [.flexibleSpace(), add]
+        }
         NotificationCenter.default.addObserver(
             self, selector: #selector(changed), name: Section.changed, object: nil)
         if Prototype.sectionStrip {

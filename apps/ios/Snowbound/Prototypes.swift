@@ -1,8 +1,8 @@
 import UIKit
 
 /// Design prototypes, off unless a launch argument turns one on, as
-/// `-SnowboundReading YES`, `-SnowboundWelcome YES` or `-SnowboundSectionStrip YES` (Xcode's
-/// scheme, `simctl launch`, or `devicectl … --arguments`).
+/// `-SnowboundReading YES`, `-SnowboundWelcome YES`, `-SnowboundSectionStrip YES` or
+/// `-SnowboundQuickNote YES` (Xcode's scheme, `simctl launch`, or `devicectl … --arguments`).
 enum Prototype {
     /// Page menu: Reading View, the page reflowed into the screen's width, read-only.
     static var reading: Bool { UserDefaults.standard.bool(forKey: "SnowboundReading") }
@@ -237,5 +237,83 @@ final class SectionStrip: UIView {
 
     private func swatch(_ color: UIColor) -> UIImage? {
         UIImage(systemName: "rectangle.portrait.fill")?.withTintColor(color, renderingMode: .alwaysOriginal)
+    }
+}
+
+extension Prototype {
+    /// The notebook list's bottom corner: Quick Note, a new page in a section chosen once.
+    static var quickNote: Bool { UserDefaults.standard.bool(forKey: "SnowboundQuickNote") }
+}
+
+/// OneNote's Quick Notes, which go to its Unfiled Notes section: a page made from the notebook
+/// list goes to the section picked the first time.
+enum QuickNote {
+    private struct Place: Codable, Equatable {
+        let notebook: String
+        let section: String
+    }
+
+    private static let key = "quickNoteSection"
+
+    private static var place: Place? {
+        get { UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode(Place.self, from: $0) } }
+        set { UserDefaults.standard.set(try? JSONEncoder().encode(newValue), forKey: key) }
+    }
+
+    /// The chosen section, while its notebook lists it.
+    private static var target: (Tab, Notebook)? {
+        guard let place, let notebook = Notebooks.all.first(where: { $0.id == place.notebook }),
+            let tab = notebook.tabs.first(where: { $0.path == place.section && $0.readable })
+        else { return nil }
+        return (tab, notebook)
+    }
+
+    /// Makes a page in the chosen section and opens it, its title ready for typing; until a
+    /// section is chosen, a tap asks where Quick Notes go.
+    static func item() -> UIBarButtonItem {
+        let item = UIBarButtonItem(title: "Quick Note", image: UIImage(systemName: "square.and.pencil"))
+        let create = UIAction(title: "Quick Note") { _ in
+            guard let (tab, notebook) = target else {
+                scene?.window?.rootViewController?.alert(
+                    "Can’t Open the Quick Notes Section", "Touch and hold Quick Note to choose another section.")
+                return
+            }
+            write(in: tab, of: notebook)
+        }
+        item.primaryAction = place == nil ? nil : create
+        item.menu = UIMenu(children: [
+            UIDeferredMenuElement.uncached { [weak item] provide in
+                let notebooks = Notebooks.all.filter { $0.tabs.contains(where: \.readable) }
+                let choices = notebooks.map { notebook in
+                    UIMenu(
+                        title: notebook.name, image: UIImage(systemName: "book.closed"),
+                        children: notebook.tabs.filter(\.readable).map { tab in
+                            let chosen = Place(notebook: notebook.id, section: tab.path)
+                            let action = UIAction(
+                                title: tab.name,
+                                image: UIImage(systemName: "rectangle.portrait.fill")?
+                                    .withTintColor(tab.uiColor, renderingMode: .alwaysOriginal)
+                            ) { _ in
+                                let first = item?.primaryAction == nil
+                                place = chosen
+                                item?.primaryAction = create
+                                if first { write(in: tab, of: notebook) }
+                            }
+                            action.state = place == chosen ? .on : .off
+                            return action
+                        })
+                }
+                provide([UIMenu(title: "Quick Notes Go To", options: .displayInline, children: choices)])
+            }
+        ])
+        return item
+    }
+
+    private static var scene: SceneDelegate? {
+        UIApplication.shared.connectedScenes.lazy.compactMap { $0.delegate as? SceneDelegate }.first
+    }
+
+    private static func write(in tab: Tab, of notebook: Notebook) {
+        scene?.open(tab, of: notebook) { _ in scene?.newPage() }
     }
 }

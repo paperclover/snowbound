@@ -66,7 +66,7 @@ enum Sync {
         return switch state {
         case .upToDate: "checkmark.circle"
         case .syncing, .inUse: "arrow.triangle.2.circlepath"
-        case .notConnected: "wifi.slash"
+        case .notConnected: "slash.circle"
         case .protected: "lock"
         case .readOnly, .unreadable, .failed: "exclamationmark.triangle"
         }
@@ -85,6 +85,43 @@ enum Sync {
         }
     }
 
+    /// A notebook's status as its row shows it, while its sections aren't syncing.
+    struct Attention: Equatable {
+        let state: SectionSync.State
+        let queued: Int
+        /// The oldest of the sections' last syncs, unless one never synced.
+        let synced: Double?
+
+        /// The last sync and the edits waiting, as a line.
+        var detail: String {
+            [synced.map { "Last sync \(Sync.when($0))" }, queued > 0 ? "\(Sync.changes(queued)) waiting" : nil]
+                .compactMap { $0 }.joined(separator: " · ")
+        }
+    }
+
+    static func attention(_ sections: [SectionSync]) -> Attention? {
+        // A protected section says so on its own row.
+        let syncing = sections.filter { $0.state != .protected }
+        guard let worst = syncing.map(\.state).max(), offline || worst >= .notConnected else { return nil }
+        let synced = syncing.map(\.synced)
+        return Attention(
+            state: worst, queued: syncing.map(\.queued).reduce(0, +),
+            synced: synced.contains { $0 == nil } ? nil : synced.compactMap { $0 }.min())
+    }
+
+    /// What a toast says when `notebook` has just stopped syncing with edits waiting; nil
+    /// otherwise, as its row already says so.
+    static func toast(_ notebook: String, from before: Attention?, to after: Attention?) -> (title: String, detail: String)? {
+        guard before == nil, let after, after.queued > 0, !offline else { return nil }
+        let title =
+            switch after.state {
+            case .notConnected: "Can’t reach “\(notebook)”"
+            case .readOnly: "Can’t save to “\(notebook)”"
+            default: "Can’t sync “\(notebook)”"
+            }
+        return (title, "\(changes(after.queued)) waiting on this \(UIDevice.current.model)")
+    }
+
     static func changes(_ count: Int) -> String { count == 1 ? "1 change" : "\(count) changes" }
 
     /// When a section was last reached: the time, and the date too before today.
@@ -96,80 +133,56 @@ enum Sync {
     }
 }
 
-/// The sync status in a list's toolbar, as Mail shows when it last checked; opens the sync
-/// sheet. The item leaves `owner`'s toolbar while there is nothing to report (hidden, its
-/// custom view would leave the bar's glass behind), so the owner keeps it.
-final class SyncIndicator: UIBarButtonItem {
-    private let button = UIButton(type: .system)
-    private weak var owner: UIViewController?
-    /// Where in the toolbar the item goes back to.
-    private var slot = 0
-
-    init(in owner: UIViewController) {
-        self.owner = owner
-        super.init()
-        var configuration = UIButton.Configuration.plain()
-        configuration.imagePadding = 4
-        configuration.preferredSymbolConfigurationForImage = UIImage.SymbolConfiguration(textStyle: .caption1)
-        configuration.baseForegroundColor = .secondaryLabel
-        configuration.titleLineBreakMode = .byTruncatingTail
-        configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer {
-            var attributes = $0
-            attributes.font = .preferredFont(forTextStyle: .caption1)
-            return attributes
+/// A passing note at the top of `window` that opens `details` when tapped, for a change the
+/// reader would otherwise miss.
+enum SyncToast {
+    static func show(_ title: String, _ detail: String, in window: UIWindow, details: @escaping () -> Void) {
+        var configuration: UIButton.Configuration
+        if #available(iOS 26, *) {
+            configuration = .glass()
+        } else {
+            configuration = .gray()
+            configuration.cornerStyle = .capsule
         }
-        button.configuration = configuration
-        button.addAction(UIAction { [weak self] _ in self?.present() }, for: .primaryActionTriggered)
-        customView = button
-        for name in [Sync.changed, Section.changed] {
-            NotificationCenter.default.addObserver(self, selector: #selector(refresh), name: name, object: nil)
+        configuration.title = title
+        configuration.subtitle = detail
+        configuration.image = UIImage(systemName: "exclamationmark.icloud")
+        configuration.imagePadding = 10
+        configuration.titleLineBreakMode = .byTruncatingMiddle
+        configuration.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 16, bottom: 10, trailing: 20)
+        let toast = UIButton(configuration: configuration)
+        toast.accessibilityHint = "Shows sync status"
+        toast.translatesAutoresizingMaskIntoConstraints = false
+        toast.alpha = 0
+        let dismiss = { [weak toast] in
+            UIView.animate(withDuration: 0.3, animations: { toast?.alpha = 0 }) { _ in toast?.removeFromSuperview() }
         }
-        refresh()
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    @objc private func refresh() {
-        Sync.status { [weak self] notebooks in
-            let sections = notebooks.flatMap(\.1)
-            guard let self else { return }
-            guard let worst = sections.map(\.state).max() else { return show(false) }
-            let queued = sections.map(\.queued).reduce(0, +)
-            let label = Sync.label(worst)
-            button.configuration?.title = queued > 0 && worst != .syncing ? "\(label), \(Sync.changes(queued))" : label
-            button.configuration?.image = UIImage(systemName: Sync.symbol(worst))
-            button.configuration?.baseForegroundColor =
-                worst >= .notConnected && !Sync.offline ? .systemOrange : .secondaryLabel
-            button.accessibilityLabel = "Sync status: \(button.configuration?.title ?? label)"
-            button.sizeToFit()
-            show(true)
-        }
-    }
-
-    /// Takes the item out of its owner's toolbar, or puts it back where it was.
-    private func show(_ shown: Bool) {
-        guard let owner, var items = owner.toolbarItems else { return }
-        switch (shown, items.firstIndex { $0 === self }) {
-        case (true, nil): items.insert(self, at: min(slot, items.count))
-        case (false, let at?):
-            slot = at
-            items.remove(at: at)
-        default: return
-        }
-        owner.setToolbarItems(items, animated: true)
-    }
-
-    private func present() {
-        guard let controller = button.window?.rootViewController else { return }
-        let navigation = UINavigationController(rootViewController: SyncViewController())
-        navigation.sheetPresentationController?.detents = [.medium(), .large()]
-        navigation.sheetPresentationController?.prefersGrabberVisible = true
-        (controller.presentedViewController ?? controller).present(navigation, animated: true)
+        toast.addAction(UIAction { _ in
+            dismiss()
+            details()
+        }, for: .primaryActionTriggered)
+        window.addSubview(toast)
+        NSLayoutConstraint.activate([
+            toast.topAnchor.constraint(equalTo: window.safeAreaLayoutGuide.topAnchor, constant: 8),
+            toast.centerXAnchor.constraint(equalTo: window.centerXAnchor),
+            toast.widthAnchor.constraint(lessThanOrEqualTo: window.widthAnchor, constant: -32),
+        ])
+        UIView.animate(withDuration: 0.3) { toast.alpha = 1 }
+        UIAccessibility.post(notification: .announcement, argument: "\(title). \(detail)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 6, execute: dismiss)
     }
 }
 
 /// OneNote's Notebook Sync Status: Work Offline, Sync Now, and each notebook's sections.
 final class SyncViewController: UITableViewController {
+    /// Shows the status as a sheet over `controller`.
+    static func present(from controller: UIViewController) {
+        let navigation = UINavigationController(rootViewController: SyncViewController())
+        navigation.sheetPresentationController?.detents = [.medium(), .large()]
+        navigation.sheetPresentationController?.prefersGrabberVisible = true
+        (controller.presentedViewController ?? controller).present(navigation, animated: true)
+    }
+
     private var notebooks: [(Notebook, [SectionSync])] = []
     private var timer: Timer?
     private let offline = UISwitch()
