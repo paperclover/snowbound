@@ -441,28 +441,25 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
     let host = facts.place.first().map_or("the notebook", String::as_str);
     let waiting = changes(sync.queued);
     let conflict;
-    let advice = if facts.offline {
-        None
-    } else {
-        match state {
-            SyncState::NotConnected => Some(match sync.queued {
-                0 => format!("Can’t reach {host}. Sync continues when it’s back."),
-                _ => format!("Can’t reach {host}. {waiting} will sync when it’s back."),
-            }),
-            SyncState::InUse => {
-                Some("Someone else is saving a section. Sync continues when they finish.".into())
-            }
-            SyncState::ReadOnly => Some(format!(
-                "This location is read-only. Your changes stay on {THIS}."
-            )),
-            SyncState::Protected => {
-                Some("Snowbound can’t open password-protected sections yet.".into())
-            }
-            SyncState::Unreadable | SyncState::Failed => {
-                Some("Snowbound keeps trying. Sync Now tries again at once.".into())
-            }
-            _ => None,
+    // A problem's advice stays while working offline, so turning it on moves nothing.
+    let advice = match state {
+        SyncState::NotConnected => Some(match sync.queued {
+            0 => format!("Can’t reach {host}. Sync continues when it’s back."),
+            _ => format!("Can’t reach {host}. {waiting} will sync when it’s back."),
+        }),
+        SyncState::InUse => {
+            Some("Someone else is saving a section. Sync continues when they finish.".into())
         }
+        SyncState::ReadOnly => Some(format!(
+            "This location is read-only. Your changes stay on {THIS}."
+        )),
+        SyncState::Protected => {
+            Some("Snowbound can’t open password-protected sections yet.".into())
+        }
+        SyncState::Unreadable | SyncState::Failed => {
+            Some("Snowbound keeps trying. Sync Now tries again at once.".into())
+        }
+        _ => None,
     };
     if !showing && headline == "Up to date" && !facts.conflicts.is_empty() {
         conflict = match facts.conflicts.as_slice() {
@@ -1380,6 +1377,18 @@ mod tests {
                     _ => status(true, 0, None),
                 }))
             }),
+            ("protected", || {
+                facts(sections(|index| match index {
+                    1 => status(true, 0, Some((io::ErrorKind::Unsupported, "Protected"))),
+                    _ => status(true, 0, None),
+                }))
+            }),
+            ("unreadable", || {
+                facts(sections(|index| match index {
+                    4 => status(true, 0, Some((io::ErrorKind::InvalidData, "Not a section"))),
+                    _ => status(true, 0, None),
+                }))
+            }),
             ("in-use", || {
                 facts(sections(|index| match index {
                     2 => status(true, 2, Some((io::ErrorKind::ResourceBusy, "In use"))),
@@ -1433,17 +1442,12 @@ mod tests {
         )))
     }
 
-    /// Work offline's switch stays put as it turns on and off, and so do the buttons below
-    /// but where a problem's advice, which offline leaves out, goes and comes back.
+    /// Work offline's switch, and everything below it, stays put as it turns on and off.
     #[test]
     fn toggling_offline_moves_nothing() {
         let switch = id().child("status").child("header").child("offline");
         let controls = id().child("controls");
         for (name, made) in states() {
-            let advised = !matches!(
-                overall(&made().sections).state(),
-                SyncState::UpToDate | SyncState::Syncing
-            );
             let mut places = Vec::new();
             for offline in [false, true, false] {
                 let mut ui = ui(Appearance::Light);
@@ -1452,10 +1456,10 @@ mod tests {
                 settle(&mut ui, &mut now, &facts);
                 places.push((ui.rect(switch).unwrap(), ui.rect(controls).unwrap()));
             }
-            for pair in places.windows(2) {
-                assert_eq!(pair[0].0, pair[1].0, "{name}");
-                assert!(advised || pair[0].1 == pair[1].1, "{name}: {places:?}");
-            }
+            assert!(
+                places.windows(2).all(|pair| pair[0] == pair[1]),
+                "{name}: {places:?}"
+            );
         }
     }
 
