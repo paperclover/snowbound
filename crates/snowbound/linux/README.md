@@ -42,7 +42,8 @@ Snowbound.
 - fontconfig, and X11 or Wayland with libxkbcommon.
 - The desktop's portal (xdg-desktop-portal) for choosing, printing and opening
   files. Questions, alerts and the page date and time use zenity or kdialog
-  where installed, and Snowbound's own dialogs otherwise.
+  where installed. Where none of these is, Snowbound asks, and chooses files,
+  with its own dialogs.
 
 ## Known limits
 

@@ -5,6 +5,7 @@
 //! Anything newer than Windows 7 is looked up at run time, so one executable starts on all
 //! of them.
 
+use crate::Reply;
 use canvas::date::DateField;
 use std::{
     ffi::c_void,
@@ -1372,8 +1373,8 @@ fn credential_target(mount: &crate::library::Mount) -> Vec<u16> {
     wide(format!("Snowbound/smb/{}", mount.host()))
 }
 
-/// The password the Credential Manager keeps for `mount`'s server, or what the user types
-/// into the system's sign-in dialog when it keeps none.
+/// The password the Credential Manager keeps for `mount`'s server; without one, Snowbound's
+/// sign-in asks.
 pub fn smb_login(mount: &crate::library::Mount) -> Result<crate::library::Login, String> {
     use windows_sys::Win32::Security::Credentials as cred;
     let target = credential_target(mount);
@@ -1406,51 +1407,11 @@ pub fn smb_login(mount: &crate::library::Mount) -> Result<crate::library::Login,
             domain: mount.domain.clone(),
         });
     }
-    let caption = wide("Snowbound");
-    let message = wide(format!("Sign in to {}", mount.server));
-    let info = cred::CREDUI_INFOW {
-        cbSize: size_of::<cred::CREDUI_INFOW>() as u32,
-        hwndParent: owner(),
-        pszMessageText: message.as_ptr(),
-        pszCaptionText: caption.as_ptr(),
-        hbmBanner: std::ptr::null_mut(),
-    };
-    let mut user = [0u16; cred::CREDUI_MAX_USERNAME_LENGTH as usize + 1];
-    for (slot, unit) in user
-        .iter_mut()
-        .zip(mount.user.clone().unwrap_or_default().encode_utf16())
-    {
-        *slot = unit;
-    }
-    let mut password = [0u16; 257];
-    let mut save: BOOL = 0;
-    let server = wide(&mount.server);
-    let result = unsafe {
-        cred::CredUIPromptForCredentialsW(
-            &info,
-            server.as_ptr(),
-            std::ptr::null_mut(),
-            0,
-            user.as_mut_ptr(),
-            user.len() as u32,
-            password.as_mut_ptr(),
-            password.len() as u32,
-            &mut save,
-            cred::CREDUI_FLAGS_GENERIC_CREDENTIALS
-                | cred::CREDUI_FLAGS_DO_NOT_PERSIST
-                | cred::CREDUI_FLAGS_ALWAYS_SHOW_UI,
-        )
-    };
-    let login = crate::library::Login {
-        user: narrow(&user),
-        password: narrow(&password),
-        domain: mount.domain.clone(),
-    };
-    password.fill(0);
-    match result {
-        0 => Ok(login),
-        _ => Err("Signing in was canceled".to_owned()),
-    }
+    Err(format!(
+        "Enter the password for \u{201c}{}\u{201d} on \u{201c}{}\u{201d}.",
+        mount.user.as_deref().unwrap_or_default(),
+        mount.host()
+    ))
 }
 
 /// What the sign-in offers for keeping a password, which the Credential Manager keeps.
@@ -1613,41 +1574,41 @@ pub fn edit_date(
     timestamp: u64,
     field: DateField,
     title: &str,
-) -> Result<Option<(u64, [String; 2])>, &'static str> {
-    let before = local_time(timestamp);
-    let Some(chosen) = picker::pick(&before, field, title) else {
-        return Ok(None);
-    };
-    let mut time = before;
-    match field {
-        DateField::Date => {
-            (time.wYear, time.wMonth, time.wDay) = (chosen.wYear, chosen.wMonth, chosen.wDay);
+    reply: Reply<Result<(u64, [String; 2]), &'static str>>,
+) {
+    let title = title.to_owned();
+    reply.after(move || {
+        let before = local_time(timestamp);
+        let chosen = picker::pick(&before, field, &title)?;
+        let mut time = before;
+        match field {
+            DateField::Date => {
+                (time.wYear, time.wMonth, time.wDay) = (chosen.wYear, chosen.wMonth, chosen.wDay);
+            }
+            DateField::Time => {
+                (time.wHour, time.wMinute) = (chosen.wHour, chosen.wMinute);
+            }
         }
-        DateField::Time => {
-            (time.wHour, time.wMinute) = (chosen.wHour, chosen.wMinute);
-        }
-    }
-    let updated = filetime(&time).ok_or(crate::DATE_OUT_OF_RANGE)?;
-    // FILETIME's sub-second ticks stay as they were.
-    let updated = updated / 10_000_000 * 10_000_000 + timestamp % 10_000_000;
-    Ok(Some((updated, date_labels(&local_time(updated)))))
+        let updated = filetime(&time).ok_or(crate::DATE_OUT_OF_RANGE);
+        // FILETIME's sub-second ticks stay as they were.
+        Some(updated.map(|updated| {
+            let updated = updated / 10_000_000 * 10_000_000 + timestamp % 10_000_000;
+            (updated, date_labels(&local_time(updated)))
+        }))
+    });
 }
 
 /// Asks for a notebook's table of contents or a section file, titled `title`.
-pub fn pick_notebook(title: &str) -> Option<PathBuf> {
-    pick(
-        title,
-        &[(
-            "OneNote notebooks, sections and packages",
-            "*.onetoc2;*.one;*.onepkg",
-        )],
-        None,
-        false,
-    )
+pub fn pick_notebook(title: &str, reply: Reply<PathBuf>) {
+    let filter = (
+        "OneNote notebooks, sections and packages",
+        "*.onetoc2;*.one;*.onepkg",
+    );
+    pick(title, &[filter], None, false, reply);
 }
 
 /// Asks for a file to insert, one of `types` (extensions) unless empty, titled `title`.
-pub fn pick_file(title: &str, types: &[&str]) -> Option<PathBuf> {
+pub fn pick_file(title: &str, types: &[&str], reply: Reply<PathBuf>) {
     let patterns = types
         .iter()
         .map(|kind| format!("*.{kind}"))
@@ -1658,7 +1619,7 @@ pub fn pick_file(title: &str, types: &[&str]) -> Option<PathBuf> {
     } else {
         vec![("Supported files", patterns.as_str()), ("All files", "*.*")]
     };
-    pick(title, &filters, None, false)
+    pick(title, &filters, None, false, reply);
 }
 
 /// Asks where to put something named `name` by default; the dialog names its own button.
@@ -1667,19 +1628,26 @@ pub fn pick_new(
     name: &str,
     _action: &str,
     folder: Option<&std::path::Path>,
-) -> Option<PathBuf> {
-    pick(title, &[("All files", "*.*")], Some((name, folder)), true)
+    reply: Reply<PathBuf>,
+) {
+    pick(
+        title,
+        &[("All files", "*.*")],
+        Some((name, folder)),
+        true,
+        reply,
+    );
 }
 
-/// The common file dialog: an open dialog over `filters` (name and `;`-separated
-/// patterns), or with `new`, a save dialog suggesting a name in a folder.
+/// The common file dialog, on a thread of its own: an open dialog over `filters` (name and
+/// `;`-separated patterns), or with `new`, a save dialog suggesting a name in a folder.
 fn pick(
     title: &str,
     filters: &[(&str, &str)],
     new: Option<(&str, Option<&std::path::Path>)>,
     save: bool,
-) -> Option<PathBuf> {
-    use windows_sys::Win32::UI::Controls::Dialogs as dialogs;
+    reply: Reply<PathBuf>,
+) {
     let mut filter: Vec<u16> = Vec::new();
     for (name, patterns) in filters {
         filter.extend(name.encode_utf16().chain([0]));
@@ -1694,54 +1662,68 @@ fn pick(
     }
     let folder = new.and_then(|(_, folder)| folder).map(wide);
     let title = wide(title);
-    let mut dialog = dialogs::OPENFILENAMEW {
-        lStructSize: size_of::<dialogs::OPENFILENAMEW>() as u32,
-        hwndOwner: owner(),
-        lpstrFilter: filter.as_ptr(),
-        lpstrFile: file.as_mut_ptr(),
-        nMaxFile: file.len() as u32,
-        lpstrTitle: title.as_ptr(),
-        lpstrInitialDir: folder
-            .as_ref()
-            .map_or(std::ptr::null(), |folder| folder.as_ptr()),
-        Flags: dialogs::OFN_EXPLORER
-            | dialogs::OFN_NOCHANGEDIR
-            | if save {
-                dialogs::OFN_OVERWRITEPROMPT
+    reply.after(move || {
+        use windows_sys::Win32::{System::Com, UI::Controls::Dialogs as dialogs};
+        let mut dialog = dialogs::OPENFILENAMEW {
+            lStructSize: size_of::<dialogs::OPENFILENAMEW>() as u32,
+            hwndOwner: owner(),
+            lpstrFilter: filter.as_ptr(),
+            lpstrFile: file.as_mut_ptr(),
+            nMaxFile: file.len() as u32,
+            lpstrTitle: title.as_ptr(),
+            lpstrInitialDir: folder
+                .as_ref()
+                .map_or(std::ptr::null(), |folder| folder.as_ptr()),
+            Flags: dialogs::OFN_EXPLORER
+                | dialogs::OFN_NOCHANGEDIR
+                | if save {
+                    dialogs::OFN_OVERWRITEPROMPT
+                } else {
+                    dialogs::OFN_FILEMUSTEXIST
+                },
+            ..unsafe { std::mem::zeroed() }
+        };
+        // The Explorer-style dialog hosts the shell's COM objects, which want an apartment.
+        unsafe { Com::CoInitializeEx(std::ptr::null(), Com::COINIT_APARTMENTTHREADED as u32) };
+        let chosen = unsafe {
+            if save {
+                dialogs::GetSaveFileNameW(&mut dialog)
             } else {
-                dialogs::OFN_FILEMUSTEXIST
-            },
-        ..unsafe { std::mem::zeroed() }
-    };
-    let chosen = unsafe {
-        if save {
-            dialogs::GetSaveFileNameW(&mut dialog)
-        } else {
-            dialogs::GetOpenFileNameW(&mut dialog)
+                dialogs::GetOpenFileNameW(&mut dialog)
+            }
+        };
+        unsafe { Com::CoUninitialize() };
+        if chosen == 0 {
+            // Zero where the user cancelled.
+            let error = unsafe { dialogs::CommDlgExtendedError() };
+            if error != 0 {
+                eprintln!("The file dialog failed: {error:#x}");
+            }
+            return None;
         }
-    };
-    if chosen == 0 {
-        // Zero where the user cancelled.
-        let error = unsafe { dialogs::CommDlgExtendedError() };
-        if error != 0 {
-            eprintln!("The file dialog failed: {error:#x}");
-        }
-        return None;
-    }
-    Some(PathBuf::from(narrow(&file)))
+        Some(PathBuf::from(narrow(&file)))
+    });
 }
 
 /// Tells the user something they asked for could not be done: `message`, then what to do.
 pub fn alert(message: &str, detail: &str) {
     let text = wide(format!("{message}\n\n{detail}"));
-    let caption = wide("Snowbound");
-    let style = wm::MB_OK | wm::MB_ICONWARNING;
-    unsafe { wm::MessageBoxW(owner(), text.as_ptr(), caption.as_ptr(), style) };
+    std::thread::spawn(move || {
+        let caption = wide("Snowbound");
+        let style = wm::MB_OK | wm::MB_ICONWARNING;
+        unsafe { wm::MessageBoxW(owner(), text.as_ptr(), caption.as_ptr(), style) };
+    });
 }
 
-/// Asks whether to go ahead with `action`, offering `cancel` too: a task dialog with those
-/// buttons where the common controls have one, as from Windows Vista, else OK and Cancel.
-pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str) -> bool {
+/// Asks whether to go ahead with `action`, offering `cancel` too.
+pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str, reply: Reply<()>) {
+    let [message, detail, cancel, action] = [message, detail, cancel, action].map(str::to_owned);
+    reply.after(move || ask(&message, &detail, &cancel, &action).then_some(()));
+}
+
+/// Whether the user goes ahead with `action`: a task dialog with buttons for it and `cancel`
+/// where the common controls have one, as from Windows Vista, else OK and Cancel.
+fn ask(message: &str, detail: &str, cancel: &str, action: &str) -> bool {
     use windows_sys::Win32::UI::Controls as controls;
     type Indirect = unsafe extern "system" fn(
         *const controls::TASKDIALOGCONFIG,

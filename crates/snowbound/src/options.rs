@@ -871,7 +871,7 @@ fn installed(state: &mut State, _: &mut Options) {
     if crate::desktop::uninstallable() {
         path(ui, &crate::desktop::binary().unwrap_or_default());
         if ui::button(ui, "uninstall", "Uninstall…").clicked {
-            crate::desktop::uninstall();
+            crate::desktop::uninstall(&state.proxy);
         }
     } else if crate::desktop::installable() {
         path(ui, std::path::Path::new("Not in the app menu"));

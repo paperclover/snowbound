@@ -65,35 +65,54 @@ impl State {
 
     /// Empty Recycle Bin on `library`, once confirmed as OneNote asks.
     pub(crate) fn empty_recycle_bin(&mut self, library: Arc<Library>) {
-        if crate::platform::confirm(
+        crate::platform::confirm(
             "Are you sure you want to empty the Recycle Bin for this notebook?",
             "Its pages and sections are deleted for good.",
             "Cancel",
             "Empty Recycle Bin",
-        ) {
-            let change = crate::manage::Structure::EmptyRecycleBin;
-            self.commands.push(Command::Structure(library, change));
-        }
+            self.reply(|state, ()| {
+                let change = crate::manage::Structure::EmptyRecycleBin;
+                state.commands.push(Command::Structure(library, change));
+                Ok(())
+            }),
+        );
+    }
+
+    /// Does `request` to the bin's open section, a purge once confirmed.
+    pub(crate) fn recycle(&mut self, request: Request) -> Result<(), Box<dyn Error>> {
+        let Request::Purge(spaces) = &request else {
+            return self.recycle_now(request);
+        };
+        let spaces = spaces.clone();
+        crate::platform::confirm(
+            "Are you sure you want to delete this page for good?",
+            "It can't be restored.",
+            "Cancel",
+            "Delete",
+            self.reply(move |state, ()| {
+                // The pages asked about, unless their section closed meanwhile.
+                let open = state.session.as_ref().is_some_and(|session| {
+                    (spaces.iter())
+                        .all(|space| session.pages.iter().any(|(page, ..)| page == space))
+                });
+                if open {
+                    state.recycle_now(request)
+                } else {
+                    Ok(())
+                }
+            }),
+        );
+        Ok(())
     }
 
     /// Does `request` to the bin's open section on a thread of its own, then shows the page
     /// after the ones gone, or the notebook once the section holds none.
-    pub(crate) fn recycle(&mut self, request: Request) -> Result<(), Box<dyn Error>> {
+    fn recycle_now(&mut self, request: Request) -> Result<(), Box<dyn Error>> {
         let gone = match &request {
             Request::Restore { copy: true, .. } => Vec::new(),
             Request::Restore { space, .. } => vec![*space],
             Request::Purge(spaces) => spaces.clone(),
         };
-        if matches!(request, Request::Purge(_))
-            && !crate::platform::confirm(
-                "Are you sure you want to delete this page for good?",
-                "It can't be restored.",
-                "Cancel",
-                "Delete",
-            )
-        {
-            return Ok(());
-        }
         let session = self.session.as_ref().ok_or("No section is open")?;
         let replica = Arc::clone(session.section.replica());
         let library = Arc::clone(&session.library);

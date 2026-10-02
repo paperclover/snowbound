@@ -589,10 +589,16 @@ impl State {
     /// Asks for a picture, a PNG or SVG, for the tag New Tag or Modify Tag edits, which then
     /// draws with it; OneNote shows the tag's symbol, or a blue circle where it has none.
     pub(crate) fn pick_tag_picture(&mut self) {
+        let reply = self.reply(|state, path| {
+            state.use_tag_picture(path);
+            Ok(())
+        });
+        platform::pick_file("Custom Image", &["png", "svg"], reply);
+    }
+
+    /// Draws the tag New Tag or Modify Tag edits with the picture at `path`, while it does.
+    fn use_tag_picture(&mut self, path: std::path::PathBuf) {
         let Some((tag, _)) = self.tag_list.as_mut().and_then(|list| list.editor.as_mut()) else {
-            return;
-        };
-        let Some(path) = platform::pick_file("Custom Image", &["png", "svg"]) else {
             return;
         };
         let kept = notebook::fs::read(&path)

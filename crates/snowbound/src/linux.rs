@@ -3,13 +3,13 @@
 //! the colour scheme from the settings portal, and text conventions from the C library's
 //! locale.
 
-use crate::dialog::Ask;
+use crate::{Reply, dialog::Ask};
 use canvas::date::DateField;
 use std::{
     cell::UnsafeCell,
     collections::HashMap,
     error::Error,
-    ffi::{CStr, CString, OsString, c_char, c_void},
+    ffi::{CStr, CString, OsStr, OsString, c_char, c_void},
     os::unix::ffi::OsStringExt,
     path::PathBuf,
     process::Command,
@@ -42,7 +42,8 @@ const MINIMIZE: &[&str] = &[include_str!("../assets/icons/window-minimize.svg")]
 const MAXIMIZE: &[&str] = &[include_str!("../assets/icons/window-maximize.svg")];
 const RESTORE: &[&str] = &[include_str!("../assets/icons/window-restore.svg")];
 
-static QUIT: OnceLock<EventLoopProxy<crate::UserEvent>> = OnceLock::new();
+/// The event loop's, for signals and Snowbound's own dialogs.
+pub(crate) static PROXY: OnceLock<EventLoopProxy<crate::UserEvent>> = OnceLock::new();
 /// Breeze's corner radius in units of the decoration's pixel grid, as `f32` bits; zero where
 /// KWin leaves windows square.
 static BREEZE_RADIUS: AtomicU32 = AtomicU32::new(0);
@@ -77,7 +78,8 @@ pub fn event_loop(headless: bool) -> Result<EventLoop<crate::UserEvent>, Box<dyn
     if !headless {
         crate::desktop::prepare(&event_loop);
     }
-    QUIT.set(event_loop.create_proxy())
+    PROXY
+        .set(event_loop.create_proxy())
         .expect("Only one application event loop is created");
     watch_settings(event_loop.create_proxy());
     if desktop() == Desktop::Kde {
@@ -649,7 +651,7 @@ pub fn window_controls(ui: &mut Ui, window: &Window) {
             "minimize" => window.set_minimized(true),
             "maximize" => zoom(window),
             _ => {
-                if let Some(proxy) = QUIT.get() {
+                if let Some(proxy) = PROXY.get() {
                     let _ = proxy.send_event(crate::UserEvent::Quit);
                 }
             }
@@ -1199,7 +1201,7 @@ pub fn smb_mount(path: &std::path::Path) -> Option<crate::library::Mount> {
 }
 
 /// The password the Secret Service keeps for `mount`'s account, as GNOME's file manager
-/// saves one, or what the user types when it keeps none.
+/// saves one; without one, Snowbound's sign-in asks.
 pub fn smb_login(mount: &crate::library::Mount) -> Result<crate::library::Login, String> {
     let user = mount.user.clone().unwrap_or_default();
     let mut lookup = Command::new("secret-tool");
@@ -1219,24 +1221,10 @@ pub fn smb_login(mount: &crate::library::Mount) -> Result<crate::library::Login,
             domain: mount.domain.clone(),
         });
     }
-    let title = format!("Sign in to {}", mount.server);
-    let asked = dialog(
-        ["--password", "--username", &format!("--title={title}")],
-        ["--password", &title],
-    )
-    .unwrap_or_else(|_| crate::dialog::ask(&title, "User name:", Ask::Login { user: &user }))
-    .ok_or_else(|| "Signing in was canceled".to_owned())?;
-    // zenity answers "user|password"; kdialog only the password.
-    let (typed, password) = asked
-        .split_once('|')
-        .map_or((user.clone(), asked.clone()), |(typed, password)| {
-            (typed.to_owned(), password.to_owned())
-        });
-    Ok(crate::library::Login {
-        user: if typed.is_empty() { user } else { typed },
-        password,
-        domain: mount.domain.clone(),
-    })
+    Err(format!(
+        "Enter the password for \u{201c}{user}\u{201d} on \u{201c}{}\u{201d}.",
+        mount.host()
+    ))
 }
 
 /// What the sign-in offers for keeping a password, where the Secret Service's tool is
@@ -1402,61 +1390,75 @@ pub fn date_text(filetime: u64) -> [String; 2] {
     date_labels(&local_time(filetime))
 }
 
-/// Asks for the page's date or time with the desktop's dialog tool.
+/// Asks for the page's date or time with the desktop's dialog tool, or else as text in
+/// Snowbound's own dialog.
 pub fn edit_date(
     timestamp: u64,
     field: DateField,
     title: &str,
-) -> Result<Option<(u64, [String; 2])>, &'static str> {
-    let tm = local_time(timestamp);
-    let answer = match field {
-        DateField::Date => dialog(
-            [
-                "--calendar",
-                &format!("--title={title}"),
-                "--text=",
-                &format!("--day={}", tm.tm_mday),
-                &format!("--month={}", tm.tm_mon + 1),
-                &format!("--year={}", tm.tm_year + 1900),
-                "--date-format=%Y-%m-%d",
-            ],
-            ["--calendar", title, "--dateformat", "yyyy-MM-dd"],
-        )
-        .unwrap_or_else(|_| {
-            let value = format(&tm, c"%Y-%m-%d");
-            crate::dialog::ask(
-                title,
+    reply: Reply<Result<(u64, [String; 2]), &'static str>>,
+) {
+    let title = title.to_owned();
+    let reply = reply
+        .map(move |answer: String| changed_date(timestamp, local_time(timestamp), field, &answer));
+    std::thread::spawn(move || {
+        let tm = local_time(timestamp);
+        let (asked, detail, value) = match field {
+            DateField::Date => (
+                dialog(
+                    &[
+                        "--calendar",
+                        &format!("--title={title}"),
+                        "--text=",
+                        &format!("--day={}", tm.tm_mday),
+                        &format!("--month={}", tm.tm_mon + 1),
+                        &format!("--year={}", tm.tm_year + 1900),
+                        "--date-format=%Y-%m-%d",
+                    ],
+                    &["--calendar", &title, "--dateformat", "yyyy-MM-dd"],
+                ),
                 "Date, as year-month-day:",
-                Ask::Entry { value: &value },
-            )
-        }),
-        DateField::Time => {
-            let current = format(&tm, c"%H:%M");
-            dialog(
-                [
-                    "--entry",
-                    &format!("--title={title}"),
-                    "--text=Time, as hours and minutes:",
-                    &format!("--entry-text={current}"),
-                ],
-                ["--inputbox", "Time, as hours and minutes:", &current],
-            )
-            .unwrap_or_else(|_| {
-                let value = Ask::Entry { value: &current };
-                crate::dialog::ask(title, "Time, as hours and minutes:", value)
-            })
+                format(&tm, c"%Y-%m-%d"),
+            ),
+            DateField::Time => {
+                let current = format(&tm, c"%H:%M");
+                let asked = dialog(
+                    &[
+                        "--entry",
+                        &format!("--title={title}"),
+                        "--text=Time, as hours and minutes:",
+                        &format!("--entry-text={current}"),
+                    ],
+                    &["--inputbox", "Time, as hours and minutes:", &current],
+                );
+                (asked, "Time, as hours and minutes:", current)
+            }
+        };
+        match asked {
+            Ok(Some(answer)) => reply.send(answer),
+            Ok(None) => {}
+            Err(_) => {
+                let ask = Ask::Entry { text: value, reply };
+                crate::dialog::show(title, detail.to_owned(), ask);
+            }
         }
-    };
-    let Some(answer) = answer else {
-        return Ok(None);
-    };
+    });
+}
+
+/// `timestamp` with `field` changed to what the user typed or chose, `answer`.
+fn changed_date(
+    timestamp: u64,
+    tm: libc::tm,
+    field: DateField,
+    answer: &str,
+) -> Result<(u64, [String; 2]), &'static str> {
     let numbers: Vec<i32> = answer
         .split(|c: char| !c.is_ascii_digit())
         .filter(|part| !part.is_empty())
         .map(|part| part.parse().unwrap_or(i32::MAX))
         .collect();
     let afternoon = answer.to_lowercase().contains("pm");
-    merge_date(timestamp, tm, field, &numbers, afternoon).map(Some)
+    merge_date(timestamp, tm, field, &numbers, afternoon)
 }
 
 fn merge_date(
@@ -1497,36 +1499,24 @@ fn merge_date(
     Ok((updated, date_labels(&tm)))
 }
 
-/// Runs zenity, or kdialog where zenity is missing; the answer is None when cancelled, and an
-/// error when neither is installed.
-fn dialog<const Z: usize, const K: usize>(
-    zenity: [&str; Z],
-    kdialog: [&str; K],
-) -> Result<Option<String>, &'static str> {
+/// Runs zenity, or kdialog where zenity is missing, waiting for the answer: None when
+/// cancelled, and an error when neither is installed.
+fn dialog(
+    zenity: &[impl AsRef<OsStr>],
+    kdialog: &[impl AsRef<OsStr>],
+) -> std::io::Result<Option<String>> {
     let output = Command::new("zenity")
         .args(zenity)
         .output()
-        .or_else(|_| Command::new("kdialog").args(kdialog).output())
-        .map_err(|_| "Install zenity or kdialog for Snowbound's dialogs.")?;
+        .or_else(|_| Command::new("kdialog").args(kdialog).output())?;
     Ok(output
         .status
         .success()
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
 }
 
-/// The path a file dialog answered; none when cancelled or when no tool could ask.
-fn picked(asked: Result<Option<String>, &str>) -> Option<PathBuf> {
-    asked
-        .unwrap_or_else(|error| {
-            eprintln!("{error}");
-            None
-        })
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-}
-
 /// Asks for a file to insert, one of `types` (extensions) unless empty, titled `title`.
-pub fn pick_file(title: &str, types: &[&str]) -> Option<PathBuf> {
+pub fn pick_file(title: &str, types: &[&str], reply: Reply<PathBuf>) {
     let globs: Vec<_> = types.iter().map(|kind| format!("*.{kind}")).collect();
     let patterns = match types {
         [] => "*".to_owned(),
@@ -1536,17 +1526,26 @@ pub fn pick_file(title: &str, types: &[&str]) -> Option<PathBuf> {
     if !globs.is_empty() {
         options.insert("filters", filters(&patterns, &globs));
     }
+    let types = types.iter().map(|kind| kind.to_string()).collect();
     choose(
         title,
         "OpenFile",
         options,
-        [
+        &[
             "--file-selection",
             &format!("--title={title}"),
             &format!("--file-filter={patterns}"),
         ],
-        ["--getopenfilename", ".", &patterns, "--title", title],
-    )
+        &["--getopenfilename", ".", &patterns, "--title", title],
+        move |reply| Ask::File {
+            folder: crate::dialog::start_folder(),
+            types,
+            save: false,
+            name: String::new(),
+            reply,
+        },
+        reply,
+    );
 }
 
 /// A file chooser's `filters` option: one filter, `name`, of `globs`.
@@ -1555,33 +1554,48 @@ fn filters(name: &str, globs: &[String]) -> Value<'static> {
     Value::from(vec![(name.to_owned(), globs)])
 }
 
-/// The file the file chooser portal answers `method` with, titled `title`, or where no portal
-/// answers, zenity's or kdialog's; None when cancelled.
-fn choose<const Z: usize, const K: usize>(
+/// Replies with the file the file chooser portal answers `method` with, titled `title`;
+/// where no portal answers, zenity's or kdialog's, given their arguments; and where neither
+/// is installed, Snowbound's `own`.
+fn choose(
     title: &str,
-    method: &str,
-    mut options: HashMap<&str, Value>,
-    zenity: [&str; Z],
-    kdialog: [&str; K],
-) -> Option<PathBuf> {
-    let chosen = portal("org.freedesktop.portal.FileChooser")
-        .map_err(Into::into)
-        .and_then(|chooser| {
-            portal_request(&chooser, |token| {
-                options.insert("handle_token", Value::from(token.to_owned()));
-                chooser.call(method, &("", title, &options))
-            })
-        });
-    let results = match chosen {
-        Ok(results) => results?,
-        Err(error) => {
-            eprintln!("The file chooser portal failed: {error}");
-            return picked(dialog(zenity, kdialog));
+    method: &'static str,
+    mut options: HashMap<&'static str, Value<'static>>,
+    zenity: &[&str],
+    kdialog: &[&str],
+    own: impl FnOnce(Reply<PathBuf>) -> Ask + Send + 'static,
+    reply: Reply<PathBuf>,
+) {
+    let title = title.to_owned();
+    let [zenity, kdialog]: [Vec<String>; 2] =
+        [zenity, kdialog].map(|args| args.iter().map(|arg| arg.to_string()).collect());
+    std::thread::spawn(move || {
+        let chosen = portal("org.freedesktop.portal.FileChooser")
+            .map_err(Into::into)
+            .and_then(|chooser| {
+                portal_request(&chooser, |token| {
+                    options.insert("handle_token", Value::from(token.to_owned()));
+                    chooser.call(method, &("", &title, &options))
+                })
+            });
+        let path = match chosen {
+            Ok(results) => results.and_then(|results| {
+                let uris: Vec<String> = results.get("uris")?.try_clone().ok()?.try_into().ok()?;
+                let path = uris.first()?.strip_prefix("file://")?;
+                Some(OsString::from_vec(crate::paste::percent_decode(path)).into())
+            }),
+            Err(error) => {
+                eprintln!("The file chooser portal failed: {error}");
+                match dialog(&zenity, &kdialog) {
+                    Ok(path) => path.filter(|path| !path.is_empty()).map(PathBuf::from),
+                    Err(_) => return crate::dialog::show(title, String::new(), own(reply)),
+                }
+            }
+        };
+        if let Some(path) = path {
+            reply.send(path);
         }
-    };
-    let uris: Vec<String> = results.get("uris")?.try_clone().ok()?.try_into().ok()?;
-    let path = uris.first()?.strip_prefix("file://")?;
-    Some(std::ffi::OsString::from_vec(crate::paste::percent_decode(path)).into())
+    });
 }
 
 /// The desktop portal's `interface`, whose calls give up after five seconds.
@@ -1678,45 +1692,65 @@ pub fn reveal(target: impl AsRef<std::ffi::OsStr>) {
     }
 }
 
-/// Asks whether to go ahead with `action`, through zenity or kdialog where installed.
-pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str) -> bool {
-    let status = Command::new("zenity")
-        .args([
-            "--question",
-            &format!("--title={message}"),
-            &format!("--text={detail}"),
-            &format!("--ok-label={action}"),
-            &format!("--cancel-label={cancel}"),
-        ])
-        .status()
-        .or_else(|_| {
-            Command::new("kdialog")
-                .args(["--warningcontinuecancel", detail, "--title", message])
-                .args(["--continue-label", action])
-                .status()
-        });
-    match status {
-        Ok(status) => status.success(),
-        Err(_) => crate::dialog::ask(message, detail, Ask::Question { cancel, action }).is_some(),
-    }
+/// Asks whether to go ahead with `action`, through zenity or kdialog where installed, or
+/// else Snowbound's own dialog.
+pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str, reply: Reply<()>) {
+    let [message, detail, cancel, action] = [message, detail, cancel, action].map(str::to_owned);
+    std::thread::spawn(move || {
+        let status = Command::new("zenity")
+            .args([
+                "--question",
+                &format!("--title={message}"),
+                &format!("--text={detail}"),
+                &format!("--ok-label={action}"),
+                &format!("--cancel-label={cancel}"),
+            ])
+            .status()
+            .or_else(|_| {
+                Command::new("kdialog")
+                    .args(["--warningcontinuecancel", &detail, "--title", &message])
+                    .args(["--continue-label", &action])
+                    .status()
+            });
+        match status {
+            Ok(status) if status.success() => reply.send(()),
+            Ok(_) => {}
+            Err(_) => {
+                let ask = Ask::Question {
+                    cancel,
+                    action,
+                    reply,
+                };
+                crate::dialog::show(message, detail, ask);
+            }
+        }
+    });
 }
 
-/// Asks for a notebook's table of contents or a section file, titled `title`; None when
-/// cancelled or when no tool can ask.
-pub fn pick_notebook(title: &str) -> Option<PathBuf> {
+/// Asks for a notebook's table of contents or a section file, titled `title`.
+pub fn pick_notebook(title: &str, reply: Reply<PathBuf>) {
     let name = "OneNote notebooks, sections and packages";
-    let globs = ["*.onetoc2", "*.one", "*.onepkg"].map(String::from);
+    let types = ["onetoc2", "one", "onepkg"];
+    let globs = types.map(|kind| format!("*.{kind}"));
     choose(
         title,
         "OpenFile",
         HashMap::from([("filters", filters(name, &globs))]),
-        [
+        &[
             "--file-selection",
             &format!("--title={title}"),
             &format!("--file-filter={name} | {}", globs.join(" ")),
         ],
-        ["--getopenfilename", ".", &globs.join(" "), "--title", title],
-    )
+        &["--getopenfilename", ".", &globs.join(" "), "--title", title],
+        move |reply| Ask::File {
+            folder: crate::dialog::start_folder(),
+            types: types.map(String::from).to_vec(),
+            save: false,
+            name: String::new(),
+            reply,
+        },
+        reply,
+    );
 }
 
 /// Asks where to put something named `name` by default, in `folder` where given, with
@@ -1726,29 +1760,42 @@ pub fn pick_new(
     name: &str,
     action: &str,
     folder: Option<&std::path::Path>,
-) -> Option<PathBuf> {
+    reply: Reply<PathBuf>,
+) {
     use std::os::unix::ffi::OsStrExt;
     let mut options = HashMap::from([
-        ("current_name", Value::from(name)),
-        ("accept_label", Value::from(action)),
+        ("current_name", Value::from(name.to_owned())),
+        ("accept_label", Value::from(action.to_owned())),
     ]);
     if let Some(folder) = folder {
         let mut bytes = folder.as_os_str().as_bytes().to_vec();
         bytes.push(0);
         options.insert("current_folder", Value::from(bytes));
     }
+    let (named, folder) = (
+        name.to_owned(),
+        folder.map_or_else(crate::dialog::start_folder, Into::into),
+    );
     choose(
         title,
         "SaveFile",
         options,
-        [
+        &[
             "--file-selection",
             "--save",
             &format!("--title={title}"),
             &format!("--filename={name}"),
         ],
-        ["--getsavefilename", name, "--title", title],
-    )
+        &["--getsavefilename", name, "--title", title],
+        move |reply| Ask::File {
+            folder,
+            types: Vec::new(),
+            save: true,
+            name: named,
+            reply,
+        },
+        reply,
+    );
 }
 
 /// Tells the user something they asked for could not be done: `message`, then what to do.
@@ -1779,7 +1826,7 @@ fn show([zenity, kdialog]: [&'static str; 2], message: &str, detail: &str) {
                     .status()
             });
         if shown.is_err() {
-            crate::dialog::ask(&title, &text, Ask::Message);
+            crate::dialog::show(title, text, Ask::Message);
         }
     });
 }

@@ -214,8 +214,48 @@ const DATE_OUT_OF_RANGE: &str = "This date is outside the notebook's supported r
 
 type Continuation = Box<dyn FnOnce(&mut State) -> Result<(), Box<dyn Error>> + Send>;
 
+/// What follows a dialog's answer, run on the event loop. Dialogs never wait on the event
+/// loop's thread, so the window keeps drawing and other apps can paste what it copied while
+/// one is open; one cancelled drops its reply unanswered.
+struct Reply<T>(Box<dyn FnOnce(T) + Send>);
+
+impl<T: Send + 'static> Reply<T> {
+    fn new(
+        proxy: &EventLoopProxy<UserEvent>,
+        then: impl FnOnce(&mut State, T) -> Result<(), Box<dyn Error>> + Send + 'static,
+    ) -> Self {
+        let proxy = proxy.clone();
+        Self(Box::new(move |answer| {
+            let _ = proxy.send_event(UserEvent::Then(Box::new(move |state| then(state, answer))));
+        }))
+    }
+
+    fn send(self, answer: T) {
+        (self.0)(answer);
+    }
+
+    /// The reply that sends `convert`'s answer here.
+    #[cfg(target_os = "linux")]
+    fn map<U>(self, convert: impl FnOnce(U) -> T + Send + 'static) -> Reply<U> {
+        Reply(Box::new(move |answer| self.send(convert(answer))))
+    }
+
+    /// Sends what `ask` answers, waiting on its dialog on a thread of its own.
+    #[cfg(windows)]
+    fn after(self, ask: impl FnOnce() -> Option<T> + Send + 'static) {
+        std::thread::spawn(move || {
+            if let Some(answer) = ask() {
+                self.send(answer);
+            }
+        });
+    }
+}
+
 enum UserEvent {
     Quit,
+    /// Quits without asking, as after the user agreed to discard a temporary page.
+    #[cfg(not(target_arch = "wasm32"))]
+    Exit,
     /// Text AppKit inserts outside key events, such as the character palette's.
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     InsertText(String),
@@ -750,6 +790,9 @@ struct State {
     save_as: Option<save_as::Dialog>,
     /// Unpack Notebook while it is open.
     unpacking: Option<unpack::Dialog>,
+    /// Snowbound's own dialogs, first the one shown, where the desktop has none.
+    #[cfg(target_os = "linux")]
+    asking: std::collections::VecDeque<dialog::Dialog>,
     /// What has been read in each notebook, on this computer.
     reads: unread::Reads,
     /// Open Notebook from Server while it is open.
@@ -1125,6 +1168,8 @@ impl State {
             symbols: None,
             save_as: None,
             unpacking: None,
+            #[cfg(target_os = "linux")]
+            asking: Default::default(),
             reads,
             server: None,
             new_icloud: None,
@@ -1301,6 +1346,8 @@ impl State {
         self.save_as_dialog();
         self.unpack_dialog();
         self.password_dialog()?;
+        #[cfg(target_os = "linux")]
+        self.own_dialog();
         self.customize_tags();
         self.palette();
         self.sync_popup()?;
@@ -3138,13 +3185,15 @@ impl State {
             Command::RestoreVersion { page, version } => self.restore_version(page, version)?,
             Command::DeletePageVersion { page, version } => self.delete_version(page, version)?,
             Command::DeleteAllVersions(scope) => self.delete_all_versions(scope)?,
-            Command::OpenNotebook => {
-                if let Some(path) = platform::pick_notebook("Open Notebook") {
-                    self.open_path(&path);
-                }
-            }
+            Command::OpenNotebook => platform::pick_notebook(
+                "Open Notebook",
+                self.reply(|state, path: PathBuf| {
+                    state.open_path(&path);
+                    Ok(())
+                }),
+            ),
             Command::OpenFromServer(location) => self.open_server(location.as_deref()),
-            Command::NewNotebook => self.new_notebook()?,
+            Command::NewNotebook => self.new_notebook(),
             Command::NewICloudNotebook => self.new_icloud_notebook(),
             Command::OpenGuide => self.open_guide()?,
             #[cfg(target_os = "linux")]
@@ -3172,7 +3221,7 @@ impl State {
                 self.edited(Vec::new());
             }
             Command::Template(choice) => self.apply_template(choice)?,
-            Command::Page(Request::EditDate(field)) => self.edit_date(field)?,
+            Command::Page(Request::EditDate(field)) => self.edit_date(field),
             Command::Page(Request::Copy(clip)) => self.clipboard.set(clip)?,
             Command::Page(Request::Paste) => self.paste()?,
             Command::Page(Request::OpenLink(address)) => self.open_link(&address)?,
@@ -3561,9 +3610,9 @@ impl State {
         }
     }
 
-    fn edit_date(&mut self, field: DateField) -> Result<(), Box<dyn Error>> {
+    fn edit_date(&mut self, field: DateField) {
         let Some(date) = self.view.editor.date() else {
-            return Ok(());
+            return;
         };
         let timestamp = date.timestamp();
         self.view.editor.finish_composition();
@@ -3572,12 +3621,30 @@ impl State {
             DateField::Date => "Change Page Date",
             DateField::Time => "Change Page Time",
         };
-        if let Some((timestamp, text)) = platform::edit_date(timestamp, field, title)? {
-            let response = self.view.change_date(timestamp, text)?;
-            self.respond(response);
-            self.window.request_redraw();
-        }
-        Ok(())
+        let page = self.session.as_ref().map(|session| session.space);
+        let reply = self.reply(
+            move |state, chosen: Result<(u64, [String; 2]), &'static str>| {
+                let (changed, text) = chosen?;
+                // The answer belongs to the page that asked, unless another has opened since.
+                if state.session.as_ref().map(|session| session.space) != page
+                    || state.view.editor.date().map(|date| date.timestamp()) != Some(timestamp)
+                {
+                    return Ok(());
+                }
+                let response = state.view.change_date(changed, text)?;
+                state.respond(response);
+                Ok(())
+            },
+        );
+        platform::edit_date(timestamp, field, title, reply);
+    }
+
+    /// Where a dialog's answer goes: `then`, run with it on the event loop.
+    fn reply<T: Send + 'static>(
+        &self,
+        then: impl FnOnce(&mut State, T) -> Result<(), Box<dyn Error>> + Send + 'static,
+    ) -> Reply<T> {
+        Reply::new(&self.proxy, then)
     }
 
     /// The open conflict page's conflicting changes in page order: each text's outline,
@@ -3970,7 +4037,7 @@ impl State {
         }
         if let Some(field) = self.accessibility.date_for_node(request.target_node) {
             if request.action == Action::Click {
-                self.edit_date(field)?;
+                self.edit_date(field);
             }
             return Ok(());
         }
@@ -5491,6 +5558,8 @@ impl State {
         match event {
             // The event loop quits; a page stays open.
             UserEvent::Quit | UserEvent::Replay(Replay::Quit) => {}
+            #[cfg(not(target_arch = "wasm32"))]
+            UserEvent::Exit => {}
             UserEvent::Picture(bytes) => {
                 if let Err(error) = self.insert_picture(bytes, None) {
                     eprintln!("{error}");
@@ -5607,35 +5676,44 @@ impl State {
 #[cfg(not(target_arch = "wasm32"))]
 impl App {
     fn close(&self, event_loop: &ActiveEventLoop) {
-        if self.state.as_ref().is_none_or(|state| {
+        let Some(state) = self.state.as_ref().filter(|state| {
             let editor = &state.view.editor;
-            state.session.is_some()
-                || editor.caret_outline().is_none_or(TextOutline::is_empty)
-                    && state.initial_date == editor.date().map(|date| date.timestamp())
-                    && state
-                        .initial_layouts
+            let unchanged = editor.caret_outline().is_none_or(TextOutline::is_empty)
+                && state.initial_date == editor.date().map(|date| date.timestamp())
+                && state
+                    .initial_layouts
+                    .iter()
+                    .map(|(id, layout)| (*id, layout))
+                    .eq(editor.object_layouts())
+                && state
+                    .initial
+                    .iter()
+                    .map(|(id, document)| (id, document))
+                    .eq(editor
+                        .outlines()
                         .iter()
-                        .map(|(id, layout)| (*id, layout))
-                        .eq(editor.object_layouts())
-                    && state
-                        .initial
-                        .iter()
-                        .map(|(id, document)| (id, document))
-                        .eq(editor
-                            .outlines()
-                            .iter()
-                            .map(|outline| (&outline.id, outline.document())))
-        }) || platform::confirm(
+                        .map(|outline| (&outline.id, outline.document())));
+            state.session.is_none() && !unchanged
+        }) else {
+            return self.exit(event_loop);
+        };
+        platform::confirm(
             "Discard this page?",
             "This temporary page has no saved copy. Closing it will discard your edits.",
             "Keep Editing",
             "Discard Changes",
-        ) {
-            if let Some(state) = &self.state {
-                state.publish_now(QUIT_PUBLISH);
-            }
-            event_loop.exit();
+            state.reply(|state, ()| {
+                let _ = state.proxy.send_event(UserEvent::Exit);
+                Ok(())
+            }),
+        );
+    }
+
+    fn exit(&self, event_loop: &ActiveEventLoop) {
+        if let Some(state) = &self.state {
+            state.publish_now(QUIT_PUBLISH);
         }
+        event_loop.exit();
     }
 }
 
@@ -5658,6 +5736,7 @@ impl ApplicationHandler<UserEvent> for App {
         };
         match event {
             UserEvent::Quit | UserEvent::Replay(Replay::Quit) => self.close(event_loop),
+            UserEvent::Exit => self.exit(event_loop),
             event => state.user_event(event),
         }
     }
@@ -5996,14 +6075,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     #[cfg(target_os = "linux")]
     loader::preload();
-    // Before the crash log, which the app showing the dialog keeps writing.
-    #[cfg(target_os = "linux")]
-    if std::env::args_os()
-        .nth(1)
-        .is_some_and(|arg| arg == dialog::DIALOG)
-    {
-        return dialog::run(std::env::args_os().skip(2));
-    }
     platform::with_pool(launch)
 }
 

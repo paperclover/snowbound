@@ -362,16 +362,42 @@ export function shortDate(ms) {
   return new Date(ms).toLocaleDateString();
 }
 
-export function askConfirm(message) {
-  return confirm(message);
+/** Shows `message` and `detail` in a dialog over the page, with a field holding `value`
+ * unless that is undefined, and `buttons`, the first the default. Resolves to the index of
+ * the button pressed, -1 when dismissed, and the field's text. */
+function ask(message, detail, buttons, value) {
+  const dialog = Object.assign(document.createElement("dialog"), { className: "ask" });
+  const form = Object.assign(document.createElement("form"), { method: "dialog" });
+  const field = value === undefined ? null : Object.assign(document.createElement("input"), { value });
+  const row = document.createElement("div");
+  row.append(...buttons.map((label, index) =>
+    Object.assign(document.createElement("button"), { value: index, textContent: label })));
+  form.append(...[field, row].filter(Boolean));
+  dialog.append(Object.assign(document.createElement("h1"), { textContent: message }));
+  if (detail) dialog.append(Object.assign(document.createElement("p"), { textContent: detail }));
+  dialog.append(form);
+  document.body.append(dialog);
+  dialog.showModal();
+  return new Promise((resolve) =>
+    dialog.addEventListener("close", () => {
+      dialog.remove();
+      resolve([dialog.returnValue === "" ? -1 : Number(dialog.returnValue), field?.value]);
+    }),
+  );
+}
+
+export function askConfirm(message, detail, cancel, action) {
+  return ask(message, detail, [action, cancel]).then(([pressed]) => pressed === 0);
 }
 
 export function askText(message, value) {
-  return prompt(message, value) ?? undefined;
+  return ask(message, "", ["OK", "Cancel"], value).then(([pressed, text]) =>
+    pressed === 0 ? text : undefined,
+  );
 }
 
-export function tell(message) {
-  alert(message);
+export function tell(message, detail) {
+  ask(message, detail, ["OK"]);
 }
 
 export function openLink(url) {

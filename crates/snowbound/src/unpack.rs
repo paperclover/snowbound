@@ -172,16 +172,25 @@ impl State {
         let create = ui::button(ui, "create", "Create").clicked || entered;
         ui.close();
         ui.close();
-        if browse
-            && let Some(chosen) =
-                platform::pick_new(TITLE, dialog.name.trim(), "Choose", Some(&dialog.folder))
-        {
-            if let Some(name) = chosen.file_name() {
-                dialog.name = name.to_string_lossy().into_owned();
-            }
-            if let Some(parent) = chosen.parent() {
-                dialog.folder = parent.to_owned();
-            }
+        if browse {
+            let reply = crate::Reply::new(&self.proxy, |state, chosen: PathBuf| {
+                if let Some(dialog) = &mut state.unpacking {
+                    if let Some(name) = chosen.file_name() {
+                        dialog.name = name.to_string_lossy().into_owned();
+                    }
+                    if let Some(parent) = chosen.parent() {
+                        dialog.folder = parent.to_owned();
+                    }
+                }
+                Ok(())
+            });
+            platform::pick_new(
+                TITLE,
+                dialog.name.trim(),
+                "Choose",
+                Some(&dialog.folder),
+                reply,
+            );
         }
         let name = dialog.name.trim();
         let valid =

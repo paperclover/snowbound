@@ -188,7 +188,7 @@ impl State {
 
     /// Delete All Versions in the section, its group or the notebook, once confirmed.
     pub(crate) fn delete_all_versions(&mut self, scope: Scope) -> Result<(), Box<dyn Error>> {
-        let session = self.session.as_mut().ok_or("No section is open")?;
+        let session = self.session.as_ref().ok_or("No section is open")?;
         let tab = &session.tabs[session.tab];
         let (open, section) = (tab.path.clone(), tab.name.clone());
         let folder = open
@@ -203,14 +203,31 @@ impl State {
             ),
             Scope::Notebook => ("notebook", session.library.name.clone()),
         };
-        if !platform::confirm(
+        let asked = Arc::clone(&session.library);
+        platform::confirm(
             &format!("Do you want to delete all page versions in the {container} \"{name}\"?"),
             "You can't restore these versions afterward.",
             "Cancel",
             "Delete Versions",
-        ) {
+            self.reply(move |state, ()| state.clear_versions(scope, &asked, open, folder)),
+        );
+        Ok(())
+    }
+
+    /// Deletes every page version in `scope` around `open`, the section in `library` that
+    /// was shown when asked; nothing once another is shown.
+    fn clear_versions(
+        &mut self,
+        scope: Scope,
+        library: &Arc<Library>,
+        open: String,
+        folder: String,
+    ) -> Result<(), Box<dyn Error>> {
+        let Some(session) = self.session.as_mut().filter(|session| {
+            Arc::ptr_eq(&session.library, library) && session.tabs[session.tab].path == open
+        }) else {
             return Ok(());
-        }
+        };
         clear(&session.section)?;
         session.refresh_history()?;
         if session.version.is_some() {

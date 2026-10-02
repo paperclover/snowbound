@@ -1558,17 +1558,16 @@ impl State {
                 return Ok(());
             }
             Id::Picture => {
-                let Some(path) = platform::pick_file("Insert Picture", &crate::PICTURE_TYPES)
-                else {
-                    return Ok(());
-                };
-                return self.insert_picture(notebook::fs::read(path)?, None);
+                let reply = self.reply(|state, path: std::path::PathBuf| {
+                    state.insert_picture(notebook::fs::read(path)?, None)
+                });
+                platform::pick_file("Insert Picture", &crate::PICTURE_TYPES, reply);
+                return Ok(());
             }
             Id::Attachment => {
-                let Some(path) = platform::pick_file("Attach File", &[]) else {
-                    return Ok(());
-                };
-                return self.attach(&path, None);
+                let reply = self.reply(|state, path: std::path::PathBuf| state.attach(&path, None));
+                platform::pick_file("Attach File", &[], reply);
+                return Ok(());
             }
             Id::ScreenClipping => {
                 #[cfg(target_os = "macos")]

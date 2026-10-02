@@ -308,18 +308,6 @@ impl State {
             Scope::Section => tab.name.clone(),
             Scope::Notebook => session.library.name.clone(),
         };
-        let destination = if export {
-            let name = format!("{}.pdf", file_name(&title));
-            let Some(mut path) = platform::pick_new("Export as PDF", &name, "Export", None) else {
-                return Ok(());
-            };
-            if path.extension().is_none() {
-                path.set_extension("pdf");
-            }
-            Some(path)
-        } else {
-            None
-        };
         // Other sections are opened on the thread, in the notebook's order.
         let others = match setup.scope {
             Scope::Notebook => notebook_tabs(&session.library),
@@ -343,7 +331,8 @@ impl State {
             footer: setup.footer,
         };
         let whole = matches!(setup.scope, Scope::Section | Scope::Notebook);
-        crate::spawn(move || {
+        let name = format!("{}.pdf", file_name(&title));
+        let print = move |destination: Option<std::path::PathBuf>| {
             let made = (|| -> Result<Vec<u8>, Box<dyn Error>> {
                 let mut open = Some(open);
                 let this = spaces
@@ -399,7 +388,19 @@ impl State {
                 }
                 .inspect_err(|error| platform::alert(failed, &error.to_string()))
             })));
+        };
+        if !export {
+            crate::spawn(move || print(None));
+            return Ok(());
+        }
+        let reply = self.reply(|_, mut path: std::path::PathBuf| {
+            if path.extension().is_none() {
+                path.set_extension("pdf");
+            }
+            crate::spawn(move || print(Some(path)));
+            Ok(())
         });
+        platform::pick_new("Export as PDF", &name, "Export", None, reply);
         Ok(())
     }
 }

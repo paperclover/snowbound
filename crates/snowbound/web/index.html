@@ -23,6 +23,16 @@
     position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
     font: 14px system-ui, sans-serif; padding: 6px 14px;
   }
+  /* Dialogs (`ask` in glue.js); the default button is first in order and last in the row. */
+  dialog.ask {
+    color-scheme: light dark; width: min(420px, 90vw); box-sizing: border-box; padding: 20px;
+    border: 0; border-radius: 10px; box-shadow: 0 8px 32px #0004; font: 14px system-ui, sans-serif;
+  }
+  dialog.ask::backdrop { background: #0002; }
+  dialog.ask h1 { margin: 0 0 8px; font-size: 15px; }
+  dialog.ask p { margin: 0; white-space: pre-line; }
+  dialog.ask input { box-sizing: border-box; width: 100%; font: inherit; }
+  dialog.ask div { display: flex; flex-direction: row-reverse; gap: 8px; margin-top: 16px; }
   #status {
     position: fixed; inset: 0; display: grid; place-items: center;
     font: 15px system-ui, sans-serif; color: #666; pointer-events: none;

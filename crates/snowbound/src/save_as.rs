@@ -175,54 +175,55 @@ impl State {
             Scope::Notebook => library.name.clone(),
         };
         let name = format!("{}.{extension}", print::file_name(&title));
-        let Some(mut path) = platform::pick_new("Save As", &name, "Save", None) else {
-            return Ok(());
-        };
-        if path.extension().is_none() {
-            path.set_extension(extension);
-        }
         let (scope, author, proxy) = (dialog.scope, self.author.clone(), self.proxy.clone());
         let color = (library
             .tabs(crate::menus::folder(&section).as_str())
             .into_iter())
         .find(|tab| tab.path == section)
         .and_then(|tab| tab.color);
-        crate::spawn(move || {
-            let written = (|| -> Result<(), Box<dyn Error>> {
-                let image = |path: &str| {
-                    let (_, replica, _) = open.as_ref().filter(|(open, ..)| open == path)?;
-                    replica.snapshot().ok()
-                };
-                let bytes = match scope {
-                    Scope::Page => {
-                        let (_, replica, space) = open.as_ref().ok_or("No page is open")?;
-                        let page = replica.page(*space)?;
-                        let file = file_name(&path);
-                        package::page_section(&page, &file, color, &author)?
-                    }
-                    Scope::Section => {
-                        let stored = match image(&section) {
-                            Some(image) => image,
-                            None => library.reopen()?.read_section(&section)?,
-                        };
-                        package::section_copy(stored)?
-                    }
-                    Scope::Notebook => {
-                        let notebook = library.reopen()?;
-                        package::pack(package::notebook_files(&notebook, image)?)?
-                    }
-                };
-                notebook::fs::write(&path, bytes)?;
-                Ok(())
-            })();
-            let written = written.map_err(|error| error.to_string());
-            let _ = proxy.send_event(UserEvent::Then(Box::new(move |_| {
-                written.map_err(|error| {
-                    platform::alert("Couldn't save", &error);
-                    error.into()
-                })
-            })));
+        let reply = self.reply(move |_, mut path: std::path::PathBuf| {
+            if path.extension().is_none() {
+                path.set_extension(extension);
+            }
+            crate::spawn(move || {
+                let written = (|| -> Result<(), Box<dyn Error>> {
+                    let image = |path: &str| {
+                        let (_, replica, _) = open.as_ref().filter(|(open, ..)| open == path)?;
+                        replica.snapshot().ok()
+                    };
+                    let bytes = match scope {
+                        Scope::Page => {
+                            let (_, replica, space) = open.as_ref().ok_or("No page is open")?;
+                            let page = replica.page(*space)?;
+                            let file = file_name(&path);
+                            package::page_section(&page, &file, color, &author)?
+                        }
+                        Scope::Section => {
+                            let stored = match image(&section) {
+                                Some(image) => image,
+                                None => library.reopen()?.read_section(&section)?,
+                            };
+                            package::section_copy(stored)?
+                        }
+                        Scope::Notebook => {
+                            let notebook = library.reopen()?;
+                            package::pack(package::notebook_files(&notebook, image)?)?
+                        }
+                    };
+                    notebook::fs::write(&path, bytes)?;
+                    Ok(())
+                })();
+                let written = written.map_err(|error| error.to_string());
+                let _ = proxy.send_event(UserEvent::Then(Box::new(move |_| {
+                    written.map_err(|error| {
+                        platform::alert("Couldn't save", &error);
+                        error.into()
+                    })
+                })));
+            });
+            Ok(())
         });
+        platform::pick_new("Save As", &name, "Save", None, reply);
         Ok(())
     }
 }

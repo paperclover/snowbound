@@ -642,32 +642,32 @@ impl State {
             return;
         };
         match status {
-            Status::Ready(version, _, changes) => {
-                if platform::confirm(
-                    "Update ready",
-                    &described(
-                        format!("Snowbound {version} is ready to install."),
-                        &changes,
-                    ),
-                    "Later",
-                    "Restart to Update",
-                ) {
-                    self.restart_to_update();
-                }
-            }
-            Status::Available(version, changes) => {
-                if platform::confirm(
-                    "Update available",
-                    &described(
-                        format!("Download Snowbound {version} from its build folder."),
-                        &changes,
-                    ),
-                    "Later",
-                    "Open Build Folder",
-                ) {
+            Status::Ready(version, _, changes) => platform::confirm(
+                "Update ready",
+                &described(
+                    format!("Snowbound {version} is ready to install."),
+                    &changes,
+                ),
+                "Later",
+                "Restart to Update",
+                self.reply(|state, ()| {
+                    state.restart_to_update();
+                    Ok(())
+                }),
+            ),
+            Status::Available(version, changes) => platform::confirm(
+                "Update available",
+                &described(
+                    format!("Download Snowbound {version} from its build folder."),
+                    &changes,
+                ),
+                "Later",
+                "Open Build Folder",
+                self.reply(move |_, ()| {
                     show_build(&version);
-                }
-            }
+                    Ok(())
+                }),
+            ),
             Status::UpToDate => platform::alert(
                 "Snowbound is up to date",
                 &format!("You have {}.", describe_running()),

@@ -261,14 +261,16 @@ impl State {
 
     /// Asks where to create a notebook and creates it, as File, New does in OneNote; the
     /// panel starts in iCloud Drive, as Notes keeps notes there.
-    pub(crate) fn new_notebook(&mut self) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn new_notebook(&mut self) {
         let icloud = crate::icloud::folder().or_else(crate::icloud::drive);
-        let Some(root) =
-            platform::pick_new("New Notebook", "My Notebook", "Create", icloud.as_deref())
-        else {
-            return Ok(());
-        };
-        self.create_notebook(root)
+        let reply = self.reply(|state, root| state.create_notebook(root));
+        platform::pick_new(
+            "New Notebook",
+            "My Notebook",
+            "Create",
+            icloud.as_deref(),
+            reply,
+        );
     }
 
     /// New iCloud Notebook: asks for a name, the first free of "iCloud Notebook", "iCloud

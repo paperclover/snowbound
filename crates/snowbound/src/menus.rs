@@ -649,24 +649,45 @@ impl State {
                 });
                 None
             }
-            (Target::Section { library, path }, Action::Delete) => platform::confirm(
-                "Are you sure you want to move this section to this notebook's Recycle Bin?",
-                &path,
-                "Cancel",
-                "Delete",
-            )
-            .then(|| Command::Structure(library, Structure::Delete { path })),
-            (Target::Group { library, path }, Action::Delete) => platform::confirm(
-                "Are you sure you want to move the sections in this section group to this notebook's Recycle Bin?",
-                path.rsplit('/').next().unwrap_or_default(),
-                "Cancel",
-                "Delete",
-            )
-            .then(|| Command::Structure(library, Structure::Delete { path })),
+            (Target::Section { library, path }, Action::Delete) => {
+                platform::confirm(
+                    "Are you sure you want to move this section to this notebook's Recycle Bin?",
+                    &path.clone(),
+                    "Cancel",
+                    "Delete",
+                    self.reply(|state, ()| {
+                        let change = Structure::Delete { path };
+                        state.commands.push(Command::Structure(library, change));
+                        Ok(())
+                    }),
+                );
+                None
+            }
+            (Target::Group { library, path }, Action::Delete) => {
+                platform::confirm(
+                    "Are you sure you want to move the sections in this section group to this notebook's Recycle Bin?",
+                    path.rsplit('/')
+                        .next()
+                        .unwrap_or_default()
+                        .to_owned()
+                        .as_str(),
+                    "Cancel",
+                    "Delete",
+                    self.reply(|state, ()| {
+                        let change = Structure::Delete { path };
+                        state.commands.push(Command::Structure(library, change));
+                        Ok(())
+                    }),
+                );
+                None
+            }
             (
                 Target::Section { library, path } | Target::Group { library, path },
                 Action::MoveTo(folder),
-            ) => Some(Command::Structure(library, Structure::Move { path, folder })),
+            ) => Some(Command::Structure(
+                library,
+                Structure::Move { path, folder },
+            )),
             (Target::Section { library, path }, Action::Theme) => {
                 if let Some(identity) = library.section_identity(&path) {
                     let scope = notebook::sidecar::themes::Scope::section(identity);
@@ -710,7 +731,10 @@ impl State {
                 {
                     session.section.wake();
                 }
-                library.background.iter().for_each(|background| background.wake());
+                library
+                    .background
+                    .iter()
+                    .for_each(|background| background.wake());
                 None
             }
             (Target::Notebook(library), Action::CopyLink) => {

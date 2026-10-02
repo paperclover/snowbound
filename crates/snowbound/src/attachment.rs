@@ -82,9 +82,9 @@ impl State {
             unstored();
             return Ok(());
         };
-        if let Some(path) = platform::pick_new("Save As", &file.filename, "Save", None) {
-            notebook::fs::write(path, bytes)?;
-        }
+        let bytes = bytes.clone();
+        let reply = self.reply(move |_, path| Ok(notebook::fs::write(path, bytes)?));
+        platform::pick_new("Save As", &file.filename, "Save", None, reply);
         Ok(())
     }
 }

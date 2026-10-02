@@ -77,7 +77,9 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   popover menus on GNOME, shown and hidden at once as GTK 4 does, and Breeze's
   on KDE, faded as KWin fades popups and scaled by Plasma's animation speed.
   The desktop is read once from `XDG_CURRENT_DESKTOP`; elsewhere the kit's own.
-- zenity or kdialog provide the pickers and alerts. The XDG settings portal
+- The desktop portal provides the file pickers, zenity or kdialog the alerts,
+  and where neither can, Snowbound asks with the kit's own dialogs in the
+  window. No dialog waits on the event loop's thread. The XDG settings portal
   provides the colour scheme. Text conventions come from the C library's
   locale. Fontconfig is loaded at run time, so builds need no headers for it,
   and so is Enchant, which checks spelling with whatever dictionaries its

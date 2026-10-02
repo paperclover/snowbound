@@ -3,7 +3,7 @@
 //! event loop are stand-ins with the calls `State` makes of winit's; menus are the kit's own,
 //! as on Linux; the browser's chords stay the browser's. See arc/platforms.md.
 
-use crate::{State, UserEvent, commands, page, settings};
+use crate::{Reply, State, UserEvent, commands, page, settings};
 use canvas::date::DateField;
 use std::{
     cell::{Cell, RefCell},
@@ -60,12 +60,14 @@ extern "C" {
     fn date_strings(ms: f64) -> Vec<String>;
     #[wasm_bindgen(js_name = shortDate)]
     fn short_date_string(ms: f64) -> String;
+    /// Resolves to whether the user chose `action` over `cancel`.
     #[wasm_bindgen(js_name = askConfirm)]
-    fn ask_confirm(message: &str) -> bool;
+    fn ask_confirm(message: &str, detail: &str, cancel: &str, action: &str) -> js_sys::Promise;
+    /// Resolves to the text the user enters, starting as `value`; undefined when cancelled.
     #[wasm_bindgen(js_name = askText)]
-    fn ask_text(message: &str, value: &str) -> Option<String>;
+    fn ask_text(message: &str, value: &str) -> js_sys::Promise;
     #[wasm_bindgen(js_name = tell)]
-    fn tell(message: &str);
+    fn tell(message: &str, detail: &str);
     #[wasm_bindgen(js_name = openLink)]
     fn open_link(url: &str);
     /// Writes changes out: `[path]` removed, `[path, null]` a folder, and `[path, length,
@@ -644,14 +646,23 @@ pub fn date_text(filetime: u64) -> [String; 2] {
     ]
 }
 
+/// Runs `then` with what the glue's dialog resolves `asked` to, once the user answers.
+fn answered(asked: js_sys::Promise, then: impl FnOnce(JsValue) + 'static) {
+    wasm_bindgen_futures::spawn_local(async move {
+        if let Ok(answer) = wasm_bindgen_futures::JsFuture::from(asked).await {
+            then(answer);
+        }
+    });
+}
+
 /// Asks for the page's date as `YYYY-MM-DD`, or its time as `HH:MM`.
 pub fn edit_date(
     timestamp: u64,
     field: DateField,
     title: &str,
-) -> Result<Option<(u64, [String; 2])>, &'static str> {
-    let ms = unix_ms(timestamp);
-    let date = js_sys::Date::new(&ms.into());
+    reply: Reply<Result<(u64, [String; 2]), &'static str>>,
+) {
+    let date = js_sys::Date::new(&unix_ms(timestamp).into());
     let current = match field {
         DateField::Date => format!(
             "{:04}-{:02}-{:02}",
@@ -661,9 +672,20 @@ pub fn edit_date(
         ),
         DateField::Time => format!("{:02}:{:02}", date.get_hours(), date.get_minutes()),
     };
-    let Some(answer) = ask_text(title, &current) else {
-        return Ok(None);
-    };
+    answered(ask_text(title, &current), move |answer| {
+        if let Some(answer) = answer.as_string() {
+            reply.send(changed_date(timestamp, field, &answer));
+        }
+    });
+}
+
+/// `timestamp` with `field` changed to what the user typed, `answer`.
+fn changed_date(
+    timestamp: u64,
+    field: DateField,
+    answer: &str,
+) -> Result<(u64, [String; 2]), &'static str> {
+    let date = js_sys::Date::new(&unix_ms(timestamp).into());
     let numbers: Vec<u32> = answer
         .split(|c: char| !c.is_ascii_digit())
         .filter(|part| !part.is_empty())
@@ -686,44 +708,53 @@ pub fn edit_date(
         .checked_mul(10_000_000)
         .and_then(|ticks| ticks.checked_add(timestamp % 10_000_000))
         .ok_or(crate::DATE_OUT_OF_RANGE)?;
-    Ok(Some((updated, date_text(updated))))
+    Ok((updated, date_text(updated)))
 }
 
 /// Asks for a file to insert; once chosen it goes to the caret, as a dropped file does.
-pub fn pick_file(_: &str, types: &[&str]) -> Option<PathBuf> {
+pub fn pick_file(_: &str, types: &[&str], _: Reply<PathBuf>) {
     let accept: Vec<String> = types.iter().map(|kind| format!(".{kind}")).collect();
     pick_files("place", &accept.join(","));
-    None
 }
 
 /// Asks for notebooks, sections or packages to open; they open once read.
-pub fn pick_notebook(_: &str) -> Option<PathBuf> {
+pub fn pick_notebook(_: &str, _: Reply<PathBuf>) {
     pick_notebook_files();
-    None
 }
 
 /// A new notebook goes in the browser's notebooks, under a name not yet taken; anything else
 /// asked a place goes there too, then downloads.
-pub fn pick_new(title: &str, name: &str, _: &str, _: Option<&Path>) -> Option<PathBuf> {
-    let name = ask_text(title, name)?;
-    let name = name.trim().replace(['/', '\\'], " ");
-    let folder = Path::new(NOTEBOOKS);
-    let _ = notebook::fs::create_dir_all(folder);
-    let mut path = folder.join(&name);
-    let mut number = 2;
-    while notebook::fs::metadata(&path).is_ok() {
-        path = folder.join(format!("{name} {number}"));
-        number += 1;
-    }
-    Some(path)
+pub fn pick_new(title: &str, name: &str, _: &str, _: Option<&Path>, reply: Reply<PathBuf>) {
+    answered(ask_text(title, name), move |answer| {
+        let Some(name) = answer.as_string() else {
+            return;
+        };
+        let name = name.trim().replace(['/', '\\'], " ");
+        let folder = Path::new(NOTEBOOKS);
+        let _ = notebook::fs::create_dir_all(folder);
+        let mut path = folder.join(&name);
+        let mut number = 2;
+        while notebook::fs::metadata(&path).is_ok() {
+            path = folder.join(format!("{name} {number}"));
+            number += 1;
+        }
+        reply.send(path);
+    });
 }
 
-pub fn confirm(message: &str, detail: &str, _: &str, _: &str) -> bool {
-    ask_confirm(&format!("{message}\n\n{detail}"))
+pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str, reply: Reply<()>) {
+    answered(
+        ask_confirm(message, detail, cancel, action),
+        move |chosen| {
+            if chosen.is_truthy() {
+                reply.send(());
+            }
+        },
+    );
 }
 
 pub fn alert(message: &str, detail: &str) {
-    tell(&format!("{message}\n\n{detail}"));
+    tell(message, detail);
 }
 
 pub fn inform(message: &str, detail: &str) {

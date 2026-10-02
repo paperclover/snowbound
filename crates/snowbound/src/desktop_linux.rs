@@ -399,17 +399,31 @@ fn try_install() -> io::Result<()> {
 }
 
 /// After confirming, removes what Install wrote; notebooks stay where they are.
-pub fn uninstall() {
-    let (Some(data), Some(binary)) = (data_home(), binary()) else {
+pub fn uninstall(proxy: &winit::event_loop::EventLoopProxy<crate::UserEvent>) {
+    let Some(binary) = binary() else {
         return;
     };
     let detail = format!(
         "Snowbound leaves the app menu and {} is deleted. Your notebooks stay where they are.",
         binary.display()
     );
-    if !crate::platform::confirm("Uninstall Snowbound?", &detail, "Cancel", "Uninstall") {
+    let reply = crate::Reply::new(proxy, |_, ()| {
+        remove();
+        Ok(())
+    });
+    crate::platform::confirm(
+        "Uninstall Snowbound?",
+        &detail,
+        "Cancel",
+        "Uninstall",
+        reply,
+    );
+}
+
+fn remove() {
+    let (Some(data), Some(binary)) = (data_home(), binary()) else {
         return;
-    }
+    };
     let mut failed = None;
     let icons = SIZES.map(|side| theme_icon(&data, side));
     if let Some(staged) = crate::update::staging(&binary)

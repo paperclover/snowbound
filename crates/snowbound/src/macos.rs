@@ -1,4 +1,4 @@
-use crate::commands;
+use crate::{Reply, commands};
 use canvas::date::DateField;
 use objc2::{
     ClassType, DeclaredClass, class,
@@ -11,7 +11,8 @@ use objc2::{
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApplication, NSColor,
     NSColorSpace, NSDatePicker, NSDatePickerElementFlags, NSDatePickerStyle, NSEvent,
-    NSEventSubtype, NSEventType, NSMenu, NSMenuItem,
+    NSEventSubtype, NSEventType, NSMenu, NSMenuItem, NSModalResponse, NSModalResponseCancel,
+    NSModalResponseOK, NSSavePanel, NSWindow,
 };
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSCalendar, NSCalendarUnit, NSDate, NSDateFormatter,
@@ -92,6 +93,59 @@ pub(crate) fn ns_window(window: &Window) -> Retained<AnyObject> {
     unsafe { msg_send_id![&ns_view(window), window] }
 }
 
+thread_local! {
+    /// The window dialogs open on as sheets.
+    static WINDOW: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
+    /// The alert shown as a sheet, which Escape cancels.
+    static ALERT: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
+}
+
+/// Shows `alert` as a sheet on the window, then answers with the button pressed. Before
+/// 10.9, whose alerts have no such sheet, the alert waits as a modal one.
+fn begin_alert(alert: &NSAlert, answer: impl FnOnce(NSModalResponse) + 'static) {
+    unsafe {
+        let sheets: bool = msg_send![
+            alert,
+            respondsToSelector: sel!(beginSheetModalForWindow:completionHandler:)
+        ];
+        let Some(window) = WINDOW.with_borrow(Clone::clone).filter(|_| sheets) else {
+            return answer(alert.runModal());
+        };
+        ALERT.set(Some(alert.window()));
+        let answer = Cell::new(Some(answer));
+        let done = block2::RcBlock::new(move |response: NSModalResponse| {
+            ALERT.set(None);
+            if let Some(answer) = answer.take() {
+                answer(response);
+            }
+        });
+        let _: () = msg_send![alert, beginSheetModalForWindow: &*window, completionHandler: &*done];
+    }
+}
+
+/// Shows `panel` as a sheet on the window, then replies with the path chosen.
+fn begin_panel(panel: Retained<NSSavePanel>, reply: Reply<std::path::PathBuf>) {
+    let chosen = panel.clone();
+    let reply = Cell::new(Some(reply));
+    let done = block2::RcBlock::new(move |response: NSModalResponse| {
+        let path = unsafe { chosen.URL().and_then(|url| url.path()) };
+        if let (true, Some(path), Some(reply)) = (response == NSModalResponseOK, path, reply.take())
+        {
+            reply.send(path.to_string().into());
+        }
+    });
+    unsafe {
+        match WINDOW.with_borrow(Clone::clone) {
+            Some(window) => {
+                let _: () = msg_send![&panel, beginSheetModalForWindow: &*window, completionHandler: &*done];
+            }
+            None => {
+                let _: () = msg_send![&panel, beginWithCompletionHandler: &*done];
+            }
+        }
+    }
+}
+
 /// Room the traffic lights take at the title bar's leading edge.
 pub const LEADING: f32 = 78.0;
 /// The title bar's trailing margin, the gap the traffic lights leave before the toolbar.
@@ -131,6 +185,7 @@ pub fn window_attributes() -> WindowAttributes {
 pub fn install_title_bar(window: &Window) {
     MainThreadMarker::new().expect("Windows belong to the main thread");
     let window = ns_window(window);
+    WINDOW.set(Some(unsafe { Retained::cast(window.clone()) }));
     let responds =
         |selector: Sel| -> bool { unsafe { msg_send![&window, respondsToSelector: selector] } };
     // Before 10.10 the title bar keeps its own line above the row.
@@ -765,7 +820,7 @@ pub fn documents_dir() -> Option<std::path::PathBuf> {
 
 /// Asks for a notebook folder or a notebook file with the system's open panel, titled
 /// `title`.
-pub fn pick_notebook(title: &str) -> Option<std::path::PathBuf> {
+pub fn pick_notebook(title: &str, reply: Reply<std::path::PathBuf>) {
     let mtm = MainThreadMarker::new().expect("Panels belong to the main thread");
     unsafe {
         let panel = objc2_app_kit::NSOpenPanel::openPanel(mtm);
@@ -774,11 +829,7 @@ pub fn pick_notebook(title: &str) -> Option<std::path::PathBuf> {
         panel.setCanCreateDirectories(true);
         panel.setTitle(Some(&NSString::from_str(title)));
         panel.setPrompt(Some(&NSString::from_str("Open")));
-        if panel.runModal() != objc2_app_kit::NSModalResponseOK {
-            return None;
-        }
-        let path = panel.URLs().firstObject()?.path()?;
-        Some(path.to_string().into())
+        begin_panel(Retained::into_super(panel), reply);
     }
 }
 
@@ -789,10 +840,11 @@ pub fn pick_new(
     name: &str,
     action: &str,
     folder: Option<&std::path::Path>,
-) -> Option<std::path::PathBuf> {
+    reply: Reply<std::path::PathBuf>,
+) {
     let mtm = MainThreadMarker::new().expect("Panels belong to the main thread");
     unsafe {
-        let panel = objc2_app_kit::NSSavePanel::savePanel(mtm);
+        let panel = NSSavePanel::savePanel(mtm);
         if let Some(folder) = folder.and_then(std::path::Path::to_str) {
             panel.setDirectoryURL(Some(&objc2_foundation::NSURL::fileURLWithPath(
                 &NSString::from_str(folder),
@@ -802,16 +854,13 @@ pub fn pick_new(
         panel.setTitle(Some(&NSString::from_str(title)));
         panel.setPrompt(Some(&NSString::from_str(action)));
         panel.setNameFieldStringValue(&NSString::from_str(name));
-        if panel.runModal() != objc2_app_kit::NSModalResponseOK {
-            return None;
-        }
-        Some(panel.URL()?.path()?.to_string().into())
+        begin_panel(panel, reply);
     }
 }
 
 /// Asks for a file to insert, one of `types` (extensions) unless empty, with the system's
 /// open panel titled `title`.
-pub fn pick_file(title: &str, types: &[&str]) -> Option<std::path::PathBuf> {
+pub fn pick_file(title: &str, types: &[&str], reply: Reply<std::path::PathBuf>) {
     let mtm = MainThreadMarker::new().expect("Panels belong to the main thread");
     unsafe {
         let panel = objc2_app_kit::NSOpenPanel::openPanel(mtm);
@@ -822,11 +871,7 @@ pub fn pick_file(title: &str, types: &[&str]) -> Option<std::path::PathBuf> {
         }
         panel.setTitle(Some(&NSString::from_str(title)));
         panel.setPrompt(Some(&NSString::from_str("Insert")));
-        if panel.runModal() != objc2_app_kit::NSModalResponseOK {
-            return None;
-        }
-        let path = panel.URLs().firstObject()?.path()?;
-        Some(path.to_string().into())
+        begin_panel(Retained::into_super(panel), reply);
     }
 }
 
@@ -1010,7 +1055,7 @@ pub fn alert(message: &str, detail: &str) {
         let alert = NSAlert::new(mtm);
         alert.setMessageText(&NSString::from_str(message));
         alert.setInformativeText(&NSString::from_str(detail));
-        alert.runModal();
+        begin_alert(&alert, |_| {});
     }
 }
 
@@ -1086,7 +1131,8 @@ pub fn edit_date(
     timestamp: u64,
     field: DateField,
     title: &str,
-) -> Result<Option<(u64, [String; 2])>, &'static str> {
+    reply: Reply<Result<(u64, [String; 2]), &'static str>>,
+) {
     let mtm = MainThreadMarker::new().expect("Date controls belong to the main thread");
     unsafe {
         let calendar = NSCalendar::currentCalendar();
@@ -1116,11 +1162,14 @@ pub fn edit_date(
         alert.addButtonWithTitle(&NSString::from_str("Cancel"));
         alert.layout();
         alert.window().makeFirstResponder(Some(&picker));
-        if alert.runModal() != NSAlertFirstButtonReturn {
-            return Ok(None);
-        }
-        alert.window().makeFirstResponder(None);
-        merge_date(timestamp, &picker.dateValue(), field, &calendar).map(Some)
+        let window = alert.window();
+        begin_alert(&alert, move |response| {
+            if response != NSAlertFirstButtonReturn {
+                return;
+            }
+            window.makeFirstResponder(None);
+            reply.send(merge_date(timestamp, &picker.dateValue(), field, &calendar));
+        });
     }
 }
 
@@ -1402,8 +1451,19 @@ declare_class!(
                     .flatten()
                     .map(|text| text.to_string());
                 let modal = self.modalWindow();
+                let sheet = ALERT.with_borrow(Clone::clone).filter(|sheet| {
+                    self.keyWindow().is_some_and(|key| std::ptr::eq(&*key, &**sheet))
+                });
+                let sheet = sheet.zip(WINDOW.with_borrow(Clone::clone));
                 match (key.as_deref(), &modal) {
                     (Some("\u{1b}"), Some(_)) => self.stopModal(),
+                    (Some("\u{1b}"), None) if let Some((sheet, parent)) = &sheet => {
+                        let _: () = msg_send![
+                            parent,
+                            endSheet: &**sheet,
+                            returnCode: NSModalResponseCancel
+                        ];
+                    }
                     (Some("\r" | "\u{3}"), Some(modal)) if {
                         let responder: *mut AnyObject = msg_send![modal, firstResponder];
                         !responder.is_null()
@@ -1511,16 +1571,19 @@ pub fn reveal(target: impl AsRef<std::ffi::OsStr>) {
 }
 
 /// Asks whether to go ahead with `action`, offering `cancel` first.
-pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str) -> bool {
+pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str, reply: Reply<()>) {
     let mtm = MainThreadMarker::new().expect("Window events run on the main thread");
-    // The alert and its strings stay on AppKit's main thread for the modal call.
     unsafe {
         let alert = NSAlert::new(mtm);
         alert.setMessageText(&NSString::from_str(message));
         alert.setInformativeText(&NSString::from_str(detail));
         alert.addButtonWithTitle(&NSString::from_str(cancel));
         alert.addButtonWithTitle(&NSString::from_str(action));
-        alert.runModal() == NSAlertSecondButtonReturn
+        begin_alert(&alert, |response| {
+            if response == NSAlertSecondButtonReturn {
+                reply.send(());
+            }
+        });
     }
 }
 
