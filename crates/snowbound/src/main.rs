@@ -3040,7 +3040,14 @@ impl State {
                     at,
                 } => {
                     if pressed {
-                        self.view.pointer_pressed(at)?
+                        let response = self.view.pointer_pressed(at)?;
+                        // Drawing or clicking anywhere but the title puts the templates away.
+                        if (self.view.inking() || !self.view.editor.active_outline().title)
+                            && let Some(session) = &self.session
+                        {
+                            self.dismissed.insert(session.space);
+                        }
+                        response
                     } else {
                         let response = self.view.pointer_released()?;
                         let [anchor, focus] = self.view.editor.selection().positions;
