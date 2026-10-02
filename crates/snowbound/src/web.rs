@@ -532,7 +532,7 @@ pub fn cuts_corners() -> bool {
     false
 }
 
-pub fn window_controls(_: &mut Ui, _: &Window) {}
+pub fn window_controls(_: &mut Ui, _: &Window, _: bool) {}
 
 pub fn resize_direction(_: &Window, _: [f32; 2]) -> Option<ResizeDirection> {
     None

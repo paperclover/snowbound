@@ -14,7 +14,7 @@ use std::{
     path::PathBuf,
     process::Command,
     sync::{
-        OnceLock,
+        Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Duration,
@@ -30,10 +30,9 @@ use winit::{
 };
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
-/// The title bar's leading margin; the window controls sit at its trailing end.
-pub const LEADING: f32 = 8.0;
-/// The margin past the window controls.
-pub const TRAILING: f32 = 8.0;
+/// The title bar's margins at its leading and trailing ends, libadwaita's header bar's.
+pub const LEADING: f32 = 7.0;
+pub const TRAILING: f32 = 7.0;
 /// How far inside the window's edges a press resizes it, and how far along them a corner
 /// reaches, in logical pixels.
 const EDGE: f32 = 5.0;
@@ -41,6 +40,14 @@ const CORNER: f32 = 16.0;
 const MINIMIZE: &[&str] = &[include_str!("../assets/icons/window-minimize.svg")];
 const MAXIMIZE: &[&str] = &[include_str!("../assets/icons/window-maximize.svg")];
 const RESTORE: &[&str] = &[include_str!("../assets/icons/window-restore.svg")];
+/// Adwaita's `window-*-symbolic` glyphs, which GTK's window controls show.
+const ADWAITA_MINIMIZE: &[&str] = &[include_str!("../assets/adwaita/window-minimize.svg")];
+const ADWAITA_MAXIMIZE: &[&str] = &[include_str!("../assets/adwaita/window-maximize.svg")];
+const ADWAITA_RESTORE: &[&str] = &[include_str!("../assets/adwaita/window-restore.svg")];
+const ADWAITA_CLOSE: &[&str] = &[include_str!("../assets/adwaita/window-close.svg")];
+/// GNOME's `button-layout`, as GTK reads it: the window's buttons at the title bar's start,
+/// a colon, then those at its end. Read once, then kept by the settings portal's signal.
+static BUTTON_LAYOUT: Mutex<Option<String>> = Mutex::new(None);
 
 /// The event loop's, for signals and Snowbound's own dialogs.
 pub(crate) static PROXY: OnceLock<EventLoopProxy<crate::UserEvent>> = OnceLock::new();
@@ -577,76 +584,152 @@ fn kde_color(value: &str) -> Option<[u8; 3]> {
     Some([channels.next()??, channels.next()??, channels.next()??])
 }
 
-/// The header bar of winit's Adwaita frame, focused and not.
+/// libadwaita's header bar, focused and not: neutral greys before 1.7, bluish ones since.
 fn adwaita_titlebar(appearance: Theme) -> [[u8; 3]; 2] {
-    let theme = match appearance {
-        Theme::Dark => sctk_adwaita::theme::ColorTheme::dark(),
-        Theme::Light => sctk_adwaita::theme::ColorTheme::light(),
-    };
-    [theme.active, theme.inactive].map(|colors| {
-        let color = colors.headerbar.to_color_u8();
-        [color.red(), color.green(), color.blue()]
+    match (appearance, adwaita_minor() >= 7) {
+        (Theme::Light, true) => [[0xff; 3], [0xfa, 0xfa, 0xfb]],
+        (Theme::Light, false) => [[0xff; 3], [0xfa; 3]],
+        (Theme::Dark, true) => [[0x2e, 0x2e, 0x32], [0x22, 0x22, 0x26]],
+        (Theme::Dark, false) => [[0x30; 3], [0x24; 3]],
+    }
+}
+
+/// The minor version of the libadwaita GNOME apps use, as the session's GNOME Shell implies:
+/// 1.N came with GNOME 41 + N. The newest where the shell doesn't answer.
+fn adwaita_minor() -> u32 {
+    static MINOR: OnceLock<u32> = OnceLock::new();
+    *MINOR.get_or_init(|| {
+        let shell = || -> Option<String> {
+            let connection = zbus::blocking::connection::Builder::session()
+                .ok()?
+                .method_timeout(Duration::from_millis(500))
+                .build()
+                .ok()?;
+            zbus::blocking::Proxy::new(
+                &connection,
+                "org.gnome.Shell",
+                "/org/gnome/Shell",
+                "org.gnome.Shell",
+            )
+            .ok()?
+            .get_property("ShellVersion")
+            .ok()
+        };
+        shell()
+            .and_then(|version| version.split('.').next()?.parse::<u32>().ok())
+            .map_or(u32::MAX, |major| major.saturating_sub(41))
     })
 }
 
-/// The window's buttons at the title bar's trailing end, in the order GNOME's
-/// `button-layout` lists them, which is close alone by default; elsewhere minimize,
-/// maximize and close.
-pub fn window_controls(ui: &mut Ui, window: &Window) {
-    static CONTROLS: OnceLock<Vec<&'static str>> = OnceLock::new();
-    let controls = CONTROLS.get_or_init(|| {
-        let layout = portal_setting("org.gnome.desktop.wm.preferences", "button-layout")
-            .and_then(|value| String::try_from(value).ok());
-        match layout {
-            Some(layout) => layout
-                .split([':', ','])
-                .filter_map(|name| {
-                    ["minimize", "maximize", "close"]
-                        .into_iter()
-                        .find(|known| *known == name)
+/// The window's buttons at the title bar's start, or its `end`, as the desktop's button
+/// layout places them. On GNOME they are libadwaita's: discs in the header bar's ink, dimmed
+/// with it while the window is in the background. Elsewhere, where the compositor offered no
+/// decorations of its own, they are the toolbar's own buttons.
+pub fn window_controls(ui: &mut Ui, window: &Window, end: bool) {
+    let layout = BUTTON_LAYOUT
+        .lock()
+        .unwrap()
+        .get_or_insert_with(|| {
+            portal_setting("org.gnome.desktop.wm.preferences", "button-layout")
+                .and_then(|value| String::try_from(value).ok())
+                .unwrap_or_else(|| {
+                    if desktop() == Desktop::Gnome {
+                        "appmenu:close"
+                    } else {
+                        ":minimize,maximize,close"
+                    }
+                    .into()
                 })
-                .collect(),
-            None if desktop() == Desktop::Gnome => vec!["close"],
-            None => vec!["minimize", "maximize", "close"],
-        }
-    });
-    let text = ui.theme.text;
-    let disc = |alpha| [text[0], text[1], text[2], alpha];
-    for control in controls {
-        let icon = match *control {
-            "minimize" => MINIMIZE,
-            "maximize" if window.is_maximized() => RESTORE,
-            "maximize" => MAXIMIZE,
-            _ => crate::art::CLOSE,
+        })
+        .clone();
+    let (start, finish) = layout.split_once(':').unwrap_or((&layout, ""));
+    let controls: Vec<&str> = if end { finish } else { start }
+        .split(',')
+        .map(str::trim)
+        .filter(|name| matches!(*name, "minimize" | "maximize" | "close"))
+        .collect();
+    if controls.is_empty() {
+        return;
+    }
+    let adwaita = desktop() == Desktop::Gnome;
+    // libadwaita's are 34 px buttons 3 px apart.
+    let (button, gap) = if adwaita {
+        (34.0, 3.0)
+    } else {
+        (ui::shell::TOOL, 6.0)
+    };
+    ui.open(
+        ("controls", end),
+        Spec {
+            size: [ui::children(), px(button)],
+            offset: [0.0, (ui::shell::TOOL - button) / 2.0],
+            gap,
+            ..Spec::default()
+        },
+    );
+    // `--headerbar-fg-color` at 10 %, 15 % and 30 % for the disc at rest, hovered and
+    // pressed, and whole for the glyph, over the header bar; at half opacity in the
+    // background.
+    let colors = adwaita.then(|| {
+        // Light text is the dark appearance's.
+        let appearance = if ui.theme.text[0] > 0.5 {
+            Theme::Dark
+        } else {
+            Theme::Light
         };
-        // Round, on a faint disc, as libadwaita's are.
-        let clicked = ui
-            .leaf(
+        let header = adwaita_titlebar(appearance)[usize::from(!ui.window_focused)];
+        let (ink, strength) = match appearance {
+            Theme::Dark => ([0xff; 3], 1.0),
+            Theme::Light if adwaita_minor() >= 7 => ([0, 0, 6], 0.8),
+            Theme::Light => ([0; 3], 0.8),
+        };
+        let opacity = if ui.window_focused { 1.0 } else { 0.5 };
+        let disc = |alpha: f32| over(ink, strength * alpha, header);
+        let rest = disc(0.1);
+        [rest, disc(0.15), disc(0.3), over(ink, strength, rest)]
+            .map(|color| linear(over(color, opacity, header)))
+    });
+    for control in controls {
+        let (name, icons) = match control {
+            "minimize" => ("Minimize", [MINIMIZE, ADWAITA_MINIMIZE]),
+            "maximize" if window.is_maximized() => ("Restore", [RESTORE, ADWAITA_RESTORE]),
+            "maximize" => ("Maximize", [MAXIMIZE, ADWAITA_MAXIMIZE]),
+            _ => ("Close", [crate::art::CLOSE, ADWAITA_CLOSE]),
+        };
+        let clicked = if let Some([rest, hover, pressed, glyph]) = colors {
+            // The 16 px glyph's disc pads it by 2 px, or by 4 px from 1.8.
+            let disc = if adwaita_minor() >= 8 { 24.0 } else { 20.0 };
+            let id = ui.id(control);
+            let signal = ui.signal(id);
+            let press = ui.animate(
+                id.child("pressed"),
+                f32::from(u8::from(signal.dragging && signal.hovered)),
+            );
+            ui.leaf(
                 control,
                 Spec {
                     flags: Flags::CLICKABLE,
-                    size: [px(ui::shell::TOOL); 2],
-                    icon: Some(icon),
-                    color: Some(text),
-                    fill: Some(disc(0.1)),
-                    hover_fill: Some(disc(0.18)),
-                    radius: ui::shell::TOOL / 2.0,
+                    size: [px(button); 2],
+                    inset: [(button - disc) / 2.0; 4],
+                    icon: Some(icons[1]),
+                    color: Some(glyph),
+                    fill: Some(ui::mix(rest, pressed, press)),
+                    hover_fill: Some(ui::mix(hover, pressed, press)),
+                    radius: disc / 2.0,
                     center: true,
                     role: Some(accesskit::Role::Button),
                     ..Spec::default()
                 },
-            )
-            .clicked;
-        let name = match *control {
-            "minimize" => "Minimize",
-            "maximize" if window.is_maximized() => "Restore",
-            "maximize" => "Maximize",
-            _ => "Close",
+            );
+            signal.clicked
+        } else {
+            let text = ui.theme.text;
+            ui::shell::tool_button(ui, control, icons[0], text, None).clicked
         };
         if let Some(node) = ui.access(ui.id(control)) {
             node.set_label(name);
         }
-        match *control {
+        match control {
             _ if !clicked => {}
             "minimize" => window.set_minimized(true),
             "maximize" => zoom(window),
@@ -657,6 +740,7 @@ pub fn window_controls(ui: &mut Ui, window: &Window) {
             }
         }
     }
+    ui.close();
 }
 
 /// The edge or corner a press at `pointer`, in logical pixels, resizes the window from, when
@@ -1055,7 +1139,7 @@ pub fn appearance(_: &Window) -> Theme {
 }
 
 /// Asks for the desktop's colours again whenever the settings portal reports a change to the
-/// colour scheme, or to KDE's colours.
+/// colour scheme, or to KDE's colours, and keeps GNOME's button layout.
 fn watch_settings(proxy: EventLoopProxy<crate::UserEvent>) {
     std::thread::spawn(move || {
         let Ok(connection) = zbus::blocking::Connection::session() else {
@@ -1073,16 +1157,25 @@ fn watch_settings(proxy: EventLoopProxy<crate::UserEvent>) {
             return;
         };
         for change in changes {
-            let Ok((namespace, _, _)) = change
-                .body()
-                .deserialize::<(String, String, zbus::zvariant::OwnedValue)>()
+            let Ok((namespace, key, value)) =
+                change
+                    .body()
+                    .deserialize::<(String, String, zbus::zvariant::OwnedValue)>()
             else {
                 continue;
             };
-            if (namespace == "org.freedesktop.appearance"
-                || namespace.starts_with("org.kde.kdeglobals"))
-                && proxy.send_event(crate::UserEvent::Appearance).is_err()
+            let event = if namespace == "org.freedesktop.appearance"
+                || namespace.starts_with("org.kde.kdeglobals")
             {
+                crate::UserEvent::Appearance
+            } else if namespace == "org.gnome.desktop.wm.preferences" && key == "button-layout" {
+                *BUTTON_LAYOUT.lock().unwrap() =
+                    innermost(value).and_then(|value| String::try_from(value).ok());
+                crate::UserEvent::Redraw
+            } else {
+                continue;
+            };
+            if proxy.send_event(event).is_err() {
                 return;
             }
         }
@@ -1115,11 +1208,17 @@ fn portal_setting(namespace: &str, key: &str) -> Option<OwnedValue> {
     .ok()?;
     let key = (namespace, key);
     // Portals before ReadOne answer Read, with the value in a second variant.
-    let reply: OwnedValue = proxy
-        .call("ReadOne", &key)
-        .or_else(|_| proxy.call("Read", &key))
-        .ok()?;
-    let mut value = Value::from(reply);
+    innermost(
+        proxy
+            .call("ReadOne", &key)
+            .or_else(|_| proxy.call("Read", &key))
+            .ok()?,
+    )
+}
+
+/// `value` out of the variants a setting comes wrapped in.
+fn innermost(value: OwnedValue) -> Option<OwnedValue> {
+    let mut value = Value::from(value);
     while let Value::Value(inner) = value {
         value = *inner;
     }

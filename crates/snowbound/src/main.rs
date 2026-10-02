@@ -2017,6 +2017,9 @@ impl State {
                 ..Spec::default()
             },
         );
+        if title {
+            platform::window_controls(&mut self.ui, &self.window, false);
+        }
         if tools {
             // The groups fold in the room the window's controls leave, and whatever still
             // overflows is cut there, so the controls always show.
@@ -2050,7 +2053,7 @@ impl State {
         }
         self.ui.close();
         if title {
-            platform::window_controls(&mut self.ui, &self.window);
+            platform::window_controls(&mut self.ui, &self.window, true);
         }
         self.ui.leaf(
             "trail",

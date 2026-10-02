@@ -784,7 +784,10 @@ const CLOSE: &[&str] = &[include_str!("../assets/windows/caption-close.svg")];
 /// 7 draws them over the glass and the row leaves them room, and 11 doesn't draw them over
 /// the DirectComposition surface, so the row draws them as 11 does, lit as the system
 /// reports the pointer. On 8 and 10 the row draws and runs them as 10 does.
-pub fn window_controls(ui: &mut Ui, window: &Window) {
+pub fn window_controls(ui: &mut Ui, window: &Window, end: bool) {
+    if !end {
+        return;
+    }
     let scale = window.scale_factor() as f32;
     SCALE.store(scale.to_bits(), Ordering::Relaxed);
     let system = caption() == Caption::Glass;

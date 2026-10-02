@@ -368,7 +368,7 @@ unsafe fn ns_data_bytes(data: &AnyObject) -> Vec<u8> {
 }
 
 /// AppKit draws the traffic lights.
-pub fn window_controls(_: &mut ui::Ui, _: &Window) {}
+pub fn window_controls(_: &mut ui::Ui, _: &Window, _: bool) {}
 
 /// Whether AppKit draws the title bar: before 10.10 content can't extend under it, and
 /// otherwise the app draws it around the traffic lights.
