@@ -80,6 +80,9 @@ extern "C" {
     /// Fetches `fonts/{name}` for `font_arrived`.
     #[wasm_bindgen(js_name = fetchFont)]
     fn fetch_font(name: &str);
+    /// Fetches dictionary `name`'s files for `dictionary_arrived`.
+    #[wasm_bindgen(js_name = fetchDictionary)]
+    pub fn fetch_dictionary(name: &str);
     #[wasm_bindgen(js_name = storeFiles)]
     fn store_files(changes: js_sys::Array);
 }
@@ -865,14 +868,14 @@ pub mod smb {
     }
 }
 
-/// Starts Snowbound on the page's canvas, `index.html` having fetched `fonts` and, where it
-/// could, the spelling dictionary's affix and word files. `module` is the module's own
-/// exports, which the glue calls.
+/// Starts Snowbound on the page's canvas, `index.html` having fetched `fonts` and the names
+/// of the spelling dictionaries the site has. `module` is the module's own exports, which
+/// the glue calls.
 #[wasm_bindgen]
 pub async fn start(
     module: JsValue,
     fonts: Vec<js_sys::Uint8Array>,
-    dictionary: Vec<js_sys::Uint8Array>,
+    dictionaries: Vec<String>,
 ) -> Result<(), JsValue> {
     std::panic::set_hook(Box::new(|info| report(info)));
     let window = web_sys::window().ok_or("No window")?;
@@ -901,12 +904,7 @@ pub async fn start(
     canvas.set_width(host(|host| host.size.width));
     canvas.set_height(host(|host| host.size.height));
     restore(load_files().await?);
-    if let [affix, words] = dictionary.as_slice() {
-        notebook::fs::restore("/Dictionaries", notebook::fs::Saved::Directory);
-        for (path, file) in [(crate::spell::AFFIX, affix), (crate::spell::WORDS, words)] {
-            notebook::fs::restore(path, notebook::fs::Saved::File(file.to_vec(), 0.0));
-        }
-    }
+    crate::spell::offer(dictionaries);
     for folder in load_folders().await?.iter() {
         let folder = js_sys::Array::from(&folder);
         let root = folder.get(0).as_string().unwrap_or_default();
@@ -916,6 +914,10 @@ pub async fn start(
     let state = open(fonts)
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    // Text no run tags is in the browser's language, as typed in it.
+    if let Some(spelling) = &state.spelling {
+        spelling.untagged(canvas::language::lcid(&input_language()));
+    }
     STATE.with_borrow_mut(|slot| *slot = Some(state));
     attach(module);
     request_frame();
@@ -1418,6 +1420,20 @@ pub fn font_arrived(name: String, bytes: Vec<u8>) {
         state.renderer.clear_glyph_cache();
         let response = state.view.relayout()?;
         state.respond(response);
+        state.window.request_redraw();
+        Ok(())
+    })));
+}
+
+/// Spelling dictionary `name` arrived as its affix and word files: words in its languages
+/// are checked again.
+#[wasm_bindgen]
+pub fn dictionary_arrived(name: String, affix: String, words: String) {
+    crate::spell::arrived(&name, &affix, &words);
+    send(UserEvent::Then(Box::new(|state| {
+        if let Some(spelling) = &state.spelling {
+            spelling.recheck();
+        }
         state.window.request_redraw();
         Ok(())
     })));

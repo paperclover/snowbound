@@ -177,8 +177,9 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   browser keeps its own window and tab chords. Dialogs are the browser's; Insert, and Open
   without a folder to give, ask for files to copy in; printing downloads the PDF. Servers and
   recording are still to come.
-- Spelling is Hunspell's American English dictionary through `spellbook`, fetched beside the
-  module; Add to Dictionary keeps its words in the browser's files. Text the bundled faces
+- Spelling is Hunspell's dictionaries through `spellbook`, each fetched beside the module the
+  first time a word in its language is checked, text no run tags counting as the browser's
+  language; Add to Dictionary keeps its words in the browser's files. Text the bundled faces
   lack takes Noto's, fetched by script the first time a page holds it (a CJK face cut to
   the national standards' characters by `tools/web/subset_cjk.py`; emoji in Noto Color
   Emoji's COLRv1 outlines, which `draw` paints itself), and the page is laid out again.

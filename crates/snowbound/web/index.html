@@ -83,13 +83,14 @@
   }
   try {
     const fetched = (url) => bytes(url).then((data) => new Uint8Array(data));
-    const [, fonts, dictionary] = await Promise.all([
+    const [, fonts, dictionaries] = await Promise.all([
       init({ module_or_path: module }),
       Promise.all(FONTS.map((name) => fetched(`fonts/${name}.ttf`))),
-      // Spelling waits for none: without the dictionary, words go unmarked.
-      Promise.all(["aff", "dic"].map((kind) => fetched(`dictionaries/en_US.${kind}`))).catch(() => []),
+      // The spelling dictionaries the site has, fetched as pages need them; without the
+      // list, words go unmarked.
+      fetch("dictionaries/index.json").then((response) => response.json()).catch(() => []),
     ]);
-    await snowbound.start(snowbound, fonts, dictionary);
+    await snowbound.start(snowbound, fonts, dictionaries);
     status.remove();
     console.info(`Snowbound loaded in ${Math.round(performance.now())} ms`);
   } catch (error) {

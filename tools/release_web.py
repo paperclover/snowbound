@@ -8,6 +8,7 @@ static folder and publishes it to the share's web/ folder.
 import argparse
 import gzip
 import hashlib
+import json
 import os
 from pathlib import Path
 import shutil
@@ -28,6 +29,22 @@ EMOJI_URL = 'https://github.com/googlefonts/noto-emoji/raw/v2.051/fonts/Noto-COL
 EMOJI_SHA256 = '0ae57fe58645638523ba35f388d93739d292539a9acb84df5700c81b1e1a28d2'
 # As `EMOJI` in src/web.rs names it.
 EMOJI_FONT = 'Noto-COLRv1.ttf.gz'
+# Spelling dictionaries: the name the page asks for, the nixpkgs hunspellDicts package, its
+# files' stem, and the SPDX licences it comes under, each checked to allow redistribution
+# (the LGPL's text with the GPL's, which it amends). Add a row to offer another language.
+DICTIONARIES = [
+    ('en_US', 'en_US', 'en_US', ['BSD-3-Clause']),
+    ('en_GB', 'en_GB-ise', 'en_GB', ['BSD-3-Clause']),
+    ('de_DE', 'de_DE', 'de_DE', ['GPL-2.0-only', 'GPL-3.0-only']),
+    ('fr_FR', 'fr-moderne', 'fr-moderne', ['MPL-2.0']),
+    ('es_ES', 'es_ES', 'es_ES', ['GPL-3.0-only', 'LGPL-3.0-only', 'MPL-1.1']),
+    ('pt_BR', 'pt_BR', 'pt_BR', ['LGPL-3.0-only', 'GPL-3.0-only']),
+    ('pt_PT', 'pt_PT', 'pt_PT', ['GPL-2.0-only', 'LGPL-2.1-only', 'MPL-1.1']),
+    ('it_IT', 'it_IT', 'it_IT', ['GPL-3.0-only']),
+    ('nl_NL', 'nl_NL', 'nl_NL', ['BSD-3-Clause', 'CC-BY-3.0']),
+    ('sv_SE', 'sv_SE', 'sv_SE', ['LGPL-3.0-only', 'GPL-3.0-only']),
+    ('ru_RU', 'ru_RU', 'ru_RU', ['MPL-2.0', 'LGPL-3.0-only', 'GPL-3.0-only']),
+]
 # Size over speed where it costs little: the module is most of the first load.
 PROFILE = ['--config', 'profile.release.opt-level="s"']
 
@@ -75,11 +92,7 @@ def build(out):
     bound = out / 'snowbound_web_bg.wasm'
     run([tool('wasm-opt', 'binaryen'), '-Oz', '--strip-debug', '--strip-producers', bound, '-o', bound])
     shutil.copy(WEB / 'index.html', out)
-    # Hunspell's American English dictionary (SCOWL, BSD-3-Clause), for spelling.
-    (out / 'dictionaries').mkdir()
-    store = Path(tool('hunspell', 'hunspellDicts.en_US', store=True))
-    for name in ('share/hunspell/en_US.aff', 'share/hunspell/en_US.dic', 'share/doc/hunspell-dict-en-us-wordlist.txt'):
-        shutil.copy(store / name, out / 'dictionaries')
+    dictionaries(out / 'dictionaries')
     (out / 'fonts').mkdir()
     for font in sorted(FONTS.glob('*')):
         if font.suffix in ('.ttf', '.txt'):
@@ -88,6 +101,36 @@ def build(out):
     for path in sorted(out.rglob('*')):
         if path.is_file():
             print(f'{path.stat().st_size:>12,}  {path.relative_to(out)}')
+
+
+def dictionaries(folder):
+    """The Hunspell dictionaries in DICTIONARIES as UTF-8, gzipped for the glue to inflate,
+    each beside its readme, the texts of the licences they come under in licenses/, and their
+    names in index.json for the page to pick from (`pick` in canvas/src/spelling.rs)."""
+    (folder / 'licenses').mkdir(parents=True)
+    texts = Path(tool('spdx', 'spdx-license-list-data.text', store=True)) / 'text'
+    for name, package, stem, licenses in DICTIONARIES:
+        store = Path(tool('hunspell', f'hunspellDicts.{package}', store=True))
+        affix = (store / f'share/hunspell/{stem}.aff').read_bytes()
+        # Hunspell names the files' encoding in the affix file's SET line.
+        encoding = next((line.split()[1] for line in affix.decode('latin-1').splitlines()
+                         if line.startswith('SET ')), 'UTF-8')
+        for kind in ('aff', 'dic'):
+            text = (store / f'share/hunspell/{stem}.{kind}').read_bytes().decode(encoding)
+            # One encoding and one line ending for spellbook, which reads only UTF-8. An
+            # 8-bit file's flags are its characters by default, as FLAG UTF-8 keeps them.
+            utf8 = 'SET UTF-8' if encoding == 'UTF-8' or 'FLAG ' in text else 'SET UTF-8\nFLAG UTF-8'
+            text = ''.join((utf8 if line.startswith('SET ') else line) + '\n'
+                           for line in text.splitlines())
+            (folder / f'{name}.{kind}.gz').write_bytes(gzip.compress(text.encode(), 9, mtime=0))
+        # Where a package has no readme, its affix file's header comment names the licences.
+        readme = list((store / 'share/doc').glob('*.txt'))
+        notice = readme[0].read_bytes() if readme else \
+            ''.join(line + '\n' for line in affix.decode(encoding).splitlines() if line.startswith('#')).encode()
+        (folder / f'{name}.txt').write_bytes(notice + f'\nLicences: {", ".join(licenses)} (licenses/)\n'.encode())
+        for license in licenses:
+            shutil.copyfile(texts / f'{license}.txt', folder / 'licenses' / f'{license}.txt')
+    (folder / 'index.json').write_text(json.dumps([name for name, *_ in DICTIONARIES]))
 
 
 def fallbacks(fonts):

@@ -8,6 +8,7 @@ use onestore::page::text::Paragraph;
 use std::collections::{HashMap, HashSet};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 /// Checked paragraphs kept before the cache starts over.
@@ -36,6 +37,7 @@ pub fn pick(language: u32, available: &[String]) -> Option<&str> {
     // A bare tag is the locale Windows picks, most often the language's own country.
     let home = match bare {
         "en" => "US".to_owned(),
+        "pt" => "BR".to_owned(),
         _ => bare.to_uppercase(),
     };
     let wanted = if region.is_empty() {
@@ -70,7 +72,8 @@ pub(crate) struct Mark {
 /// A word of a paragraph: its bytes, its language, and whether its spelling is checked.
 struct Word {
     range: Range<usize>,
-    language: u32,
+    /// The run's language, an LCID; `None` where untagged.
+    language: Option<u32>,
     checked: bool,
 }
 
@@ -157,9 +160,7 @@ fn words(paragraph: &Paragraph) -> Vec<Word> {
             }
             words.push(Word {
                 range: at + offset..at + end,
-                language: format(at + offset)
-                    .language
-                    .unwrap_or(crate::language::EN_US),
+                language: format(at + offset).language,
                 checked: word.chars().any(char::is_lowercase),
             });
         }
@@ -203,7 +204,8 @@ fn repeated(text: &str, words: &[Word]) -> Vec<bool> {
 
 /// The marks `dictionary` gives each of `paragraphs`, asking it once: each word repeating
 /// the one before it, and each other checked word it finds misspelled.
-fn check(paragraphs: &[&Paragraph], dictionary: &dyn Dictionary) -> Vec<Vec<Mark>> {
+/// Checks `paragraphs`, reading text no run tags as language `untagged`.
+fn check(paragraphs: &[&Paragraph], dictionary: &dyn Dictionary, untagged: u32) -> Vec<Vec<Mark>> {
     let words: Vec<(Vec<Word>, Vec<bool>)> = paragraphs
         .iter()
         .map(|paragraph| {
@@ -220,7 +222,10 @@ fn check(paragraphs: &[&Paragraph], dictionary: &dyn Dictionary) -> Vec<Vec<Mark
                 .iter()
                 .zip(repeated)
                 .filter(|(word, repeated)| word.checked && !**repeated)
-                .map(|(word, _)| (&paragraph.text()[word.range.clone()], word.language))
+                .map(|(word, _)| {
+                    let language = word.language.unwrap_or(untagged);
+                    (&paragraph.text()[word.range.clone()], language)
+                })
         })
         .collect();
     let mut misspelled = dictionary.misspelled(&asked).into_iter();
@@ -309,6 +314,8 @@ impl State {
 
 struct Shared {
     dictionary: Box<dyn Dictionary>,
+    /// The language text no run tags is checked in, an LCID: US English, as OneNote's.
+    untagged: AtomicU32,
     state: Mutex<State>,
 }
 
@@ -324,6 +331,7 @@ impl Spelling {
     pub fn new(dictionary: Box<dyn Dictionary>, redraw: std::task::Waker) -> Self {
         let shared = Arc::new(Shared {
             dictionary,
+            untagged: AtomicU32::new(crate::language::EN_US),
             state: Mutex::default(),
         });
         let (jobs, receiver) = mpsc::channel::<(u64, Paragraph)>();
@@ -341,7 +349,8 @@ impl Spelling {
                         .collect();
                     let paragraphs: Vec<&Paragraph> =
                         jobs.iter().map(|(_, paragraph)| paragraph).collect();
-                    let marks = check(&paragraphs, &*worker.dictionary);
+                    let untagged = worker.untagged.load(Ordering::Relaxed);
+                    let marks = check(&paragraphs, &*worker.dictionary, untagged);
                     let mut state = worker.state.lock().unwrap();
                     for ((key, paragraph), marks) in jobs.iter().zip(marks) {
                         state.pending.remove(key);
@@ -379,17 +388,30 @@ impl Spelling {
         if let Some(marks) = self.shared.state.lock().unwrap().marks(key, paragraph) {
             return marks;
         }
-        let marks = check(&[paragraph], &*self.shared.dictionary).remove(0);
+        let untagged = self.shared.untagged.load(Ordering::Relaxed);
+        let marks = check(&[paragraph], &*self.shared.dictionary, untagged).remove(0);
         let mut state = self.shared.state.lock().unwrap();
         state.keep(key, paragraph, marks);
         state.marks(key, paragraph).unwrap_or_default()
     }
 
+    /// Checks every paragraph again when next asked, as after a dictionary arrived.
+    pub fn recheck(&self) {
+        self.shared.state.lock().unwrap().checked.clear();
+    }
+
+    /// Checks text no run tags in `language`, an LCID, as a browser's text is in its own.
+    pub fn untagged(&self, language: u32) {
+        self.shared.untagged.store(language, Ordering::Relaxed);
+        self.recheck();
+    }
+
     /// Corrections for `word` in `language`, best first.
     pub(crate) fn suggest(&self, word: &str, language: Option<u32>) -> Vec<String> {
-        self.shared
-            .dictionary
-            .suggest(word, language.unwrap_or(crate::language::EN_US))
+        self.shared.dictionary.suggest(
+            word,
+            language.unwrap_or(self.shared.untagged.load(Ordering::Relaxed)),
+        )
     }
 
     /// Ignore: leaves `word` unmarked everywhere until the app quits.
@@ -470,10 +492,13 @@ pub(crate) mod tests {
         let hunspell: Vec<String> = ["en_AU", "en_US", "fr_FR"].map(String::from).into();
         assert_eq!(pick(1033, &hunspell), Some("en_US"));
         assert_eq!(pick(1036, &hunspell), Some("fr_FR"));
+        let portuguese: Vec<String> = ["pt_PT", "pt_BR"].map(String::from).into();
+        assert_eq!(pick(1046, &portuguese), Some("pt_BR"));
+        assert_eq!(pick(2070, &portuguese), Some("pt_PT"));
     }
 
     fn marked(paragraph: &Paragraph) -> Vec<(&str, bool)> {
-        check(&[paragraph], &Fake)
+        check(&[paragraph], &Fake, crate::language::EN_US)
             .remove(0)
             .into_iter()
             .map(|mark| (&paragraph.text()[mark.range], mark.repeated))
@@ -582,5 +607,39 @@ pub(crate) mod tests {
             .recv_timeout(std::time::Duration::from_secs(10))
             .expect("the spelling thread wakes the host");
         assert_eq!(spelling.marks(&french).len(), 2);
+    }
+
+    #[test]
+    fn arriving_dictionaries_and_untagged_languages_check_paragraphs_again() {
+        struct Late(Arc<std::sync::atomic::AtomicBool>);
+        impl Dictionary for Late {
+            fn misspelled(&self, words: &[(&str, u32)]) -> Vec<bool> {
+                match self.0.load(std::sync::atomic::Ordering::Relaxed) {
+                    true => Fake.misspelled(words),
+                    false => vec![false; words.len()],
+                }
+            }
+            fn suggest(&self, _: &str, _: u32) -> Vec<String> {
+                Vec::new()
+            }
+            fn learn(&self, _: &str) {}
+        }
+        let arrived = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let spelling = Spelling::new(
+            Box::new(Late(Arc::clone(&arrived))),
+            std::task::Waker::noop().clone(),
+        );
+        let paragraph = Paragraph::new("Ths sentense here".into(), Format::default());
+        assert!(spelling.marks_now(&paragraph).is_empty());
+        arrived.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            spelling.marks_now(&paragraph).is_empty(),
+            "kept until asked again"
+        );
+        spelling.recheck();
+        assert_eq!(spelling.marks_now(&paragraph).len(), 2);
+        // Untagged text is US English until the host says otherwise.
+        spelling.untagged(1036);
+        assert_eq!(spelling.marks_now(&paragraph).len(), 3);
     }
 }

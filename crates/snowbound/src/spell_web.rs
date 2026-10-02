@@ -1,59 +1,89 @@
-//! Spelling in the browser, which gives pages no checker to ask: Hunspell's American English
-//! dictionary through `spellbook`, which `index.html` fetches beside the module, with the
-//! words Add to Dictionary learns kept in the browser's files.
+//! Spelling in the browser, which gives pages no checker to ask: Hunspell dictionaries through
+//! `spellbook`, each fetched beside the module the first time a word in its language is
+//! checked, with the words Add to Dictionary learns kept in the browser's files.
 
 use canvas::spelling::{Dictionary, pick};
-use std::{io::Write, sync::Mutex};
+use std::{collections::BTreeMap, io::Write, sync::Mutex};
 
-/// The dictionary's files, where `web::start` puts them, and the words learned.
-pub const AFFIX: &str = "/Dictionaries/en_US.aff";
-pub const WORDS: &str = "/Dictionaries/en_US.dic";
 const LEARNED: &str = "/Settings/dictionary.txt";
 
-struct Checker(Mutex<spellbook::Dictionary>);
+/// The dictionaries the site has, as `en_US`, which `platform::start` lists.
+static AVAILABLE: Mutex<Vec<String>> = Mutex::new(Vec::new());
+/// The dictionaries asked for, by name: `None` until one arrives, or where it failed to.
+static LOADED: Mutex<BTreeMap<String, Option<spellbook::Dictionary>>> = Mutex::new(BTreeMap::new());
 
+struct Checker;
+
+/// The checker, where the site has dictionaries.
 pub fn dictionary() -> Option<Box<dyn Dictionary>> {
-    let affix = notebook::fs::read_to_string(AFFIX).ok()?;
-    let words = notebook::fs::read_to_string(WORDS).ok()?;
-    let mut dictionary = spellbook::Dictionary::new(&affix, &words).ok()?;
-    for word in notebook::fs::read_to_string(LEARNED)
-        .unwrap_or_default()
-        .lines()
-    {
-        let _ = dictionary.add(word);
-    }
-    Some(Box::new(Checker(Mutex::new(dictionary))))
+    let available = AVAILABLE.lock().ok()?;
+    (!available.is_empty()).then(|| Box::new(Checker) as Box<dyn Dictionary>)
 }
 
-/// Whether the dictionary serves `language`, an LCID.
-fn serves(language: u32) -> bool {
-    pick(language, &["en_US".to_owned()]).is_some()
+/// Lists the dictionaries the site has.
+pub fn offer(names: Vec<String>) {
+    if let Ok(mut available) = AVAILABLE.lock() {
+        *available = names;
+    }
+}
+
+/// Dictionary `name` arrived as its affix and word files.
+pub fn arrived(name: &str, affix: &str, words: &str) {
+    let dictionary = spellbook::Dictionary::new(affix, words)
+        .ok()
+        .map(|mut dictionary| {
+            for word in notebook::fs::read_to_string(LEARNED)
+                .unwrap_or_default()
+                .lines()
+            {
+                let _ = dictionary.add(word);
+            }
+            dictionary
+        });
+    if let Ok(mut loaded) = LOADED.lock() {
+        loaded.insert(name.to_owned(), dictionary);
+    }
+}
+
+/// Runs `check` with the dictionary serving `language`, an LCID, asking for it the first
+/// time; `None` until it arrives, or where none serves the language.
+fn with<T>(language: u32, check: impl FnOnce(&mut spellbook::Dictionary) -> T) -> Option<T> {
+    let name = pick(language, &AVAILABLE.lock().ok()?)?.to_owned();
+    let mut loaded = LOADED.lock().ok()?;
+    match loaded.get_mut(&name) {
+        Some(dictionary) => dictionary.as_mut().map(check),
+        None => {
+            loaded.insert(name.clone(), None);
+            crate::platform::fetch_dictionary(&name);
+            None
+        }
+    }
 }
 
 impl Dictionary for Checker {
     fn misspelled(&self, words: &[(&str, u32)]) -> Vec<bool> {
-        let Ok(dictionary) = self.0.lock() else {
-            return vec![false; words.len()];
-        };
         words
             .iter()
-            .map(|(word, language)| serves(*language) && !dictionary.check(word))
+            .map(|(word, language)| {
+                with(*language, |dictionary| !dictionary.check(word)).unwrap_or(false)
+            })
             .collect()
     }
 
     fn suggest(&self, word: &str, language: u32) -> Vec<String> {
-        let mut suggestions = Vec::new();
-        if serves(language)
-            && let Ok(dictionary) = self.0.lock()
-        {
+        with(language, |dictionary| {
+            let mut suggestions = Vec::new();
             dictionary.suggest(word, &mut suggestions);
-        }
-        suggestions
+            suggestions
+        })
+        .unwrap_or_default()
     }
 
     fn learn(&self, word: &str) {
-        if let Ok(mut dictionary) = self.0.lock() {
-            let _ = dictionary.add(word);
+        if let Ok(mut loaded) = LOADED.lock() {
+            for dictionary in loaded.values_mut().flatten() {
+                let _ = dictionary.add(word);
+            }
         }
         let _ = notebook::fs::OpenOptions::new()
             .create(true)

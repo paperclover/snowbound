@@ -287,17 +287,27 @@ export function pickNotebook() {
     .catch((error) => error.name === "AbortError" || console.error("Opening the folder", error));
 }
 
+// The bytes at `url`, inflated where it ends in .gz.
+async function inflated(url) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${url}: ${response.status}`);
+  const body = url.endsWith(".gz")
+    ? new Response(response.body.pipeThrough(new DecompressionStream("gzip")))
+    : response;
+  return body.arrayBuffer();
+}
+
 export function fetchFont(name) {
-  fetch(`fonts/${name}`)
-    .then((response) => {
-      if (!response.ok) return Promise.reject(response.status);
-      const body = name.endsWith(".gz")
-        ? new Response(response.body.pipeThrough(new DecompressionStream("gzip")))
-        : response;
-      return body.arrayBuffer();
-    })
+  inflated(`fonts/${name}`)
     .then((data) => wasm.font_arrived(name, new Uint8Array(data)))
     .catch((error) => console.warn("Font", name, error));
+}
+
+export function fetchDictionary(name) {
+  const text = new TextDecoder();
+  Promise.all(["aff", "dic"].map((kind) => inflated(`dictionaries/${name}.${kind}.gz`)))
+    .then(([affix, words]) => wasm.dictionary_arrived(name, text.decode(affix), text.decode(words)))
+    .catch((error) => console.warn("Dictionary", name, error));
 }
 
 export function requestFrame() {
