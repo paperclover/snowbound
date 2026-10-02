@@ -6,7 +6,8 @@ crates.io (the version winit resolves to in `Cargo.lock`), copied without its
 `[patch.crates-io]` here.
 
 `Cargo.toml` gains a `[lints.rust]` table silencing a lint newer than the
-release, since Cargo does not cap a path dependency's warnings. The first source
+release, since Cargo does not cap a path dependency's warnings, and takes
+tiny-skia 0.12, as resvg does, in place of 0.11, whose API it shares. The first source
 change drops the 1 px border line under the header bar, so the title
 bar flows into Snowbound's toolbar as it does in a GTK 4 app:
 
