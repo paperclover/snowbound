@@ -394,8 +394,8 @@ pub struct Spec<'a> {
     /// paint or input, and its boxes take the group's rectangle, so what opens from them
     /// opens from the form shown.
     pub fold: Option<u32>,
-    /// How far the children fade out into the box's fill towards its leading and trailing
-    /// edges, as a row of them cut there does.
+    /// How far the children fade out into the box's fill towards its start and end along
+    /// its axis, as a row or list of them cut there does.
     pub fade: [f32; 2],
     /// What the box is to assistive technology; without one, its text shows as a label and
     /// its children as its parent's. `Ui::access` adds the rest of what it says.
@@ -1791,12 +1791,13 @@ impl Ui {
         }
     }
 
-    /// Fades box `index`'s children out towards its ends by its `fade`, in steps of a point,
-    /// into its fill however opaque that is: each step clears what lies beneath towards
-    /// transparency and lays the fill over it.
+    /// Fades box `index`'s children out towards its ends along its axis by its `fade`, in
+    /// steps of a point, into its fill however opaque that is: each step clears what lies
+    /// beneath towards transparency and lays the fill over it.
     fn fade(&mut self, index: usize) {
         let node = &self.nodes[index];
-        let [left, top, right, bottom] = node.rect;
+        let along = usize::from(node.axis == Axis::Y);
+        let rect = node.rect;
         let fill = node.fill.unwrap_or_default();
         let mut steps = Vec::new();
         for (side, width) in node.fade.into_iter().enumerate() {
@@ -1805,15 +1806,22 @@ impl Ui {
                 // Through the step's middle, eased so the fade leaves the children softly.
                 let alpha = 1.0 - (step as f32 + 0.5) / count as f32;
                 let alpha = alpha * alpha * (3.0 - 2.0 * alpha);
-                let x = if side == 0 {
-                    left + step as f32
+                let at = if side == 0 {
+                    rect[along] + step as f32
                 } else {
-                    right - 1.0 - step as f32
+                    rect[along + 2] - 1.0 - step as f32
                 };
-                steps.push(([x, top, x + 1.0, bottom], alpha));
+                let mut band = rect;
+                [band[along], band[along + 2]] = [at, at + 1.0];
+                steps.push((band, alpha));
             }
         }
-        let data = format!("M0 0H1V{}H0Z", bottom - top);
+        let [width, height] = [rect[2] - rect[0], rect[3] - rect[1]];
+        let data = if along == 0 {
+            format!("M0 0H1V{height}H0Z")
+        } else {
+            format!("M0 0H{width}V1H0Z")
+        };
         for (rect, alpha) in steps {
             // Laid over what the erasing leaves, the fill's share makes up the rest of the
             // children's lost opacity: all of it where the fill is opaque, none where clear.

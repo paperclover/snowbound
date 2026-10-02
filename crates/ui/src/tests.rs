@@ -1990,6 +1990,47 @@ fn a_long_menu_scrolls_by_dragging_its_thumb() {
 }
 
 #[test]
+fn a_long_menu_fades_the_ends_its_rows_are_cut_at_and_its_thumb_reaches_its_end() {
+    let names: Vec<String> = (0..40).map(|index| format!("Item {index}")).collect();
+    let items: Vec<_> = names
+        .iter()
+        .map(|text| popup::Item {
+            text,
+            ..popup::Item::default()
+        })
+        .collect();
+    let build = |ui: &mut Ui| {
+        frame(ui, |ui| {
+            popup::menu(ui, menu_id(), BELOW, &items, None);
+        })
+    };
+    let rows = menu_id().child("rows");
+    let fade = |ui: &Ui| ui.nodes.iter().find(|node| node.id == rows).unwrap().fade;
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    build(&mut ui);
+    ui.open_popup(menu_id());
+    build(&mut ui);
+    build(&mut ui);
+    assert_eq!(fade(&ui), [0.0, 12.0], "cut only at the bottom");
+    let thumb = ui.rect(rows.child("bar")).unwrap();
+    let x = (thumb[0] + thumb[2]) / 2.0;
+    ui.event(Event::PointerMoved([x, thumb[1] + 2.0]));
+    press(&mut ui, Instant::now(), true);
+    build(&mut ui);
+    ui.event(Event::PointerMoved([x, 1000.0]));
+    build(&mut ui);
+    build(&mut ui);
+    assert_eq!(fade(&ui), [12.0, 0.0], "cut only at the top");
+    let list = ui.rect(rows).unwrap();
+    let thumb = ui.rect(rows.child("bar")).unwrap();
+    assert_eq!(
+        thumb[3],
+        list[3] - 4.0,
+        "the thumb ends as far from the bottom as it starts"
+    );
+}
+
+#[test]
 fn a_command_menu_opens_at_its_top_and_a_picker_on_its_current_value() {
     let names: Vec<String> = (0..40).map(|index| format!("Item {index}")).collect();
     let rows = menu_id().child("rows");

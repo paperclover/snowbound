@@ -6,6 +6,8 @@ use winit::keyboard::NamedKey;
 
 /// Room beside a scrolling list's rows for its scrollbar.
 pub(crate) const GUTTER: f32 = 12.0;
+/// How far rows fade out towards an end of the list they are cut at.
+const FADE: f32 = 12.0;
 
 /// Items a list shows, in order.
 pub trait Rows {
@@ -181,8 +183,13 @@ pub fn list<R: Rows>(
     }
     if *selected != state.selected {
         if let Some(at) = selected.and_then(|key| rows.find(key)) {
-            let lowest = (top(at) + height - view).min(top(at));
-            state.target = state.target.clamp(lowest, top(at)).clamp(0.0, most);
+            // The selection settles clear of the fades; the list's own ends have none.
+            let [first, last] = [
+                top(at) - f64::from(FADE),
+                top(at) + height + f64::from(FADE),
+            ];
+            let lowest = (last - view).min(first);
+            state.target = state.target.clamp(lowest, first).clamp(0.0, most);
         }
         state.selected = *selected;
     }
@@ -199,11 +206,14 @@ pub fn list<R: Rows>(
     // Rows fill all but a gutter for the scrollbar, from their first frame: the padding
     // narrows what they fill, and they float from the corner.
     let gutter = if most > 0.0 { GUTTER / 2.0 } else { 0.0 };
+    let fade = |cut: bool| if cut { FADE } else { 0.0 };
     ui.open_as(
         id,
         Spec {
             flags: spec.flags | Flags::SCROLL | Flags::CLIP,
+            axis: Axis::Y,
             pad: [spec.pad[0] + gutter, spec.pad[1]],
+            fade: [fade(scroll > 0.5), fade(scroll < most - 0.5)],
             ..spec
         },
     );
