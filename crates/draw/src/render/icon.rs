@@ -33,7 +33,7 @@ impl Palette {
 /// Rasterizes 16×16 SVG sources over each other at a whole `size` of device pixels. Paths are filled and stroked with `#rrggbb`, `currentColor`,
 /// which paints the linear `ink`, or two-stop `linearGradient`s with SVG's defaults
 /// (`objectBoundingBox` unless `userSpaceOnUse`, `x1`..`y2`, stop offsets, pad spread; no
-/// `gradientTransform`). `fill-opacity` and `stroke-opacity` apply, and strokes have round
+/// `gradientTransform`). `fill-opacity`, `stroke-opacity` and `stop-opacity` apply, and strokes have round
 /// caps and joins. A slot's paths keep the shading among their colours: the hue turn,
 /// saturation scale and lightness shift that carry the mean of the slot's colours in a
 /// source onto the palette's colour apply to each of them. A source's `image`s of PNG
@@ -141,7 +141,8 @@ pub(crate) fn rasterize(sources: &[&str], size: u32, ink: [f32; 3], palette: &Pa
                     let [x, y] = [index % side as usize, index / side as usize]
                         .map(|device| device as f32 + 0.5)
                         .map(|device| device * 16.0 / size);
-                    over(pixel, color([x, y]), alpha);
+                    let color = color([x, y]);
+                    over(pixel, color, alpha * color[3]);
                 }
             }
         }
@@ -287,8 +288,12 @@ impl Paint {
             .children()
             .filter(|node| node.has_tag_name("stop"))
             .map(|node| {
+                let [red, green, blue, _] = hex(node.attribute("stop-color").unwrap());
+                let opacity = node
+                    .attribute("stop-opacity")
+                    .map_or(1.0, |value| value.parse().unwrap());
                 (
-                    hex(node.attribute("stop-color").unwrap()),
+                    [red, green, blue, opacity],
                     node.attribute("offset")
                         .map_or(0.0, |offset| number(offset, 1.0)),
                 )
@@ -565,6 +570,20 @@ mod tests {
         assert_eq!(alpha(8, 8), 128);
         // The stroke's outer half covers only what the fill leaves.
         assert_eq!(alpha(1, 8), 64);
+    }
+
+    #[test]
+    fn stop_opacity_fades_a_gradient() {
+        const FADE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"><defs><linearGradient id="g" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#ffffff" stop-opacity="0"/></linearGradient></defs><path d="M0 0H16V16H0Z" fill="url(#g)"/></svg>"##;
+        let image = rasterize(&[FADE], 16, [1.0; 3], &Palette::default());
+        let alpha = |y: usize| image.data[(y * 16 + 8) * 4 + 3];
+        assert!(
+            alpha(0) > 240 && alpha(15) < 15,
+            "{} {}",
+            alpha(0),
+            alpha(15)
+        );
+        assert!((i32::from(alpha(8)) - 120).abs() < 10, "{}", alpha(8));
     }
 
     /// A 2×1 PNG, red then half-transparent blue, fits the icon's width, centred, and paints

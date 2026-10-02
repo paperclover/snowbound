@@ -27,10 +27,18 @@ pub const INDENT: &[&str] = art!("icons/indent");
 pub const INFO: &[&str] = art!("icons/info");
 pub const ITALIC: &[&str] = art!("icons/italic");
 pub const LINK: &[&str] = art!("icons/link");
-pub const NOTEBOOK: &[&str] = art!("icons/notebook");
+/// A notebook: its back and tabs, the cover `currentColor` paints, and what lies on the cover.
+/// iOS layers the same files.
+pub const NOTEBOOK: &[&str] = &[
+    include_str!("../assets/icons/notebook-back.svg"),
+    include_str!("../assets/icons/notebook-cover.svg"),
+    include_str!("../assets/icons/notebook.svg"),
+];
 /// A notebook iCloud Drive keeps: its glyph with a cloud at the corner.
 pub const NOTEBOOK_ICLOUD: &[&str] = &[
     NOTEBOOK[0],
+    NOTEBOOK[1],
+    NOTEBOOK[2],
     include_str!("../assets/icons/icloud-badge.svg"),
 ];
 pub const NUMBERING: &[&str] = art!("icons/numbering");

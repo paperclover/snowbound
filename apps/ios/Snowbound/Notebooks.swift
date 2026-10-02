@@ -140,6 +140,20 @@ struct Tab: Decodable, Equatable {
     var uiColor: UIColor { UIColor(rgb: color) }
 }
 
+extension UIImage {
+    /// A notebook's binder, the desktop's art, `side` points square: its cover in `color`, or
+    /// the art's own orange.
+    static func notebook(_ color: UIColor?, side: CGFloat = 28) -> UIImage {
+        let frame = CGRect(x: 0, y: 0, width: side, height: side)
+        let cover = color ?? UIColor(rgb: [0xf3, 0x9c, 0x28])
+        return UIGraphicsImageRenderer(size: frame.size).image { _ in
+            UIImage(named: "NotebookBack")?.draw(in: frame)
+            UIImage(named: "NotebookCover")?.withTintColor(cover, renderingMode: .alwaysOriginal).draw(in: frame)
+            UIImage(named: "Notebook")?.draw(in: frame)
+        }.withRenderingMode(.alwaysOriginal)
+    }
+}
+
 extension UIViewController {
     /// Tells the reader `title` and `message` in an alert they dismiss with OK.
     func alert(_ title: String, _ message: String) {
@@ -175,7 +189,7 @@ final class Notebook {
     private(set) var name: String
     private(set) var handle: OpaquePointer?
     private(set) var tabs: [Tab] = []
-    /// The notebook's colour, which tints its book in the list; none where it has none.
+    /// The notebook's colour, which its binder's cover takes in the list; none where it has none.
     private(set) var color: UIColor?
     /// Why the notebook could not be opened, while it cannot.
     private(set) var problem: String?

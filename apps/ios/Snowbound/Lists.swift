@@ -307,8 +307,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         case .notebook(let id):
             guard let notebook = notebook(id) else { break }
             content.text = notebook.name
-            content.image = UIImage(systemName: "book.closed.fill")
-            content.imageProperties.tintColor = notebook.color
+            content.image = .notebook(notebook.color)
             var details: [String] = []
             if case .server(let server) = notebook.source { details.append(server.host) }
             if let state = attention[id]?.state {

@@ -38,7 +38,7 @@ extension Prototype {
     ) -> UIContentUnavailableConfiguration? {
         guard Notebooks.all.isEmpty, !ICloud.signedIn || ICloud.documents != nil else { return nil }
         var welcome = UIContentUnavailableConfiguration.empty()
-        welcome.image = UIImage(systemName: "book.closed")
+        welcome.image = .notebook(nil, side: 64)
         welcome.text = "No Notebooks Yet"
         welcome.secondaryText =
             ICloud.documents != nil
@@ -286,7 +286,7 @@ enum QuickNote {
                 let notebooks = Notebooks.all.filter { $0.tabs.contains(where: \.readable) }
                 let choices = notebooks.map { notebook in
                     UIMenu(
-                        title: notebook.name, image: UIImage(systemName: "book.closed"),
+                        title: notebook.name, image: .notebook(notebook.color),
                         children: notebook.tabs.filter(\.readable).map { tab in
                             let chosen = Place(notebook: notebook.id, section: tab.path)
                             let action = UIAction(

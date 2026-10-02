@@ -681,7 +681,7 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
             size: [fill(), px(line)],
             text: Some(facts.name),
             icon: Some(art::NOTEBOOK),
-            tint: Some(crate::notebook_color(facts.color)),
+            tint: Some(crate::notebook_color(&theme, facts.color)),
             bold: true,
             overflow: Overflow::Ellipsis,
             ..Spec::default()

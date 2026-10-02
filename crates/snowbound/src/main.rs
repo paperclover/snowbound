@@ -4474,10 +4474,12 @@ fn section_color(color: Option<u32>) -> [f32; 4] {
     color.map_or(draw::srgb(0x8a, 0xa8, 0xe4), canvas::gpu::colorref)
 }
 
-/// The colour a notebook's glyph takes from its COLORREF, as OneNote's navigation bar tints
-/// it; the glyph's own orange without one.
-fn notebook_color(color: Option<u32>) -> [f32; 4] {
-    color.map_or(draw::srgb(0xf3, 0x9c, 0x28), canvas::gpu::colorref)
+/// The colour a notebook's cover takes in `theme`: its COLORREF's hue at the shade a section's
+/// takes, or the glyph's own orange without one.
+fn notebook_color(theme: &Theme, color: Option<u32>) -> [f32; 4] {
+    color.map_or(draw::srgb(0xf3, 0x9c, 0x28), |color| {
+        theme.section(canvas::gpu::colorref(color)).accent
+    })
 }
 
 /// OneNote's information bar for conflicting changes, clicked anywhere: above a page with

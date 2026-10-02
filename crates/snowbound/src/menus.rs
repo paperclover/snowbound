@@ -578,7 +578,7 @@ impl State {
                         tint: place
                             .path
                             .is_empty()
-                            .then(|| crate::notebook_color(library.color())),
+                            .then(|| crate::notebook_color(theme, library.color())),
                     })
                     .collect()
             }

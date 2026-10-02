@@ -613,7 +613,7 @@ impl Leading {
     fn art(self, theme: &Theme) -> (&'static [&'static str], [f32; 4]) {
         match self {
             Self::Icon(icon) => (icon, theme.text),
-            Self::Notebook(icon, color) => (icon, crate::notebook_color(color)),
+            Self::Notebook(icon, color) => (icon, crate::notebook_color(theme, color)),
             Self::Section(section) => (art::SECTION, theme.section(section).accent),
         }
     }
@@ -867,7 +867,10 @@ impl crate::State {
                 ..Spec::default()
             },
         );
-        let tint = crate::notebook_color(self.notebook().and_then(|library| library.color()));
+        let tint = crate::notebook_color(
+            &self.ui.theme,
+            self.notebook().and_then(|library| library.color()),
+        );
         if ui::shell::tool_button(&mut self.ui, "button", art::NOTEBOOK, tint, None).clicked {
             self.sidebar = !self.sidebar;
             self.save_settings();
