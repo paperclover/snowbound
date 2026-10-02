@@ -5928,6 +5928,13 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
 
 fn main() -> Result<(), Box<dyn Error>> {
     #[cfg(target_os = "linux")]
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|arg| arg.as_encoded_bytes() == platform::SYMBOLIZE.to_bytes())
+    {
+        return platform::symbolize(std::env::args_os().skip(2));
+    }
+    #[cfg(target_os = "linux")]
     loader::preload();
     // Before the crash log, which the app showing the dialog keeps writing.
     #[cfg(target_os = "linux")]

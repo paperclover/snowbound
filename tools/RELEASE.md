@@ -158,9 +158,9 @@ already carried them. Line tables would take an executable to some 250 MB, and
 a dSYM adds 34 MB zipped per Mac architecture, so neither ships; build with
 `CARGO_PROFILE_RELEASE_DEBUG=line-tables-only` for files and lines. Windows
 tools that read only PDBs see no names: the Rust targets here emit DWARF, from
-which lld's PDB keeps only global symbols. Linux's crash log gives a signal's
-frames as `snowbound(+0x1a2b3c)`, since glibc's `backtrace_symbols_fd` reads only
-dynamic symbols; `addr2line -f -e snowbound 0x1a2b3c` names them.
+which lld's PDB keeps only global symbols. glibc's `backtrace_symbols_fd` reads only
+dynamic symbols, so for a signal Linux's crash log starts the executable again
+with `--symbolize` to name its frames from the symbol table.
 
 ## In the app
 

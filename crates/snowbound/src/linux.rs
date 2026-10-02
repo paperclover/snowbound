@@ -6,15 +6,16 @@
 use crate::dialog::Ask;
 use canvas::date::DateField;
 use std::{
+    cell::UnsafeCell,
     collections::HashMap,
     error::Error,
-    ffi::CStr,
+    ffi::{CStr, CString, OsString, c_char, c_void},
     os::unix::ffi::OsStringExt,
     path::PathBuf,
     process::Command,
     sync::{
         OnceLock,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
     },
     time::Duration,
 };
@@ -732,6 +733,11 @@ fn log_crashes() {
         );
         crashed(|fd| write_all(fd, report.as_bytes()));
     }));
+    if let Ok(path) = crate::loader::executable()
+        && let Ok(path) = CString::new(path.into_os_string().into_vec())
+    {
+        let _ = EXECUTABLE.set((path, main_base()));
+    }
     // glibc's backtrace loads its unwinder on first use, which a signal handler can't.
     unsafe { libc::backtrace([std::ptr::null_mut(); 1].as_mut_ptr(), 1) };
     for signal in FATAL.map(|(signal, _)| signal) {
@@ -760,14 +766,10 @@ extern "C" fn fatal(signal: i32, info: *mut libc::siginfo_t, _: *mut libc::c_voi
     let mut thread = [0u8; 16];
     unsafe { libc::prctl(libc::PR_GET_NAME, thread.as_mut_ptr()) };
     let thread = &thread[..thread.iter().position(|&byte| byte == 0).unwrap_or(15)];
-    let mut address = *b"0x0000000000000000";
-    let mut value = unsafe { (*info).si_addr() } as usize;
-    for digit in address[2..].iter_mut().rev() {
-        *digit = b"0123456789abcdef"[value & 15];
-        value >>= 4;
-    }
-    let mut frames = [std::ptr::null_mut(); 128];
+    let address = hex(unsafe { (*info).si_addr() } as usize);
+    let mut frames = [std::ptr::null_mut(); FRAMES];
     let count = unsafe { libc::backtrace(frames.as_mut_ptr(), frames.len() as i32) };
+    let functions = functions(&frames[..count.max(0) as usize]);
     crashed(|fd| {
         let parts: [&[u8]; 7] = [
             b"Thread \"",
@@ -775,16 +777,183 @@ extern "C" fn fatal(signal: i32, info: *mut libc::siginfo_t, _: *mut libc::c_voi
             b"\" received ",
             name.as_bytes(),
             b" at ",
-            &address,
+            &address[..18],
             b"\n",
         ];
         for part in parts {
             write_all(fd, part);
         }
         unsafe { libc::backtrace_symbols_fd(frames.as_ptr(), count, fd) };
+        write_all(fd, functions);
         write_all(fd, b"\n");
     });
     unsafe { libc::raise(signal) };
+}
+
+const FRAMES: usize = 128;
+
+/// `0x` and 16 hex digits, NUL-terminated.
+fn hex(mut value: usize) -> [u8; 19] {
+    let mut text = *b"0x0000000000000000\0";
+    for digit in text[2..18].iter_mut().rev() {
+        *digit = b"0123456789abcdef"[value & 15];
+        value >>= 4;
+    }
+    text
+}
+
+/// The executable's path and where it is loaded, for `functions`.
+static EXECUTABLE: OnceLock<(CString, usize)> = OnceLock::new();
+
+/// Where the dynamic loader placed the executable: symbol values plus this are addresses.
+fn main_base() -> usize {
+    unsafe extern "C" fn first(info: *mut libc::dl_phdr_info, _: usize, base: *mut c_void) -> i32 {
+        unsafe { *base.cast::<usize>() = (*info).dlpi_addr as usize };
+        1
+    }
+    let mut base = 0usize;
+    unsafe { libc::dl_iterate_phdr(Some(first), (&raw mut base).cast()) };
+    base
+}
+
+/// The argument that runs Snowbound as `functions`' symbolizer, followed by frames' offsets.
+pub const SYMBOLIZE: &CStr = c"--symbolize";
+
+/// The symbolizer's arguments and output, which only the first crashing thread touches.
+struct Scratch {
+    offsets: [[u8; 19]; FRAMES],
+    arguments: [*const c_char; FRAMES + 3],
+    text: [u8; 1 << 14],
+}
+struct Shared(UnsafeCell<Scratch>);
+unsafe impl Sync for Shared {}
+static SCRATCH: Shared = Shared(UnsafeCell::new(Scratch {
+    offsets: [[0; 19]; FRAMES],
+    arguments: [std::ptr::null(); FRAMES + 3],
+    text: [0; 1 << 14],
+}));
+
+/// Names the frames in Snowbound's own code from its symbol table, which a crashed process
+/// can't safely read: a new process started from the executable does. Empty where it can't.
+fn functions(frames: &[*mut c_void]) -> &'static [u8] {
+    static TAKEN: AtomicBool = AtomicBool::new(false);
+    let Some((path, base)) = EXECUTABLE.get() else {
+        return b"";
+    };
+    if TAKEN.swap(true, Ordering::Relaxed) {
+        return b"";
+    }
+    let scratch = unsafe { &mut *SCRATCH.0.get() };
+    scratch.arguments[0] = path.as_ptr();
+    scratch.arguments[1] = SYMBOLIZE.as_ptr();
+    for (index, frame) in frames.iter().enumerate() {
+        scratch.offsets[index] = hex((*frame as usize).wrapping_sub(*base));
+        scratch.arguments[index + 2] = scratch.offsets[index].as_ptr().cast();
+    }
+    scratch.arguments[frames.len() + 2] = std::ptr::null();
+    let mut pipe = [0; 2];
+    if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return b"";
+    }
+    // A bare clone: glibc's fork takes malloc's locks, which the crashed thread may hold.
+    let child = unsafe { libc::syscall(libc::SYS_clone, libc::SIGCHLD, 0, 0, 0, 0) };
+    if child == 0 {
+        unsafe {
+            libc::dup2(pipe[1], 1);
+            // One that hangs ends, and the crash with it.
+            libc::alarm(10);
+            libc::execv(path.as_ptr(), scratch.arguments.as_ptr());
+            libc::_exit(127);
+        }
+    }
+    unsafe { libc::close(pipe[1]) };
+    let mut length = 0;
+    if child > 0 {
+        while length < scratch.text.len() {
+            let read = unsafe {
+                libc::read(
+                    pipe[0],
+                    scratch.text[length..].as_mut_ptr().cast(),
+                    scratch.text.len() - length,
+                )
+            };
+            if read <= 0 {
+                break;
+            }
+            length += read as usize;
+        }
+        unsafe { libc::waitpid(child as i32, std::ptr::null_mut(), 0) };
+    }
+    unsafe { libc::close(pipe[0]) };
+    &scratch.text[..length]
+}
+
+/// The symbolizer `functions` starts: lists each frame offset that falls in a function of the
+/// executable's symbol table, by its place in the backtrace.
+pub fn symbolize(offsets: impl Iterator<Item = OsString>) -> Result<(), Box<dyn Error>> {
+    use std::{fmt::Write as _, io::Write as _, os::unix::fs::FileExt};
+    let file = std::fs::File::open(crate::loader::executable()?)?;
+    let read = |offset: usize, length: usize| -> std::io::Result<Vec<u8>> {
+        let mut bytes = vec![0; length];
+        file.read_exact_at(&mut bytes, offset as u64)?;
+        Ok(bytes)
+    };
+    let field = |bytes: &[u8], at: usize, size: usize| {
+        let mut value = [0; 8];
+        value[..size].copy_from_slice(&bytes[at..at + size]);
+        usize::from_le_bytes(value)
+    };
+    // ELF64, little-endian, as both Linux builds are.
+    let header = read(0, 64)?;
+    let size = field(&header, 58, 2);
+    let sections = read(field(&header, 40, 8), size * field(&header, 60, 2))?;
+    let sections: Vec<&[u8]> = sections.chunks_exact(size).collect();
+    let table = sections
+        .iter()
+        .find(|section| field(section, 4, 4) == 2)
+        .ok_or("no symbol table")?;
+    let symbols = read(field(table, 24, 8), field(table, 32, 8))?;
+    let strings = sections[field(table, 40, 4)];
+    let strings = read(field(strings, 24, 8), field(strings, 32, 8))?;
+    let mut ranges: Vec<(usize, usize, &[u8])> = symbols
+        .chunks_exact(24)
+        .filter(|symbol| symbol[4] & 15 == 2 && field(symbol, 16, 8) > 0)
+        .map(|symbol| {
+            let name = &strings[field(symbol, 0, 4)..];
+            let start = field(symbol, 8, 8);
+            let end = name
+                .iter()
+                .position(|&byte| byte == 0)
+                .unwrap_or(name.len());
+            (start, start + field(symbol, 16, 8), &name[..end])
+        })
+        .collect();
+    ranges.sort_unstable_by_key(|range| range.0);
+    let mut report = String::from("In Snowbound, by place in the backtrace:\n");
+    let mut found = false;
+    for (place, offset) in offsets.enumerate() {
+        let offset = offset.to_str().and_then(|offset| offset.strip_prefix("0x"));
+        let Some(offset) = offset.and_then(|offset| usize::from_str_radix(offset, 16).ok()) else {
+            continue;
+        };
+        let index = ranges.partition_point(|range| range.0 <= offset);
+        if let Some(&(start, end, name)) = index.checked_sub(1).map(|index| &ranges[index])
+            && offset < end
+        {
+            let name = String::from_utf8_lossy(name);
+            writeln!(
+                report,
+                "{place:4} {:#} + {:#x}",
+                rustc_demangle::demangle(&name),
+                offset - start
+            )?;
+            found = true;
+        }
+    }
+    if found {
+        std::io::stdout().write_all(report.as_bytes())?;
+    }
+    Ok(())
 }
 
 /// Writes a report, through `write` on a descriptor, to stderr and the log, then says where the
