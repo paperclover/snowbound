@@ -1038,13 +1038,23 @@ impl Chord {
     }
 }
 
+/// The platform whose way chords read in here: a Mac's in a browser on one, where ⌘ takes
+/// the PC's Ctrl chords.
+pub fn shown() -> Platform {
+    #[cfg(target_arch = "wasm32")]
+    if crate::platform::mac() {
+        return Platform::MacOs;
+    }
+    Platform::CURRENT
+}
+
 /// The chord a menu or hint shows for `id` here, empty where it has none.
 pub fn shortcut(id: Id) -> String {
     let chord = match id {
         Id::Tag(place) => tag_chord(place),
         id => chords(id).first().copied(),
     };
-    chord.map_or_else(String::new, |chord| chord.label(Platform::CURRENT))
+    chord.map_or_else(String::new, |chord| chord.label(shown()))
 }
 
 impl State {

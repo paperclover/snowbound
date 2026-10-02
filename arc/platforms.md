@@ -173,7 +173,7 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   page has written the file and found nothing else wrote it since it was read; until then
   it is uncertain, as one whose answer was lost, and it goes again on top of another app's
   write. The sync popup says the folder isn't locked.
-- Menus are the kit's own, as on Linux, with the PC's chords and ⌘ for Ctrl on a Mac; the
+- Menus are the kit's own, as on Linux, with the PC's chords, which a Mac takes and shows with ⌘ for Ctrl and ⌥ for Alt; the
   browser keeps its own window and tab chords, so New Page and New Section add Alt to
   theirs. Dialogs are the browser's; Insert, and Open
   without a folder to give, ask for files to copy in; printing downloads the PDF. Servers and

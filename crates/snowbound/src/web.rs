@@ -203,6 +203,11 @@ thread_local! {
     static LANGUAGE: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
+/// Whether the browser runs on a Mac, where Command takes the editing chords.
+pub fn mac() -> bool {
+    MAC.get()
+}
+
 /// The page's canvas, which frames are drawn into.
 pub fn canvas() -> web_sys::HtmlCanvasElement {
     use wasm_bindgen::JsCast;
@@ -920,6 +925,10 @@ pub async fn start(
     }
     STATE.with_borrow_mut(|slot| *slot = Some(state));
     attach(module);
+    // A Mac's chords read ⌘⌥⇧, which only a fallback face draws.
+    if MAC.get() {
+        fetch_fallbacks("⌘⌥⇧");
+    }
     request_frame();
     Ok(())
 }

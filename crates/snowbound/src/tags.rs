@@ -6,7 +6,6 @@ use accesskit::Role;
 use canvas::editor::NoteTag;
 use canvas::gpu::{colorref, tag_sources};
 use canvas::outline::{TagIcon, symbol_name};
-use draw::edit::Platform;
 use notebook::sidecar::art_name;
 use ui::{Anchor, Axis, Flags, Id, Spec, Ui, children, fill, fit, px};
 use winit::keyboard::NamedKey;
@@ -458,7 +457,7 @@ impl State {
                 None => icon(ui, "icon", Some(crate::art::FONT_COLOR), theme.text),
             }
             let text = match commands::tag_chord(place) {
-                Some(chord) => format!("{} ({})", tag.label, chord.label(Platform::CURRENT)),
+                Some(chord) => format!("{} ({})", tag.label, chord.label(commands::shown())),
                 None => tag.label.clone(),
             };
             label(ui, "label", &text, tag);

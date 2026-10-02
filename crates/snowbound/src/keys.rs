@@ -72,7 +72,7 @@ fn group(id: Command) -> &'static str {
 }
 
 fn label(chord: Chord) -> String {
-    chord.label(Platform::CURRENT)
+    chord.label(commands::shown())
 }
 
 fn title(id: Command) -> String {
@@ -334,16 +334,19 @@ impl Keyboard {
     fn status(&mut self, ui: &mut Ui) {
         let theme = ui.theme.clone();
         let row = theme.font_size * 2.0;
-        let mac = Platform::CURRENT == Platform::MacOs;
+        // A Mac's browser takes the PC's chords, Option for Alt.
+        let modifiers = match (Platform::CURRENT, commands::shown()) {
+            (Platform::MacOs, _) => "⌘ or ⌃",
+            (_, Platform::MacOs) => "⌘ or ⌥",
+            _ => "Ctrl or Alt",
+        };
         let text = match &self.recording {
             None => "Click a shortcut to change it".to_owned(),
             Some(recording) => match recording.refused {
                 None => format!("Type a shortcut for {}", title(recording.command)),
-                Some(Refusal::Unusable(chord, Unusable::Typing)) => format!(
-                    "{} types text. Include {}",
-                    label(chord),
-                    if mac { "⌘ or ⌃" } else { "Ctrl or Alt" }
-                ),
+                Some(Refusal::Unusable(chord, Unusable::Typing)) => {
+                    format!("{} types text. Include {}", label(chord), modifiers)
+                }
                 Some(Refusal::Unusable(chord, Unusable::Editing)) => {
                     format!("{} moves through text. Type another", label(chord))
                 }
