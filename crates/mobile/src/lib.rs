@@ -1225,8 +1225,8 @@ pub unsafe extern "C" fn sb_view_select_paragraph(view: &mut View, id: *const c_
 pub extern "C" fn sb_view_copy(view: &mut View, cut: bool) -> *mut c_char {
     let mut copied = None;
     let result = view.canvas.page.copy(cut).map(|response| {
-        if let Some(Request::Copy(text)) = &response.request {
-            copied = Some(text.clone());
+        if let Some(Request::Copy(clip)) = &response.request {
+            copied = Some(clip.text());
         }
         moved(response)
     });

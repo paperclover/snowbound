@@ -72,7 +72,7 @@ pub(super) fn references(node: &PageParagraph) -> impl Iterator<Item = ExGuid> +
 }
 
 /// The definitions `paragraphs` and their cells name.
-fn named(
+pub(super) fn named(
     definitions: &BTreeMap<ExGuid, Definition>,
     paragraphs: &[&[PageParagraph]],
 ) -> BTreeMap<ExGuid, Definition> {

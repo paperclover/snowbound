@@ -133,24 +133,16 @@ fn pasted_pictures_split_the_text_or_lie_on_the_page_as_onenote_places_them() {
         .paste_pieces(
             &mut engine,
             vec![
-                Piece::Text("web ".into()),
+                pasted("web&nbsp;"),
                 Piece::Picture(png, [150.0, 75.0]),
-                Piece::Text("page\ntext ".into()),
+                pasted("page<br>text&nbsp;"),
             ],
-            0x0409,
         )
         .unwrap();
     store(&mut editor);
     assert_eq!(
         body(&editor),
-        [
-            "Pasted web ",
-            "[150.0, 75.0]",
-            "",
-            "page",
-            "text ",
-            "pictures"
-        ]
+        ["Pasted web ", "[150.0, 75.0]", "page", "text ", "pictures"]
     );
     editor.undo(&mut engine).unwrap();
     store(&mut editor);
@@ -162,12 +154,7 @@ fn pasted_pictures_split_the_text_or_lie_on_the_page_as_onenote_places_them() {
     let awaited = editor
         .paste_pieces(
             &mut engine,
-            vec![
-                Piece::Text("web".into()),
-                Piece::Awaited,
-                Piece::Text("page ".into()),
-            ],
-            0x0409,
+            vec![pasted("web"), Piece::Awaited, pasted("page&nbsp;")],
         )
         .unwrap();
     store(&mut editor);
@@ -332,4 +319,11 @@ fn a_picture_pasted_from_the_title_goes_into_the_body() {
         [placed.layout.x, placed.layout.y],
         [Some(start[0]), Some(margin[1] + row * 18.0)]
     );
+}
+
+/// Pasted text, as a web page gives it.
+fn pasted(html: &str) -> Piece {
+    canvas::editor::html_pieces(html, 0x0409, |_, _| None)
+        .pop()
+        .unwrap()
 }

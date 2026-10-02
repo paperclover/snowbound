@@ -159,7 +159,7 @@ pub(crate) fn unlinked(format: &mut Format) {
 }
 
 /// A field code naming `address`, which cannot hold its quotes or line breaks.
-fn field_code(address: &str) -> String {
+pub(super) fn field_code(address: &str) -> String {
     let address: String = address
         .trim()
         .chars()

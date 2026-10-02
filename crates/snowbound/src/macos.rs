@@ -195,8 +195,31 @@ impl Clipboard {
         set.then_some(()).ok_or("The pasteboard refused the text")
     }
 
+    /// Text, HTML and Snowbound's own format, as one copy.
+    pub fn set(&mut self, copied: &crate::paste::Copied) -> Result<(), &'static str> {
+        let set = unsafe {
+            let _: isize = msg_send![&self.0, clearContents];
+            [
+                (TEXT, &copied.text),
+                ("public.html", &copied.html),
+                (CLIP, &copied.clip),
+            ]
+            .into_iter()
+            .all(|(kind, value)| {
+                let (value, kind) = (NSString::from_str(value), NSString::from_str(kind));
+                msg_send![&self.0, setString: &*value, forType: &*kind]
+            })
+        };
+        set.then_some(()).ok_or("The pasteboard refused the copy")
+    }
+
     pub fn get_text(&mut self) -> Result<String, &'static str> {
         self.string(TEXT).ok_or("The pasteboard holds no text")
+    }
+
+    /// What Snowbound itself copied, if it did.
+    pub fn get_clip(&mut self) -> Option<String> {
+        self.string(CLIP)
     }
 
     /// The files copied, as Finder puts them on the pasteboard.
@@ -261,6 +284,9 @@ impl Clipboard {
 
 /// NSPasteboardTypeString.
 const TEXT: &str = "public.utf8-plain-text";
+
+/// Snowbound's own format's pasteboard type.
+const CLIP: &str = "net.paperclover.snowbound.clip";
 
 /// TIFF `data` as PNG data, keeping its resolution.
 unsafe fn tiff_png(data: &AnyObject) -> Option<Retained<AnyObject>> {
@@ -1541,10 +1567,10 @@ mod tests {
     use super::*;
     use crate::library::{Login, Mount};
 
-    /// Text, a page and files read back as written, from a pasteboard of the test's own,
-    /// never the user's.
+    /// Text, a page, files and a copy's every format read back as written, from a
+    /// pasteboard of the test's own, never the user's.
     #[test]
-    fn the_pasteboard_reads_back_text_pages_and_files() {
+    fn the_pasteboard_reads_back_text_pages_files_and_copies() {
         let board: Retained<AnyObject> =
             unsafe { msg_send_id![class!(NSPasteboard), pasteboardWithUniqueName] };
         let mut clipboard = Clipboard(board.clone());
@@ -1567,6 +1593,17 @@ mod tests {
             let _: bool = msg_send![&board, writeObjects: &*urls];
         }
         assert_eq!(clipboard.get_files(), [std::path::PathBuf::from(path)]);
+        let copied = crate::paste::Copied {
+            text: "Copied".into(),
+            html: "<p>Copied</p>".into(),
+            clip: "{}".into(),
+        };
+        clipboard.set(&copied).unwrap();
+        assert_eq!(clipboard.get_text().unwrap(), "Copied");
+        assert_eq!(clipboard.get_html().as_deref(), Some("<p>Copied</p>"));
+        assert_eq!(clipboard.get_clip().as_deref(), Some("{}"));
+        clipboard.set_text("Plain".into()).unwrap();
+        assert_eq!(clipboard.get_clip(), None);
         unsafe { msg_send![&board, releaseGlobally] }
     }
 

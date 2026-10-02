@@ -147,10 +147,17 @@ lies on the page at the caret, and the caret moves to the grid row below it.
 From the title it joins the outline where the body starts, or lies two grid rows
 below the page's content when none starts there. A picture takes the size its
 resolution gives it, or 96 dpi without one. Paste takes files first (a picture
-file as its picture, as a dropped one goes in), then a web page holding
-pictures, its text and pictures in order as one undo step, then text, then a
-picture: Finder offers a copied file's name and icon beside it, and other apps a
-picture of copied text.
+file as its picture, as a dropped one goes in), then Snowbound's own copy, then
+a web page, its formatted text, lists, tables and pictures in order as one undo
+step, then text, then a picture: Finder offers a copied file's name and icon
+beside it, and other apps a picture of copied text.
+
+Copy offers what OneNote 2010 does beside text, HTML with each run's formatting
+inline, lists as `ul` and `ol` and tables bordered, which OneNote and Word paste
+as copied (`corpus/clipboard`). Snowbound's own format, a `Clip` of paragraphs
+and the definitions they name as JSON, carries styles, tags and pictures too.
+Several paragraphs go between the halves of the caret's paragraph, an empty
+half dropped; a title takes the text alone.
 
 ## Recordings
 

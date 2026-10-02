@@ -197,6 +197,9 @@ pub fn install_title_bar(window: &Window) {
     crate::desktop::set_toplevel_icon(window);
 }
 
+/// The HTML and Snowbound's own format of this process's last copy through X11.
+static LAST_COPY: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+
 /// Wayland's clipboard through the window's own connection, as not every compositor offers
 /// a clipboard to clients without a window; X11's otherwise.
 pub enum Clipboard {
@@ -223,6 +226,35 @@ impl Clipboard {
                 Ok(())
             }
             Self::X11(clipboard) => clipboard.set_text(text),
+        }
+    }
+
+    /// Text, HTML and Snowbound's own format, as one copy: see [`crate::paste::Copied`].
+    /// smithay-clipboard offers text alone.
+    pub fn set(&mut self, copied: &crate::paste::Copied) -> Result<(), arboard::Error> {
+        match self {
+            Self::Wayland(clipboard) => {
+                clipboard.store(copied.text.clone());
+                Ok(())
+            }
+            Self::X11(clipboard) => {
+                clipboard.set().html(&copied.html, Some(&copied.text))?;
+                *LAST_COPY.lock().unwrap() = Some((copied.html.clone(), copied.clip.clone()));
+                Ok(())
+            }
+        }
+    }
+
+    /// What Snowbound itself copied, if it did: on X11, which arboard offers no format of
+    /// Snowbound's own through, the last copy's, while the clipboard holds its HTML.
+    pub fn get_clip(&mut self) -> Option<String> {
+        if !matches!(self, Self::X11(_)) {
+            return None;
+        }
+        let html = self.get_html()?;
+        match &*LAST_COPY.lock().unwrap() {
+            Some((copied, clip)) if *copied == html => Some(clip.clone()),
+            _ => None,
         }
     }
 

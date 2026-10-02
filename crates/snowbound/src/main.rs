@@ -89,6 +89,7 @@ mod watch;
 
 #[cfg(not(target_arch = "wasm32"))]
 use accesskit_winit::Adapter as AccessAdapter;
+use canvas::editor::Clip;
 #[cfg(not(target_arch = "wasm32"))]
 use canvas::editor::{DEFAULT_OUTLINE_WIDTH, TextOutline};
 use canvas::gpu::colorref;
@@ -255,14 +256,23 @@ struct Redraw(EventLoopProxy<UserEvent>);
 
 enum Clipboard {
     System(platform::Clipboard),
-    Memory(String),
+    /// What was last copied, text alone or a clip.
+    Memory(String, Option<Clip>),
 }
 
 impl Clipboard {
     fn set_text(&mut self, text: String) -> Result<(), Box<dyn Error>> {
         match self {
             Self::System(clipboard) => clipboard.set_text(text)?,
-            Self::Memory(held) => *held = text,
+            Self::Memory(held, clip) => (*held, *clip) = (text, None),
+        }
+        Ok(())
+    }
+
+    fn set(&mut self, clip: Clip) -> Result<(), Box<dyn Error>> {
+        match self {
+            Self::System(clipboard) => clipboard.set(&paste::Copied::new(&clip))?,
+            Self::Memory(held, kept) => (*held, *kept) = (clip.text(), Some(clip)),
         }
         Ok(())
     }
@@ -271,21 +281,25 @@ impl Clipboard {
         match self {
             Self::System(clipboard) => {
                 let files = clipboard.get_files();
+                let text = |clipboard: &mut platform::Clipboard| {
+                    clipboard.get_text().ok().filter(|text| !text.is_empty())
+                };
                 if !files.is_empty() {
                     Some(paste::Pasted::Files(files))
-                } else if let Some(html) = clipboard
-                    .get_html()
-                    .filter(|html| html.to_ascii_lowercase().contains("<img"))
-                {
-                    Some(paste::Pasted::Page(html))
-                } else if let Some(text) = clipboard.get_text().ok().filter(|text| !text.is_empty())
-                {
+                } else if let Some(clip) = clipboard.get_clip().as_deref().and_then(Clip::decode) {
+                    Some(paste::Pasted::Clip(clip))
+                } else if let Some(html) = clipboard.get_html() {
+                    Some(paste::Pasted::Page(html, text(clipboard)))
+                } else if let Some(text) = text(clipboard) {
                     Some(paste::Pasted::Text(text))
                 } else {
                     clipboard.get_picture().map(paste::Pasted::Picture)
                 }
             }
-            Self::Memory(held) => Some(paste::Pasted::Text(held.clone())),
+            Self::Memory(held, clip) => Some(match clip {
+                Some(clip) => paste::Pasted::Clip(clip.clone()),
+                None => paste::Pasted::Text(held.clone()),
+            }),
         }
     }
 }
@@ -1068,7 +1082,7 @@ impl State {
         let clipboard = if visible && std::env::var_os("SNOWBOUND_REPLAY").is_none() {
             Clipboard::System(platform::Clipboard::new(&window)?)
         } else {
-            Clipboard::Memory(String::new())
+            Clipboard::Memory(String::new(), None)
         };
         let redraw: std::task::Waker = Arc::new(Redraw(proxy.clone())).into();
         let search = search::Search::new(stored.search_scope, redraw.clone());
@@ -3159,7 +3173,7 @@ impl State {
             }
             Command::Template(choice) => self.apply_template(choice)?,
             Command::Page(Request::EditDate(field)) => self.edit_date(field)?,
-            Command::Page(Request::Copy(text)) => self.clipboard.set_text(text)?,
+            Command::Page(Request::Copy(clip)) => self.clipboard.set(clip)?,
             Command::Page(Request::Paste) => self.paste()?,
             Command::Page(Request::OpenLink(address)) => self.open_link(&address)?,
             Command::Page(Request::OpenAttachment(file)) => self.open_attachment(&file)?,

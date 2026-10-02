@@ -141,7 +141,7 @@ fn cell_range(document: &TextDocument, cell: &TableCell) -> Result<Range<TextPos
 }
 
 /// OneNote 2010's width for a new column, and the narrowest it fits or drags one to.
-const COLUMN_WIDTH: f32 = 37.11;
+pub(super) const COLUMN_WIDTH: f32 = 37.11;
 /// What OneNote 2010 fits an unlocked column to beyond its widest line (lab, 2026-09-30).
 const COLUMN_ROOM: f32 = 4.347;
 

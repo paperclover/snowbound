@@ -1,20 +1,62 @@
-//! Pictures and files from the clipboard, and pictures inserted, as OneNote 2010 places them.
+//! The clipboard's formats: what Copy offers, and pictures, files and pages Paste takes from
+//! it, with pictures inserted, as OneNote 2010 places them.
 
 use crate::{State, platform};
-use canvas::editor::Piece;
+use canvas::editor::{Clip, Piece};
 use std::{
     error::Error,
     path::{Path, PathBuf},
 };
 
+/// Every format Copy puts on the clipboard for one selection, which each platform's clipboard
+/// offers together: text; HTML, as OneNote 2010 offers it beside text (lab, 2026-10-02); and
+/// Snowbound's own format, [`Clip::encode`]'s JSON, which pastes losslessly into Snowbound.
+/// Its name is `net.paperclover.snowbound.clip` on macOS, `Snowbound Clip` on Windows and
+/// `application/x-snowbound-clip` where formats are MIME types.
+pub(crate) struct Copied {
+    pub text: String,
+    /// A whole page, the copy between `<!--StartFragment-->` and `<!--EndFragment-->`.
+    pub html: String,
+    pub clip: String,
+}
+
+impl Copied {
+    pub(crate) fn new(clip: &Clip) -> Self {
+        Self {
+            text: clip.text(),
+            html: clip.html(),
+            clip: clip.encode(),
+        }
+    }
+}
+
+/// `html` behind the header Windows' `HTML Format` begins with, which gives the byte offsets
+/// of the page and of the fragment its comments mark out.
+#[cfg(any(windows, test))]
+pub(crate) fn cf_html(html: &str) -> String {
+    let header = |offsets: [usize; 4]| {
+        format!(
+            "Version:0.9\r\nStartHTML:{:010}\r\nEndHTML:{:010}\r\nStartFragment:{:010}\r\nEndFragment:{:010}\r\n",
+            offsets[0], offsets[1], offsets[2], offsets[3]
+        )
+    };
+    let start = header([0; 4]).len();
+    let fragment = html
+        .find("<!--StartFragment-->")
+        .map_or(0, |at| at + "<!--StartFragment-->".len());
+    let end = html.find("<!--EndFragment-->").unwrap_or(html.len());
+    header([start, start + html.len(), start + fragment, start + end]) + html
+}
+
 /// What Paste takes from the clipboard. Files come first, as Finder also offers their names
-/// as text and their icons as pictures; then a page holding pictures, as its text alone
-/// would lose them; text before a picture, as Office and browsers offer a picture of copied
-/// text beside it.
+/// as text and their icons as pictures; then Snowbound's own copy, then a page, as its text
+/// alone would lose its formatting and pictures; text before a picture, as Office and
+/// browsers offer a picture of copied text beside it.
 pub(crate) enum Pasted {
     Files(Vec<PathBuf>),
-    /// HTML holding a picture.
-    Page(String),
+    Clip(Clip),
+    /// A web page, and the clipboard's text for one that holds nothing to paste.
+    Page(String, Option<String>),
     Text(String),
     Picture(Vec<u8>),
 }
@@ -27,10 +69,15 @@ impl State {
                     self.place_file(&path, None)?;
                 }
             }
-            Some(Pasted::Page(html)) => {
+            Some(Pasted::Clip(clip)) => {
+                let response = self.view.paste_clip(clip)?;
+                self.respond(response);
+            }
+            Some(Pasted::Page(html, text)) => {
                 // Web pictures come later, so the window never waits on the network.
                 let mut fetched = Vec::new();
-                let pieces = html_pieces(&html, |source, css| {
+                let language = canvas::language::lcid(&platform::input_language());
+                let pieces = canvas::editor::html_pieces(&html, language, |source, css| {
                     if source.starts_with("https://") || source.starts_with("http://") {
                         fetched.push((source.to_owned(), css));
                         return Some(Piece::Awaited);
@@ -39,8 +86,14 @@ impl State {
                     let size = sized(&bytes, css)?;
                     Some(Piece::Picture(bytes, size))
                 });
-                let language = canvas::language::lcid(&platform::input_language());
-                let (places, response) = self.view.paste_pieces(pieces, language)?;
+                if pieces.is_empty() {
+                    if let Some(text) = text {
+                        let response = self.view.paste(&text, language)?;
+                        self.respond(response);
+                    }
+                    return Ok(());
+                }
+                let (places, response) = self.view.paste_pieces(pieces)?;
                 self.respond(response);
                 for (place, (source, css)) in places.into_iter().zip(fetched) {
                     let proxy = self.proxy.clone();
@@ -109,179 +162,6 @@ impl State {
         self.respond(response);
         Ok(())
     }
-}
-
-/// A web page fragment's text, a line to each block, and its pictures in order, as OneNote
-/// 2010 pastes them (lab, 2026-09-30). `load` makes a picture's piece from its source and
-/// its `width` and `height` in CSS pixels; one it can't is left out.
-fn html_pieces(
-    html: &str,
-    mut load: impl FnMut(&str, [Option<f32>; 2]) -> Option<Piece>,
-) -> Vec<Piece> {
-    let html = html
-        .split_once("<!--StartFragment-->")
-        .map_or(html, |(_, fragment)| fragment);
-    let html = html
-        .split_once("<!--EndFragment-->")
-        .map_or(html, |(fragment, _)| fragment);
-    let mut pieces = Vec::new();
-    let mut text = String::new();
-    let flush = |text: &mut String, pieces: &mut Vec<Piece>| {
-        let trimmed = text.trim_matches(|c: char| c.is_whitespace());
-        if !trimmed.is_empty() {
-            pieces.push(Piece::Text(trimmed.to_owned()));
-        }
-        text.clear();
-    };
-    let line = |text: &mut String| {
-        text.truncate(text.trim_end_matches(' ').len());
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
-    };
-    // Elements whose content is not text: script, style, head and title.
-    let mut hidden: Option<String> = None;
-    let mut rest = html;
-    while !rest.is_empty() {
-        if let Some(after) = rest.strip_prefix("<!--") {
-            rest = after.split_once("-->").map_or("", |(_, after)| after);
-            continue;
-        }
-        let Some(after) = rest.strip_prefix('<') else {
-            let end = rest.find('<').unwrap_or(rest.len());
-            if hidden.is_none() {
-                for c in decode_entities(&rest[..end]).chars() {
-                    if c.is_whitespace() && c != '\u{a0}' {
-                        if !text.is_empty() && !text.ends_with([' ', '\n']) {
-                            text.push(' ');
-                        }
-                    } else {
-                        text.push(if c == '\u{a0}' { ' ' } else { c });
-                    }
-                }
-            }
-            rest = &rest[end..];
-            continue;
-        };
-        let end = tag_end(after);
-        let tag = &after[..end];
-        rest = after.get(end + 1..).unwrap_or("");
-        let (closing, tag) = match tag.strip_prefix('/') {
-            Some(tag) => (true, tag),
-            None => (false, tag),
-        };
-        let name = tag
-            .split(|c: char| c.is_whitespace() || c == '/')
-            .next()
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        if let Some(until) = &hidden {
-            if closing && name == *until {
-                hidden = None;
-            }
-            continue;
-        }
-        match name.as_str() {
-            "script" | "style" | "head" | "title" if !closing => hidden = Some(name),
-            "br" => {
-                text.truncate(text.trim_end_matches(' ').len());
-                text.push('\n');
-            }
-            "p" | "div" | "li" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "blockquote"
-            | "pre" | "table" | "ul" | "ol" | "dt" | "dd" | "section" | "article" | "header"
-            | "footer" | "figure" | "figcaption" => line(&mut text),
-            "img" if !closing => {
-                let css = |name| {
-                    attribute(tag, name)
-                        .and_then(|value| value.trim_end_matches("px").parse::<f32>().ok())
-                        .filter(|pixels| *pixels > 0.0)
-                };
-                let Some(picture) = attribute(tag, "src").and_then(|source| {
-                    load(&decode_entities(source), [css("width"), css("height")])
-                }) else {
-                    continue;
-                };
-                flush(&mut text, &mut pieces);
-                pieces.push(picture);
-            }
-            _ => {}
-        }
-    }
-    flush(&mut text, &mut pieces);
-    pieces
-}
-
-/// Where a tag's text ends, before its `>`, outside quoted attribute values.
-fn tag_end(tag: &str) -> usize {
-    let mut quote = None;
-    for (at, c) in tag.char_indices() {
-        match (quote, c) {
-            (None, '"' | '\'') => quote = Some(c),
-            (Some(open), _) if c == open => quote = None,
-            (None, '>') => return at,
-            _ => {}
-        }
-    }
-    tag.len()
-}
-
-/// The value of attribute `name` in `tag`, entities still encoded.
-fn attribute<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
-    let mut rest = tag;
-    while let Some(at) = rest.find('=') {
-        let key = rest[..at].trim_end().rsplit(char::is_whitespace).next()?;
-        let value = rest[at + 1..].trim_start();
-        let (value, after) = match value.chars().next()? {
-            quote @ ('"' | '\'') => value[1..].split_once(quote)?,
-            _ => value.split_at(value.find(char::is_whitespace).unwrap_or(value.len())),
-        };
-        if key.eq_ignore_ascii_case(name) {
-            return Some(value);
-        }
-        rest = after;
-    }
-    None
-}
-
-fn decode_entities(text: &str) -> String {
-    let mut decoded = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(at) = rest.find('&') {
-        decoded.push_str(&rest[..at]);
-        rest = &rest[at..];
-        let entity = rest[1..]
-            .find(';')
-            .filter(|end| *end <= 10)
-            .map(|end| &rest[1..end + 1]);
-        let c = entity.and_then(|entity| match entity {
-            "amp" => Some('&'),
-            "lt" => Some('<'),
-            "gt" => Some('>'),
-            "quot" => Some('"'),
-            "apos" => Some('\''),
-            "nbsp" => Some('\u{a0}'),
-            _ => {
-                let number = entity.strip_prefix('#')?;
-                let code = match number.strip_prefix(['x', 'X']) {
-                    Some(hex) => u32::from_str_radix(hex, 16).ok()?,
-                    None => number.parse().ok()?,
-                };
-                char::from_u32(code)
-            }
-        });
-        match (c, entity) {
-            (Some(c), Some(entity)) => {
-                decoded.push(c);
-                rest = &rest[entity.len() + 2..];
-            }
-            _ => {
-                decoded.push('&');
-                rest = &rest[1..];
-            }
-        }
-    }
-    decoded.push_str(rest);
-    decoded
 }
 
 /// A picture's size in points from its `width` and `height` in CSS pixels, either giving
@@ -597,58 +477,20 @@ mod tests {
         bytes
     }
 
-    fn shown(pieces: &[Piece]) -> Vec<String> {
-        pieces
-            .iter()
-            .map(|piece| match piece {
-                Piece::Text(text) => text.clone(),
-                Piece::Picture(bytes, size) => format!("[{} {size:?}]", bytes.len()),
-                Piece::Awaited => "[awaited]".to_owned(),
-            })
-            .collect()
-    }
-
-    /// As OneNote 2010 pasted `<p>before <img> after</p>` (lab, 2026-09-30): the text on
-    /// either side of the picture, the picture at the size its attributes give.
+    /// The header's offsets find the page and the fragment, counted in bytes.
     #[test]
-    fn a_pasted_page_gives_its_text_and_pictures_in_order() {
-        let html = "Version:0.9\r\n<html><head><style>p{}</style><title>T</title></head>\
-            <body><!--StartFragment--><p>before <img alt=\"a > b\" \
-            src=\"file:///C:/work/pic.png\" width=\"200\" height=\"100px\"> after</p>\
-            <p>Fish &amp; chips&nbsp;&#x2014;&#8212;</p><ul><li>one<li>two<br>three</ul>\
-            <img src=\"missing.png\"><IMG SRC='https://example.invalid/a.png' width=40>\
-            <!--EndFragment--></body></html>";
-        let mut asked = Vec::new();
-        let pieces = html_pieces(html, |source, css| {
-            asked.push((source.to_owned(), css));
-            match source {
-                "missing.png" => None,
-                "https://example.invalid/a.png" => Some(Piece::Awaited),
-                _ => Some(Piece::Picture(vec![0; 3], [150.0, 75.0])),
-            }
-        });
+    fn the_html_format_header_gives_its_offsets() {
+        let html =
+            "<html><body><!--StartFragment--><p>\u{e9}t\u{e9}</p><!--EndFragment--></body></html>";
+        let wrapped = cf_html(html);
+        let offset = |name: &str| {
+            let at = wrapped.find(name).unwrap() + name.len() + 1;
+            wrapped[at..at + 10].parse::<usize>().unwrap()
+        };
+        assert_eq!(&wrapped[offset("StartHTML")..offset("EndHTML")], html);
         assert_eq!(
-            asked,
-            [
-                (
-                    "file:///C:/work/pic.png".to_owned(),
-                    [Some(200.0), Some(100.0)]
-                ),
-                ("missing.png".to_owned(), [None, None]),
-                (
-                    "https://example.invalid/a.png".to_owned(),
-                    [Some(40.0), None]
-                ),
-            ]
-        );
-        assert_eq!(
-            shown(&pieces),
-            [
-                "before",
-                "[3 [150.0, 75.0]]",
-                "after\nFish & chips \u{2014}\u{2014}\none\ntwo\nthree",
-                "[awaited]",
-            ]
+            &wrapped[offset("StartFragment")..offset("EndFragment")],
+            "<p>\u{e9}t\u{e9}</p>"
         );
     }
 

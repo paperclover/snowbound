@@ -757,35 +757,45 @@ impl TextDocument {
         Err(EditError::InvalidRange)
     }
 
-    pub(crate) fn slice(&self, range: Range<TextPosition>) -> Result<Vec<Paragraph>, EditError> {
-        if range.start > range.end {
-            return Err(EditError::InvalidRange);
-        }
-        let count = range
-            .end
-            .paragraph
-            .checked_sub(range.start.paragraph)
-            .and_then(|n| n.checked_add(1))
+    /// The nodes `range` covers, its end paragraphs cut to it: those of its container from
+    /// one end to the other, or where it crosses a table's edge, the root nodes holding them.
+    pub(crate) fn selected(
+        &self,
+        range: Range<TextPosition>,
+    ) -> Result<Vec<PageParagraph>, EditError> {
+        let (start_container, start, first) = self
+            .leaf(range.start.paragraph)
             .ok_or(EditError::InvalidRange)?;
-        let result = self
-            .paragraphs()
-            .skip(range.start.paragraph)
-            .take(count)
-            .enumerate()
-            .map(|(index, paragraph)| {
-                let start = if index == 0 { range.start.offset } else { 0 };
-                let end = if index == count - 1 {
-                    range.end.offset
-                } else {
-                    paragraph.utf16_offset(paragraph.text().len())?
-                };
-                paragraph.slice(start..end)
-            })
-            .collect::<Result<Vec<_>, EditError>>()?;
-        if result.len() != count {
-            return Err(EditError::InvalidRange);
+        let (end_container, end, last) = self
+            .leaf(range.end.paragraph)
+            .ok_or(EditError::InvalidRange)?;
+        let (first, last) = (first.id, last.id);
+        let (nodes, start, end) = if self.crosses_table(range.clone())? {
+            let root = |container: Option<ExGuid>, index| match container {
+                Some(cell) => self.root(cell),
+                None => Ok(index),
+            };
+            (
+                &self.nodes[..],
+                root(start_container, start)?,
+                root(end_container, end)?,
+            )
+        } else {
+            (self.container(start_container)?, start, end)
+        };
+        let mut nodes = nodes[start..=end].to_vec();
+        let tail = nodes.len() - 1;
+        if nodes[tail].id == last {
+            let from = if first == last { range.start.offset } else { 0 };
+            let text = &mut nodes[tail].text_mut().unwrap().text;
+            *text = text.slice(from..range.end.offset)?;
         }
-        Ok(result)
+        if nodes[0].id == first && first != last {
+            let text = &mut nodes[0].text_mut().unwrap().text;
+            let length = text.utf16_offset(text.text().len())?;
+            *text = text.slice(range.start.offset..length)?;
+        }
+        Ok(nodes)
     }
 
     /// Replaces `range` as OneNote's typing, Enter and deletion do: the first paragraph keeps
@@ -1332,14 +1342,20 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["before", "a🌲b", "second", "right", "after"]
         );
+        let shown = |nodes: Vec<PageParagraph>| {
+            leaves(&nodes, None)
+                .map(|(.., node)| node.text().unwrap().text.text().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let selected = |range| shown(document.selected(range).unwrap());
+        assert_eq!(selected(position(1, 1)..position(2, 3)), ["🌲b", "sec"]);
         assert_eq!(
-            document
-                .slice(position(1, 1)..position(3, 2))
-                .unwrap()
-                .iter()
-                .map(Paragraph::text)
-                .collect::<Vec<_>>(),
-            ["🌲b", "second", "ri"]
+            selected(position(1, 1)..position(3, 2)),
+            ["a🌲b", "second", "right"]
+        );
+        assert_eq!(
+            selected(position(0, 2)..position(4, 1)),
+            ["fore", "a🌲b", "second", "right", "a"]
         );
         let edit = document
             .replace(

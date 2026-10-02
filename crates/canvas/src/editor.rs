@@ -24,10 +24,12 @@ use std::{
 
 pub const DEFAULT_OUTLINE_WIDTH: f32 = 468.0;
 
+mod clip;
 mod equation;
 #[cfg(test)]
 mod evidence;
 mod format;
+mod html;
 mod ink;
 mod link;
 mod ops;
@@ -35,10 +37,12 @@ pub(crate) mod page;
 mod recording;
 mod space;
 mod table;
+pub use clip::Clip;
 pub use format::{
     Alignment, BULLET_LIBRARY, DefaultFont, FormatState, Formatting, ListStyle, NUMBER_LIBRARY,
     NoteTag, Toggle,
 };
+pub use html::html_pieces;
 pub use ink::{FAVORITES, Pen};
 pub use link::{Link, shown_urls};
 pub use page::ReadOnlyObject;
@@ -84,7 +88,7 @@ pub struct Selection {
 
 /// A piece of pasted content, in the order it comes.
 pub enum Piece {
-    Text(String),
+    Clip(Clip),
     /// An encoded picture and its size in points.
     Picture(Vec<u8>, [f32; 2]),
     /// A picture still on its way, which ends the paragraph and goes in where
@@ -2333,20 +2337,19 @@ impl CanvasEditor {
         self.place_caret(engine, [x, margin[1] + row * 18.0], DEFAULT_OUTLINE_WIDTH)
     }
 
-    /// Pastes text in `language` and pictures in order, as one undo step, as OneNote 2010
-    /// pastes a web page's text with its pictures; the places of the awaited ones, in order.
+    /// Pastes clips and pictures in order, as one undo step, as OneNote 2010 pastes a web
+    /// page's text with its pictures; the places of the awaited ones, in order.
     pub fn paste_pieces(
         &mut self,
         engine: &mut TextEngine,
         pieces: Vec<Piece>,
-        language: u32,
     ) -> Result<Vec<Awaited>, EditorError> {
         let depth = self.undo.len();
         let mut result = Ok(());
         let mut awaited = Vec::new();
         for piece in pieces {
             result = match piece {
-                Piece::Text(text) => self.paste(engine, &text, language),
+                Piece::Clip(clip) => self.paste_clip(engine, clip),
                 Piece::Picture(bytes, size) => picture(bytes, size)
                     .map_err(EditorError::from)
                     .and_then(|image| self.insert_picture(engine, image)),
@@ -10659,10 +10662,9 @@ mod tests {
             .paste_pieces(
                 &mut engine,
                 vec![
-                    Piece::Text("Pasted".into()),
+                    html_pieces("Pasted", 0x409, |_, _| None).pop().unwrap(),
                     Piece::Picture(vec![0; 8], [10.0; 2]),
                 ],
-                0x409,
             )
             .unwrap();
         assert_eq!(editor.history_depth(), [1, 0]);

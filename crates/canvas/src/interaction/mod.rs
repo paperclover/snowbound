@@ -17,8 +17,8 @@ use crate::gpu::{Paper, Viewport, page::PageScene};
 use crate::{
     date::DateField,
     editor::{
-        Awaited, CanvasEditor, DEFAULT_OUTLINE_WIDTH, Formatting, Piece, Selection, TextOutline,
-        Whole,
+        Awaited, CanvasEditor, Clip, DEFAULT_OUTLINE_WIDTH, Formatting, Piece, Selection,
+        TextOutline, Whole,
     },
     layout::TextEngine,
 };
@@ -58,8 +58,8 @@ pub enum Cursor {
 pub enum Request {
     /// Show the date or time picker, then report the choice through `PageView::change_date`.
     EditDate(DateField),
-    /// Put this text on the clipboard.
-    Copy(String),
+    /// Put this on the clipboard.
+    Copy(Clip),
     /// Read the clipboard and hand its text to `PageView::commit_text`.
     Paste,
     /// Open a link's address, as a click on a link does.
@@ -1494,6 +1494,16 @@ impl PageView {
         self.edited()
     }
 
+    /// Content Snowbound copied; see [`CanvasEditor::paste_clip`].
+    pub fn paste_clip(&mut self, clip: Clip) -> Result<Response> {
+        if !self.accepts_text() {
+            return Ok(Response::default());
+        }
+        self.editor.paste_clip(&mut self.engine, clip)?;
+        self.follow_pictures()?;
+        self.edited()
+    }
+
     /// Clipboard text in `language`, an LCID; see [`CanvasEditor::paste`].
     pub fn paste(&mut self, text: &str, language: u32) -> Result<Response> {
         if !self.accepts_text() {
@@ -1551,53 +1561,19 @@ impl PageView {
         self.edited()
     }
 
-    /// Copy, or Cut with `cut`: the selected text goes to the clipboard, the page selection's
-    /// outlines top to bottom with a blank line between, as OneNote 2010 copies them.
+    /// Copy, or Cut with `cut`: [`CanvasEditor::clip`] goes to the clipboard.
     pub fn copy(&mut self, cut: bool) -> Result<Response> {
-        let text = |outline: &TextOutline, selection: Selection| -> Result<String> {
-            let [anchor, focus] = selection.positions;
-            Ok(outline
-                .document()
-                .slice(anchor.min(focus)..anchor.max(focus))?
-                .iter()
-                .map(|paragraph| {
-                    paragraph
-                        .project()
-                        .map(|projection| projection.text().text().to_owned())
-                })
-                .collect::<std::result::Result<Vec<_>, _>>()?
-                .join("\n"))
-        };
         let page = self.editor.whole() == Some(Whole::Page);
-        let text = if page {
-            let mut outlines = self
-                .editor
-                .outlines()
-                .iter()
-                .filter(|outline| !outline.title)
-                .collect::<Vec<_>>();
-            outlines.sort_by(|a, b| {
-                let ([ax, ay], [bx, by]) = (a.origin(), b.origin());
-                ay.total_cmp(&by).then(ax.total_cmp(&bx))
-            });
-            outlines
-                .into_iter()
-                .map(|outline| text(outline, outline.whole()))
-                .collect::<Result<Vec<_>>>()?
-                .join("\n\n")
-        } else {
-            text(self.editor.active_outline(), self.editor.selection())?
-        };
-        if text.is_empty() {
+        let Some(clip) = self.editor.clip()? else {
             return Ok(Response::default());
-        }
+        };
         if cut && page {
             self.editor.delete(&mut self.engine, false)?;
         } else if cut {
             self.editor.insert(&mut self.engine, "")?;
         }
         Ok(Response {
-            request: Some(Request::Copy(text)),
+            request: Some(Request::Copy(clip)),
             ..self.edited()?
         })
     }
@@ -1821,19 +1797,13 @@ impl PageView {
         self.edited()
     }
 
-    /// Pasted text in `language`, an LCID, and pictures, in order and as one undo step; see
+    /// Pasted clips and pictures, in order and as one undo step; see
     /// [`CanvasEditor::paste_pieces`].
-    pub fn paste_pieces(
-        &mut self,
-        pieces: Vec<Piece>,
-        language: u32,
-    ) -> Result<(Vec<Awaited>, Response)> {
+    pub fn paste_pieces(&mut self, pieces: Vec<Piece>) -> Result<(Vec<Awaited>, Response)> {
         if self.edits_wait() {
             return Ok((Vec::new(), Response::default()));
         }
-        let awaited = self
-            .editor
-            .paste_pieces(&mut self.engine, pieces, language)?;
+        let awaited = self.editor.paste_pieces(&mut self.engine, pieces)?;
         self.follow_pictures()?;
         Ok((awaited, self.edited()?))
     }

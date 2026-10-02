@@ -1681,10 +1681,7 @@ fn events_route_through_the_view_as_the_host_delivers_them() {
         })
         .unwrap();
     let _ = view.key(&Key::Named(NamedKey::ArrowRight), None).unwrap();
-    assert_eq!(
-        view.copy(false).unwrap().request,
-        Some(Request::Copy("B".into()))
-    );
+    assert_eq!(copied(view.copy(false).unwrap()).as_deref(), Some("B"));
     let _ = view
         .modifiers_changed(Modifiers {
             command: true,
@@ -2363,12 +2360,10 @@ fn keys_act_on_the_page_selection_as_onenote_does() {
 fn copy_and_cut_take_the_page_selection() {
     let (mut view, [alpha, ..]) = page_selection_view();
     select_page(&mut view, alpha);
-    let copied = Some(Request::Copy(
-        "Delta\n\nAlpha one\nAlpha two\n\nBeta\n\nGamma long line of text".into(),
-    ));
-    assert_eq!(view.copy(false).unwrap().request, copied);
+    let text = "Delta\n\nAlpha one\nAlpha two\n\nBeta\n\nGamma long line of text";
+    assert_eq!(copied(view.copy(false).unwrap()).as_deref(), Some(text));
     assert_eq!(view.editor.whole(), Some(Whole::Page));
-    assert_eq!(view.copy(true).unwrap().request, copied);
+    assert_eq!(copied(view.copy(true).unwrap()).as_deref(), Some(text));
     assert!(view.editor.outlines().iter().all(|outline| outline.title));
     assert!(view.editor.caret_outline().is_some());
 }
@@ -3356,4 +3351,12 @@ fn a_column_border_drags_with_a_resize_pointer_and_stores_on_release() {
     assert!(table.columns[0].locked);
     assert!((table.columns[0].width - (37.11 + 50.0)).abs() < 0.01);
     assert_eq!(view.editor.take_ops().unwrap().len(), 1);
+}
+
+/// The text of what a response asks the host to copy.
+fn copied(response: Response) -> Option<String> {
+    match response.request {
+        Some(Request::Copy(clip)) => Some(clip.text()),
+        _ => None,
+    }
 }

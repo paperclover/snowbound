@@ -1082,15 +1082,87 @@ pub fn appearance(window: &Window) -> Theme {
     window.theme().unwrap_or(Theme::Light)
 }
 
-pub struct Clipboard(arboard::Clipboard);
+/// The clipboard: arboard reads it; Copy writes its formats itself, as arboard can't offer
+/// Snowbound's own.
+pub struct Clipboard(arboard::Clipboard, HWND);
+
+/// Snowbound's own format's registered name.
+const CLIP: &str = "Snowbound Clip";
 
 impl Clipboard {
-    pub fn new(_: &Window) -> Result<Self, arboard::Error> {
-        arboard::Clipboard::new().map(Self)
+    pub fn new(window: &Window) -> Result<Self, arboard::Error> {
+        Ok(Self(arboard::Clipboard::new()?, hwnd(window)))
     }
 
     pub fn set_text(&mut self, text: String) -> Result<(), arboard::Error> {
         self.0.set_text(text)
+    }
+
+    /// Text, `HTML Format` and Snowbound's own, as one copy.
+    pub fn set(&mut self, copied: &crate::paste::Copied) -> Result<(), &'static str> {
+        use windows_sys::Win32::System::{DataExchange as clip, Memory, Ole::CF_UNICODETEXT};
+        let text: Vec<u8> = copied
+            .text
+            .replace('\n', "\r\n")
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let html = crate::paste::cf_html(&copied.html);
+        let formats = [
+            (u32::from(CF_UNICODETEXT), text),
+            (registered("HTML Format"), [html.as_bytes(), &[0]].concat()),
+            (registered(CLIP), [copied.clip.as_bytes(), &[0]].concat()),
+        ];
+        let _open = Open::new(self.1)?;
+        if unsafe { clip::EmptyClipboard() } == 0 {
+            return Err("The clipboard couldn't be emptied");
+        }
+        for (format, bytes) in formats {
+            unsafe {
+                let memory = Memory::GlobalAlloc(Memory::GMEM_MOVEABLE, bytes.len());
+                if memory.is_null() {
+                    return Err("No memory for the clipboard");
+                }
+                let target = Memory::GlobalLock(memory);
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), target.cast(), bytes.len());
+                Memory::GlobalUnlock(memory);
+                // The clipboard owns the memory once it takes it.
+                if clip::SetClipboardData(format, memory).is_null() {
+                    windows_sys::Win32::Foundation::GlobalFree(memory);
+                    return Err("The clipboard refused a format");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// What Snowbound itself copied, if it did.
+    pub fn get_clip(&mut self) -> Option<String> {
+        use windows_sys::Win32::System::{DataExchange as clip, Memory};
+        let format = registered(CLIP);
+        if unsafe { clip::IsClipboardFormatAvailable(format) } == 0 {
+            return None;
+        }
+        let _open = Open::new(self.1).ok()?;
+        unsafe {
+            let memory = clip::GetClipboardData(format);
+            if memory.is_null() {
+                return None;
+            }
+            let data = Memory::GlobalLock(memory);
+            if data.is_null() {
+                return None;
+            }
+            let bytes = std::slice::from_raw_parts(data.cast::<u8>(), Memory::GlobalSize(memory));
+            let end = bytes
+                .iter()
+                .position(|&byte| byte == 0)
+                .unwrap_or(bytes.len());
+            let text = String::from_utf8(bytes[..end].to_vec()).ok();
+            Memory::GlobalUnlock(memory);
+            text
+        }
     }
 
     pub fn get_text(&mut self) -> Result<String, arboard::Error> {
@@ -1108,6 +1180,36 @@ impl Clipboard {
     /// The clipboard's PNG, or else its device-independent bitmap.
     pub fn get_picture(&mut self) -> Option<Vec<u8>> {
         crate::paste::bitmap(self.0.get_image().ok()?)
+    }
+}
+
+/// The clipboard, open until dropped; another application may hold it a moment, so this
+/// retries for a while as arboard does.
+struct Open;
+
+impl Open {
+    fn new(owner: HWND) -> Result<Self, &'static str> {
+        use windows_sys::Win32::System::DataExchange::OpenClipboard;
+        for _ in 0..10 {
+            if unsafe { OpenClipboard(owner) } != 0 {
+                return Ok(Self);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err("Another application is holding the clipboard")
+    }
+}
+
+impl Drop for Open {
+    fn drop(&mut self) {
+        unsafe { windows_sys::Win32::System::DataExchange::CloseClipboard() };
+    }
+}
+
+/// The number Windows gives clipboard format `name`.
+fn registered(name: &str) -> u32 {
+    unsafe {
+        windows_sys::Win32::System::DataExchange::RegisterClipboardFormatW(wide(name).as_ptr())
     }
 }
 

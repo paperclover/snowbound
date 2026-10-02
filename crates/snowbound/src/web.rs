@@ -447,6 +447,15 @@ impl Clipboard {
         Ok(())
     }
 
+    /// A copy's text, the format every browser's clipboard takes.
+    pub fn set(&mut self, copied: &crate::paste::Copied) -> Result<(), Box<dyn Error>> {
+        self.set_text(copied.text.clone())
+    }
+
+    pub fn get_clip(&mut self) -> Option<String> {
+        None
+    }
+
     pub fn get_text(&mut self) -> Result<String, Box<dyn Error>> {
         PASTED
             .with_borrow(|pasted| pasted.text.clone())

@@ -8,7 +8,7 @@ use onestore::page::text::new_id;
 use serde::{Deserialize, Serialize};
 
 /// The COLORREF OneNote stores for automatic colour, which overrides a style's colour.
-const AUTOMATIC: u32 = 0xff00_0000;
+pub(super) const AUTOMATIC: u32 = 0xff00_0000;
 /// To Do's check box.
 const CHECKBOX: u16 = 3;
 
@@ -143,7 +143,7 @@ impl ListStyle {
     pub(super) const NUMBER: Self = Self::Number(0);
 
     /// The library style a stored list has, if it is one.
-    fn of(kind: &Kind) -> Option<Self> {
+    pub(super) fn of(kind: &Kind) -> Option<Self> {
         let Kind::List {
             font,
             format: Some(format),
@@ -1010,7 +1010,7 @@ impl CanvasEditor {
     }
 
     /// The page's definition of the tag `definition` describes, made where it has none.
-    fn define_tag(&mut self, definition: &Definition) -> Result<ExGuid, EditError> {
+    pub(super) fn define_tag(&mut self, definition: &Definition) -> Result<ExGuid, EditError> {
         if let Some((id, _)) = self
             .definitions
             .iter()
