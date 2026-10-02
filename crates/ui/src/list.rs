@@ -132,7 +132,8 @@ pub fn list<R: Rows>(
 
     for event in ui.signal(id).events {
         if let Event::Wheel(delta) = event {
-            state.target = (state.target - f64::from(delta[1])).clamp(0.0, most);
+            state.scroll = (state.scroll - f64::from(delta[1])).clamp(0.0, most);
+            state.target = state.scroll;
         }
     }
     let mut clicked = None;

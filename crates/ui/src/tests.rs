@@ -542,10 +542,12 @@ fn wheel_scrolls_within_the_content_and_clips_children() {
     build(&mut ui);
     ui.event(Event::PointerMoved([50.0, 50.0]));
     ui.event(Event::Wheel([0.0, -1000.0]));
-    for _ in 0..60 {
-        build(&mut ui);
-    }
-    assert_eq!(ui.states[&list.unwrap()].scroll, 200.0);
+    build(&mut ui);
+    assert_eq!(
+        ui.states[&list.unwrap()].scroll,
+        200.0,
+        "at once, as on the page"
+    );
     assert_eq!(ui.rect(last.unwrap()), Some([0.0, 70.0, 100.0, 100.0]));
     let layers = ui.layers();
     assert!(matches!(
@@ -1906,10 +1908,10 @@ fn lists_hold_the_selection_still_as_items_arrive_and_leave_above() {
     list_frame(&mut ui, &rows, &mut selected, &[]);
     rows = Keyed::new((20_000..20_050).chain(rows.keys.iter().copied()));
     list_frame(&mut ui, &rows, &mut selected, &[]);
-    let moving = row_top(&ui, 500).unwrap();
-    assert!(
-        moving < at && moving > at - 60.0,
-        "the wheel eases on through arrivals"
+    assert_eq!(
+        row_top(&ui, 500),
+        Some(at - 60.0),
+        "the wheel moves the rows at once, and they hold through arrivals"
     );
     settle_list(&mut ui, &rows, &mut selected);
     assert_eq!(row_top(&ui, 500), Some(at - 60.0));
@@ -2950,16 +2952,15 @@ fn the_wheel_scrolls_overflowing_tabs_sideways_either_way_it_turns() {
     let first = ui.rect(shell::tab_id(row, 0)).unwrap()[0];
     ui.event(Event::PointerMoved([100.0, 14.0]));
     ui.event(Event::Wheel([0.0, -40.0]));
-    settle_tabs(&mut ui, 0);
+    tab_row(&mut ui, 0);
+    tab_row(&mut ui, 0);
     let scrolled = ui.rect(shell::tab_id(row, 0)).unwrap()[0];
-    assert!(
-        (first - scrolled - 40.0).abs() < 0.5,
-        "{first} to {scrolled}"
-    );
+    assert_eq!(first - scrolled, 40.0, "at once, as on the page");
     ui.event(Event::Wheel([30.0, 0.0]));
-    settle_tabs(&mut ui, 0);
+    tab_row(&mut ui, 0);
+    tab_row(&mut ui, 0);
     let back = ui.rect(shell::tab_id(row, 0)).unwrap()[0];
-    assert!((back - scrolled - 30.0).abs() < 0.5, "{scrolled} to {back}");
+    assert_eq!(back - scrolled, 30.0);
 }
 
 #[test]

@@ -65,12 +65,18 @@ pub fn section_tabs(
     let wide = left + lean(height) + crate::SHADOW[0];
     let view = ui.rect(row).map_or(wide, |rect| rect[2] - rect[0]);
     let most = (wide - view).max(0.0);
-    let [scroll, shown] = [row.child("scroll"), row.child("shown")];
+    let [scroll, shown, shift] = [row.child("scroll"), row.child("shown"), row.child("offset")];
     let held_value = |ui: &Ui, id: Id| ui.states.get(&id).and_then(|state| state.tween);
     let mut target = held_value(ui, scroll).map_or(0.0, |[_, target]| target);
+    // The wheel moves the tabs at once from where they show, as on the page; only jumps ease.
+    let mut wheeled = false;
     for event in ui.signal(row).events {
         if let crate::Event::Wheel([x, y]) = event {
+            if !wheeled {
+                target = held_value(ui, shift).map_or(target, |[value, _]| value);
+            }
             target -= x + y;
+            wheeled = true;
         }
     }
     if held_value(ui, shown).is_none_or(|[_, was]| was != active as f32)
@@ -91,7 +97,11 @@ pub fn section_tabs(
         Some(start)
     });
     let target = ui.hold(scroll, target.clamp(0.0, most));
-    let offset = ui.animate(row.child("offset"), target);
+    let offset = if wheeled {
+        ui.hold(shift, target)
+    } else {
+        ui.animate(shift, target)
+    };
     let fade = |cut: bool| if cut { EDGE } else { 0.0 };
     ui.open_as(
         row,

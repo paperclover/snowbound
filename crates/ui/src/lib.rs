@@ -866,7 +866,7 @@ impl Ui {
     }
 
     /// Scrolls `scroller`, a scrolling box, until `target` within it starts at its top, both
-    /// as last laid out; the wheel's easing carries it there.
+    /// as last laid out, easing there.
     pub fn scroll_to(&mut self, scroller: Id, target: Id) {
         let (Some(top), Some(start)) = (self.rect(target), self.rect(scroller)) else {
             return;
@@ -1036,7 +1036,9 @@ impl Ui {
                     Some(id) => {
                         let state = self.states.entry(id).or_default();
                         let most = (state.content - (state.rect[3] - state.rect[1])).max(0.0);
-                        state.scroll_target = (state.scroll_target - delta[1]).clamp(0.0, most);
+                        // The wheel moves the content at once, as on the page; only jumps ease.
+                        state.scroll = (state.scroll - delta[1]).clamp(0.0, most);
+                        state.scroll_target = state.scroll;
                         self.signals.entry(id).or_default().events.push(event);
                     }
                     None => {}
