@@ -168,9 +168,16 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   it is uncertain, as one whose answer was lost, and it goes again on top of another app's
   write. The sync popup says the folder isn't locked.
 - Menus are the kit's own, as on Linux, with the PC's chords and ⌘ for Ctrl on a Mac; the
-  browser keeps its own window and tab chords. Dialogs are the browser's; Open and Insert
-  ask for files to copy in; printing downloads the PDF. Servers, recording and accessibility
-  are still to come.
+  browser keeps its own window and tab chords. Dialogs are the browser's; Insert, and Open
+  without a folder to give, ask for files to copy in; printing downloads the PDF. Servers and
+  recording are still to come.
+- Spelling is Hunspell's American English dictionary through `spellbook`, fetched beside the
+  module; Add to Dictionary keeps its words in the browser's files. Text the bundled faces
+  lack takes Noto's, fetched by script the first time a page holds it (a CJK face cut to
+  the national standards' characters by `tools/web/subset_cjk.py`).
+- AccessKit has no web adapter, so once a screen reader asks for it (a visually hidden
+  button, then on every visit) the trees AccessKit would get are mirrored as hidden
+  elements with ARIA roles; acting on one sends AccessKit's action back.
 
 ## iOS: native around the canvas
 

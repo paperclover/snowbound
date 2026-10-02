@@ -46,6 +46,8 @@ ring = "0.17"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wgpu = { workspace = true, features = ["webgl"] }
 getrandom = { version = "0.4", features = ["wasm_js"] }
+# Checks spelling with Hunspell dictionaries, as the browser offers pages no checker.
+spellbook = "0.4"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"

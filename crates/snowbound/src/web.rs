@@ -10,7 +10,9 @@ use std::{
     collections::VecDeque,
     error::Error,
     marker::PhantomData,
+    ops::RangeInclusive,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 use ui::Ui;
@@ -70,6 +72,12 @@ extern "C" {
     /// [[offset, bytes], ...]]` a file's new length and the ranges that changed; with a
     /// fourth `true`, a section committed under a folder of the user's, written only where
     /// nothing else wrote the file since it was read (`refreshed` answers).
+    /// Applies an accessibility tree update to the DOM mirror (`mirrored`).
+    #[wasm_bindgen(js_name = mirrorTree)]
+    fn mirror_tree(update: &js_sys::Object);
+    /// Fetches `fonts/{name}` for `font_arrived`.
+    #[wasm_bindgen(js_name = fetchFont)]
+    fn fetch_font(name: &str);
     #[wasm_bindgen(js_name = storeFiles)]
     fn store_files(changes: js_sys::Array);
 }
@@ -84,6 +92,41 @@ const SETTINGS: &str = "/Settings";
 const FOLDERS: &str = "/Folders";
 /// Files chosen to insert, open or paste, kept where the page links them from.
 const CHOSEN: &str = "/Chosen";
+/// Faces for what the bundled ones lack, beside them in `fonts/`, fetched the first time a
+/// page holds a character in their ranges: Noto's, by script.
+const FALLBACKS: [(&str, &[RangeInclusive<u32>]); 6] = [
+    (
+        "NotoSansArabic.ttf",
+        &[
+            0x600..=0x6ff,
+            0x750..=0x77f,
+            0x8a0..=0x8ff,
+            0xfb50..=0xfdff,
+            0xfe70..=0xfeff,
+        ],
+    ),
+    ("NotoSansHebrew.ttf", &[0x590..=0x5ff, 0xfb1d..=0xfb4f]),
+    ("NotoSansDevanagari.ttf", &[0x900..=0x97f, 0xa8e0..=0xa8ff]),
+    ("NotoSansThai.ttf", &[0xe00..=0xe7f]),
+    (
+        "NotoSansSymbols2-Regular.otf",
+        &[
+            0x2190..=0x21ff,
+            0x2300..=0x23ff,
+            0x25a0..=0x27bf,
+            0x2b00..=0x2bff,
+        ],
+    ),
+    (
+        "NotoSansCJK.otf",
+        &[
+            0x2e80..=0x9fff,
+            0xac00..=0xd7af,
+            0xf900..=0xfaff,
+            0xff00..=0xffef,
+        ],
+    ),
+];
 /// How long changed files wait to be written out, so a burst of edits writes once.
 const STORE_AFTER: Duration = Duration::from_millis(500);
 
@@ -123,6 +166,13 @@ thread_local! {
     static EVENTS: RefCell<VecDeque<UserEvent>> = const { RefCell::new(VecDeque::new()) };
     /// Work deferred to after the frame, as threads run it elsewhere.
     static LATER: RefCell<Vec<Box<dyn FnOnce()>>> = const { RefCell::new(Vec::new()) };
+    /// The fallback faces asked for, by bit, and the page whose text was last looked through.
+    static FETCHED: Cell<u32> = const { Cell::new(0) };
+    static LOOKED: Cell<Option<onestore::ExGuid>> = const { Cell::new(None) };
+    /// Text arrived from the keyboard, input methods or the clipboard since the last look.
+    static TYPED: Cell<bool> = const { Cell::new(false) };
+    /// A screen reader asked for the accessibility mirror.
+    static ACCESSIBLE: Cell<bool> = const { Cell::new(false) };
     /// Input waits a frame for what a chord opened.
     static HOLDING: Cell<bool> = const { Cell::new(false) };
     /// Modifier bits as the page's input last reported them.
@@ -268,8 +318,9 @@ impl EventLoopProxy<UserEvent> {
     }
 }
 
-/// Assistive technology's view of the window, which a DOM mirror takes in a later phase;
-/// until then no tree is asked for.
+/// Assistive technology's view of the window: a DOM of ARIA roles the glue keeps beside the
+/// canvas once a screen reader asks for it (`accessibility`), as AccessKit has no adapter
+/// for the web.
 pub struct AccessAdapter;
 
 impl AccessAdapter {
@@ -281,7 +332,98 @@ impl AccessAdapter {
         Self
     }
 
-    pub fn update_if_active(&mut self, _: impl FnOnce() -> accesskit::TreeUpdate) {}
+    pub fn update_if_active(&mut self, update: impl FnOnce() -> accesskit::TreeUpdate) {
+        if ACCESSIBLE.get() {
+            mirror_tree(&mirrored(&update()));
+        }
+    }
+}
+
+/// `update` as the glue mirrors it: the tree, its focus and root where it has one, and each
+/// node as `[id, role, name, value, children, bounds, grafted tree, disabled, toggled]`.
+fn mirrored(update: &accesskit::TreeUpdate) -> js_sys::Object {
+    let tree = |id: accesskit::TreeId| JsValue::from_str(&id.0.to_string());
+    let nodes: js_sys::Array = update
+        .nodes
+        .iter()
+        .map(|(id, node)| {
+            let children: js_sys::Array = node
+                .children()
+                .iter()
+                .map(|child| JsValue::from_f64(child.0 as f64))
+                .collect();
+            let bounds = node.bounds().map_or(JsValue::NULL, |rect| {
+                js_sys::Array::of4(
+                    &rect.x0.into(),
+                    &rect.y0.into(),
+                    &rect.x1.into(),
+                    &rect.y1.into(),
+                )
+                .into()
+            });
+            let text = |text: Option<&str>| text.map_or(JsValue::NULL, JsValue::from_str);
+            [
+                JsValue::from_f64(id.0 as f64),
+                JsValue::from_str(&format!("{:?}", node.role())),
+                text(node.label()),
+                text(node.value()),
+                children.into(),
+                bounds,
+                node.tree_id().map_or(JsValue::NULL, tree),
+                node.is_disabled().into(),
+                node.toggled().map_or(JsValue::NULL, |toggled| {
+                    (toggled == accesskit::Toggled::True).into()
+                }),
+            ]
+            .into_iter()
+            .collect::<js_sys::Array>()
+        })
+        .collect();
+    let mirrored = js_sys::Object::new();
+    let set = |key: &str, value: &JsValue| {
+        let _ = js_sys::Reflect::set(&mirrored, &key.into(), value);
+    };
+    set("tree", &tree(update.tree_id));
+    set("focus", &JsValue::from_f64(update.focus.0 as f64));
+    set(
+        "root",
+        &update
+            .tree
+            .as_ref()
+            .map_or(JsValue::NULL, |info| JsValue::from_f64(info.root.0 as f64)),
+    );
+    set("nodes", &nodes);
+    mirrored
+}
+
+/// A screen reader turned the mirror on, or off: the whole tree is sent afresh.
+#[wasm_bindgen]
+pub fn accessibility(on: bool) {
+    ACCESSIBLE.set(on);
+    send(UserEvent::Then(Box::new(|state| {
+        state.deactivate_accessibility();
+        state.update_accessibility(true)
+    })));
+}
+
+/// Assistive technology acted on node `node` of tree `tree`: 0 clicks it, 1 focuses it.
+#[wasm_bindgen]
+pub fn access(tree: String, node: f64, action: u8) {
+    let Ok(tree) = tree.parse() else {
+        return;
+    };
+    let request = accesskit::ActionRequest {
+        action: match action {
+            1 => accesskit::Action::Focus,
+            _ => accesskit::Action::Click,
+        },
+        target_tree: accesskit::TreeId(tree),
+        target_node: accesskit::NodeId(node as u64),
+        data: None,
+    };
+    send(UserEvent::Then(Box::new(move |state| {
+        state.access_action(request)
+    })));
 }
 
 /// The browser's clipboard: text out through `navigator.clipboard`, and in through the page's
@@ -670,10 +812,15 @@ pub mod smb {
     }
 }
 
-/// Starts Snowbound on the page's canvas, `index.html` having fetched `fonts`. `module` is
-/// the module's own exports, which the glue calls.
+/// Starts Snowbound on the page's canvas, `index.html` having fetched `fonts` and, where it
+/// could, the spelling dictionary's affix and word files. `module` is the module's own
+/// exports, which the glue calls.
 #[wasm_bindgen]
-pub async fn start(module: JsValue, fonts: Vec<js_sys::Uint8Array>) -> Result<(), JsValue> {
+pub async fn start(
+    module: JsValue,
+    fonts: Vec<js_sys::Uint8Array>,
+    dictionary: Vec<js_sys::Uint8Array>,
+) -> Result<(), JsValue> {
     std::panic::set_hook(Box::new(|info| report(info)));
     let window = web_sys::window().ok_or("No window")?;
     let navigator = window.navigator();
@@ -701,6 +848,12 @@ pub async fn start(module: JsValue, fonts: Vec<js_sys::Uint8Array>) -> Result<()
     canvas.set_width(host(|host| host.size.width));
     canvas.set_height(host(|host| host.size.height));
     restore(load_files().await?);
+    if let [affix, words] = dictionary.as_slice() {
+        notebook::fs::restore("/Dictionaries", notebook::fs::Saved::Directory);
+        for (path, file) in [(crate::spell::AFFIX, affix), (crate::spell::WORDS, words)] {
+            notebook::fs::restore(path, notebook::fs::Saved::File(file.to_vec(), 0.0));
+        }
+    }
     for folder in load_folders().await?.iter() {
         let folder = js_sys::Array::from(&folder);
         let root = folder.get(0).as_string().unwrap_or_default();
@@ -893,6 +1046,7 @@ pub fn pointer(kind: u8, x: f32, y: f32, button: i16, pressure: f32, held: u8) {
 #[wasm_bindgen]
 pub fn key(key: &str, text: Option<String>, held: u8) {
     follow_modifiers(held);
+    TYPED.set(TYPED.get() || text.is_some());
     queue(Input::Ui(ui::Event::Key {
         key: logical_key(key),
         text,
@@ -915,6 +1069,7 @@ pub fn compose(text: String) {
 
 #[wasm_bindgen]
 pub fn commit(text: String) {
+    TYPED.set(true);
     queue(Input::Ui(ui::Event::Ime(Ime::Commit(text))));
 }
 
@@ -922,6 +1077,7 @@ pub fn commit(text: String) {
 #[wasm_bindgen]
 pub fn paste(text: Option<String>, html: Option<String>, files: js_sys::Array) {
     let files = keep(files, CHOSEN);
+    TYPED.set(true);
     PASTED.with_borrow_mut(|pasted| *pasted = Pasted { text, html, files });
     send(UserEvent::Choose(commands::Choice::Command(
         commands::Id::Paste,
@@ -1136,6 +1292,10 @@ fn turn(state: &mut State) -> Result<(), Box<dyn Error>> {
     if host(|host| std::mem::take(&mut host.redraw)) {
         state.frame()?;
     }
+    let space = state.session.as_ref().map(|session| session.space);
+    if TYPED.take() || LOOKED.replace(space) != space {
+        fetch_fallbacks(&crate::page_text(&state.view.editor));
+    }
     park_input(state);
     let now = Instant::now();
     let (repaint, blink) = state.view.blink(now);
@@ -1157,6 +1317,46 @@ fn turn(state: &mut State) -> Result<(), Box<dyn Error>> {
         wake_in(next.saturating_duration_since(now).as_secs_f64() * 1e3);
     }
     Ok(())
+}
+
+/// Fetches the fallback faces `text` calls for that are not yet asked for.
+fn fetch_fallbacks(text: &str) {
+    for character in text.chars().map(u32::from) {
+        for (index, (name, ranges)) in FALLBACKS.iter().enumerate() {
+            if FETCHED.get() & (1 << index) == 0
+                && ranges.iter().any(|range| range.contains(&character))
+            {
+                FETCHED.set(FETCHED.get() | 1 << index);
+                fetch_font(name);
+            }
+        }
+    }
+}
+
+/// A fallback face arrived: the page, its loaders and the interface draw what the bundled
+/// faces lack with it, and the page is laid out again.
+#[wasm_bindgen]
+pub fn font_arrived(bytes: Vec<u8>) {
+    let face = parley::fontique::Blob::new(Arc::new(bytes));
+    send(UserEvent::Then(Box::new(move |state| {
+        let collection = &mut state.view.engine.fonts.collection;
+        let families: Vec<String> = collection
+            .register_fonts(face.clone(), None)
+            .into_iter()
+            .filter_map(|(family, _)| collection.family_name(family).map(String::from))
+            .collect();
+        draw::fall_back_to(collection, &families);
+        if let Ok(mut layouts) = state.layouts.lock() {
+            layouts.fonts.collection.register_fonts(face.clone(), None);
+            draw::fall_back_to(&mut layouts.fonts.collection, &families);
+        }
+        for family in &families {
+            state.ui.preview_font(face.clone(), family);
+        }
+        state.ui.fall_back_to(&families);
+        state.renderer.clear_glyph_cache();
+        state.refresh()
+    })));
 }
 
 /// Parks the text area while the page takes no text, keeping it writable for the

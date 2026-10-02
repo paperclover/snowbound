@@ -287,6 +287,13 @@ export function pickNotebook() {
     .catch((error) => error.name === "AbortError" || console.error("Opening the folder", error));
 }
 
+export function fetchFont(name) {
+  fetch(`fonts/${name}`)
+    .then((response) => (response.ok ? response.arrayBuffer() : Promise.reject(response.status)))
+    .then((data) => wasm.font_arrived(new Uint8Array(data)))
+    .catch((error) => console.warn("Font", name, error));
+}
+
 export function requestFrame() {
   if (!framePending) {
     framePending = true;
@@ -369,6 +376,73 @@ export function tell(message) {
 
 export function openLink(url) {
   open(url, "_blank", "noopener");
+}
+
+// Assistive technology's view of the window: AccessKit's trees mirrored as elements with
+// ARIA roles, visually hidden, which a screen reader reads and acts on.
+const ROLES = {
+  Button: "button", DefaultButton: "button", CheckBox: "checkbox", RadioButton: "radio",
+  Switch: "switch", TextInput: "textbox", MultilineTextInput: "textbox", SearchInput: "searchbox",
+  Document: "document", Group: "group", GenericContainer: "generic", Label: "none",
+  Paragraph: "paragraph", List: "list", ListItem: "listitem", ListBox: "listbox",
+  ListBoxOption: "option", Menu: "menu", MenuBar: "menubar", MenuItem: "menuitem",
+  MenuItemCheckBox: "menuitemcheckbox", MenuItemRadio: "menuitemradio", Tab: "tab",
+  TabList: "tablist", TabPanel: "tabpanel", Toolbar: "toolbar", Tooltip: "tooltip",
+  Tree: "tree", TreeItem: "treeitem", Dialog: "dialog", AlertDialog: "alertdialog",
+  Image: "img", Link: "link", Heading: "heading", Table: "table", Row: "row", Cell: "cell",
+  ColumnHeader: "columnheader", ComboBox: "combobox", ScrollBar: "scrollbar", Slider: "slider",
+  Window: "application", Pane: "region", Separator: "separator", Status: "status",
+};
+const mirrored = new Map();
+export function mirrorTree({ tree, focus, root, nodes }) {
+  if (!mirrored.has(tree)) mirrored.set(tree, { nodes: new Map(), root: null });
+  const held = mirrored.get(tree);
+  const element = (id) => {
+    if (!held.nodes.has(id)) {
+      const made = document.createElement("div");
+      made.id = `a11y-${tree}-${id}`;
+      made.onclick = () => wasm.access(tree, id, 0);
+      held.nodes.set(id, made);
+    }
+    return held.nodes.get(id);
+  };
+  for (const [id, role, name, value, children, , grafted, disabled, toggled] of nodes) {
+    const node = element(id);
+    const aria = ROLES[role];
+    if (aria && aria !== "none") node.setAttribute("role", aria);
+    else node.removeAttribute("role");
+    const text = role === "Label" || role === "TextRun" || role === "StaticText";
+    if (name && !text) node.setAttribute("aria-label", name);
+    else node.removeAttribute("aria-label");
+    node.toggleAttribute("aria-disabled", disabled);
+    if (toggled === null) node.removeAttribute("aria-checked");
+    else node.setAttribute("aria-checked", String(toggled));
+    const kids = children.map(element);
+    if (grafted && mirrored.get(grafted)?.root) kids.push(mirrored.get(grafted).root);
+    if (text && !kids.length) node.textContent = value ?? name ?? "";
+    else node.replaceChildren(...kids);
+    if (grafted) node.dataset.grafted = grafted;
+  }
+  if (root !== null) {
+    held.root = element(root);
+    if (tree === "00000000-0000-0000-0000-000000000000")
+      document.getElementById("a11y").replaceChildren(held.root);
+    else
+      for (const { nodes: all } of mirrored.values())
+        for (const node of all.values()) if (node.dataset.grafted === tree) node.append(held.root);
+  }
+  if (held.nodes.has(focus)) input.setAttribute("aria-activedescendant", held.nodes.get(focus).id);
+}
+
+/** Turns the mirror on: once a screen reader asks for it, and on every visit after. */
+function offerAccessibility() {
+  const on = () => {
+    localStorage.setItem("snowbound-accessibility", "on");
+    document.getElementById("accessible").remove();
+    wasm.accessibility(true);
+  };
+  document.getElementById("accessible").onclick = on;
+  if (localStorage.getItem("snowbound-accessibility") === "on") on();
 }
 
 function modifiers(event) {
@@ -547,5 +621,6 @@ export function attach(module) {
       Math.round(entry.contentRect.height * devicePixelRatio),
     ),
   ).observe(canvas);
+  offerAccessibility();
   input.focus({ preventScroll: true });
 }

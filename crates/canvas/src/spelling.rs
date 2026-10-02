@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex, mpsc};
 /// Checked paragraphs kept before the cache starts over.
 const KEPT: usize = 8192;
 /// Paragraphs waiting to be checked that one call to the dictionary takes.
+#[cfg(not(target_arch = "wasm32"))]
 const BATCH: usize = 64;
 
 /// A platform spell checker, called from the spelling thread and the host's. Languages are
@@ -327,6 +328,10 @@ impl Spelling {
         });
         let (jobs, receiver) = mpsc::channel::<(u64, Paragraph)>();
         let worker = Arc::clone(&shared);
+        // The browser gives a page one thread: paragraphs are checked as they are drawn.
+        #[cfg(target_arch = "wasm32")]
+        drop((receiver, worker, redraw));
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::Builder::new()
             .name("spelling".into())
             .spawn(move || {
@@ -353,6 +358,9 @@ impl Spelling {
     /// The marks on `paragraph` once it is checked, less accepted words; until then none,
     /// and it is checked.
     pub(crate) fn marks(&self, paragraph: &Paragraph) -> Vec<Mark> {
+        if cfg!(target_arch = "wasm32") {
+            return self.marks_now(paragraph);
+        }
         let key = key(paragraph);
         let mut state = self.shared.state.lock().unwrap();
         if let Some(marks) = state.marks(key, paragraph) {

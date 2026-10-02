@@ -31,16 +31,17 @@ def run(command, **kwargs):
     subprocess.run(command, cwd=ROOT, check=True, **kwargs)
 
 
-def tool(name, nix=None, wasm=False):
+def tool(name, nix=None, wasm=False, store=False):
     """`name` from PATH or Cargo's bin folder, or else from nixpkgs package `nix`; with `wasm`,
-    from nixpkgs only, as the system's clang may not build for wasm32."""
-    found = None if wasm else shutil.which(name) or shutil.which(name, path=str(Path.home() / '.cargo/bin'))
+    from nixpkgs only, as the system's clang may not build for wasm32; with `store`, the
+    package's folder."""
+    found = None if wasm or store else shutil.which(name) or shutil.which(name, path=str(Path.home() / '.cargo/bin'))
     if found:
         return found
     if nix and shutil.which('nix'):
-        store = subprocess.check_output(['nix', 'build', f'nixpkgs#{nix}', '--no-link', '--print-out-paths'],
+        built = subprocess.check_output(['nix', 'build', f'nixpkgs#{nix}', '--no-link', '--print-out-paths'],
                                         text=True).split()[-1]
-        return str(Path(store) / 'bin' / name)
+        return built if store else str(Path(built) / 'bin' / name)
     sys.exit(f'{name} is missing: cargo install wasm-bindgen-cli at the version Cargo.lock pins, '
              'and binaryen for wasm-opt')
 
@@ -68,13 +69,37 @@ def build(out):
     bound = out / 'snowbound_web_bg.wasm'
     run([tool('wasm-opt', 'binaryen'), '-Oz', '--strip-debug', '--strip-producers', bound, '-o', bound])
     shutil.copy(WEB / 'index.html', out)
+    # Hunspell's American English dictionary (SCOWL, BSD-3-Clause), for spelling.
+    (out / 'dictionaries').mkdir()
+    store = Path(tool('hunspell', 'hunspellDicts.en_US', store=True))
+    for name in ('share/hunspell/en_US.aff', 'share/hunspell/en_US.dic', 'share/doc/hunspell-dict-en-us-wordlist.txt'):
+        shutil.copy(store / name, out / 'dictionaries')
     (out / 'fonts').mkdir()
     for font in sorted(FONTS.glob('*')):
         if font.suffix in ('.ttf', '.txt'):
             shutil.copy(font, out / 'fonts')
+    fallbacks(out / 'fonts')
     for path in sorted(out.rglob('*')):
         if path.is_file():
             print(f'{path.stat().st_size:>12,}  {path.relative_to(out)}')
+
+
+def fallbacks(fonts):
+    """Noto's faces for scripts the bundled ones lack, which the page fetches as it needs them
+    (`FALLBACKS` in src/web.rs), under the SIL Open Font License."""
+    noto = Path(tool('noto', 'noto-fonts', store=True)) / 'share/fonts/noto'
+    for name in ('NotoSansArabic.ttf', 'NotoSansHebrew.ttf', 'NotoSansDevanagari.ttf', 'NotoSansThai.ttf',
+                 'NotoSansSymbols2-Regular.otf'):
+        shutil.copy(noto / name, fonts)
+    # Cutting the CJK face takes a minute or two, so the cut is kept between builds.
+    cjk = TARGET / 'NotoSansCJK.otf'
+    if not cjk.exists():
+        collection = Path(tool('noto', 'noto-fonts-cjk-sans', store=True)) / \
+            'share/fonts/opentype/noto-cjk/NotoSansCJK-VF.otf.ttc'
+        run(['uv', 'run', '--no-project', '--with', 'fonttools', 'python', ROOT / 'tools/web/subset_cjk.py',
+             collection, cjk])
+    shutil.copy(cjk, fonts)
+    (fonts / 'Noto-OFL.txt').write_text('Noto fonts: SIL Open Font License 1.1, https://openfontlicense.org\n')
 
 
 def publish(built):
