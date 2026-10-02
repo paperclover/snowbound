@@ -38,13 +38,13 @@ fn replay(scratch: &Scratch, notebook: Option<&Path>, steps: &[&str]) -> Vec<Str
             std::fs::copy(entry.path(), dir.join("notebook").join(entry.file_name())).unwrap();
         }
     }
-    let mut script = String::from("wait 500\n");
+    let mut script = String::from("settle\n");
     let mut trees = Vec::new();
     for step in steps {
         match step.strip_prefix("accessibility ") {
             Some(name) => {
                 let path = dir.join(format!("{name}.txt"));
-                script += &format!("accessibility {}\nwait 100\n", path.display());
+                script += &format!("accessibility {}\n", path.display());
                 trees.push(path);
             }
             None => script += &format!("{step}\n"),
@@ -115,6 +115,7 @@ fn each_toolbar_control_has_a_name_of_its_own_at_every_width() {
     let mut steps = Vec::new();
     for width in ["1600", "1180", "900", "600"] {
         steps.push(format!("resize {width} 760"));
+        // The window system resizes the window, which settling does not wait for.
         steps.push("wait 300".into());
         steps.push(format!("accessibility {width}"));
     }
@@ -140,17 +141,17 @@ fn the_palette_lists_recent_pages_and_the_actions_a_context_menu_offers() {
     let scratch = Scratch::new("palette-actions");
     let notebook =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
-    let palette = ["modifiers command", "key p", "modifiers", "wait 400"];
-    let chord = ["modifiers command", "key k", "modifiers", "wait 400"];
+    let palette = ["modifiers command", "key p", "modifiers", "settle"];
+    let chord = ["modifiers command", "key k", "modifiers", "settle"];
     let mut steps = Vec::from(palette);
-    steps.extend(["type type over", "wait 200", "key Enter", "wait 800"]);
+    steps.extend(["type type over", "settle", "key Enter", "settle"]);
     steps.extend(palette);
     steps.push("accessibility recent");
     steps.extend(chord);
     steps.push("accessibility actions");
-    steps.extend(["key Escape", "wait 400", "accessibility back"]);
-    steps.extend(["key Escape", "wait 400", "move 1000 87", "press right"]);
-    steps.extend(["release right", "wait 400", "accessibility context"]);
+    steps.extend(["key Escape", "accessibility back"]);
+    steps.extend(["key Escape", "settle", "move 1000 87", "press right"]);
+    steps.extend(["release right", "accessibility context"]);
     let [recent, actions, back, context] = replay(&scratch, Some(&notebook), &steps)
         .try_into()
         .unwrap();
@@ -201,11 +202,11 @@ fn undo_walks_back_through_new_pages_and_their_titles() {
     let notebook =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
     let chord =
-        |modifiers: &str, key: &str| [modifiers, key, "modifiers", "wait 800"].map(String::from);
+        |modifiers: &str, key: &str| [modifiers, key, "modifiers", "settle"].map(String::from);
     let mut steps = Vec::new();
     for title in ["type One", "type Two"] {
         steps.extend(chord("modifiers command", "key n"));
-        steps.extend(["settle", title, "wait 300"].map(String::from));
+        steps.push(title.into());
     }
     steps.extend(chord("modifiers command control", "key Left"));
     steps.push("accessibility back".into());
@@ -267,11 +268,7 @@ fn search(query: &str, name: &str) -> Vec<String> {
     ["modifiers command", "key e", "modifiers"]
         .into_iter()
         .map(String::from)
-        .chain([
-            format!("type {query}"),
-            "wait 2500".into(),
-            format!("accessibility {name}"),
-        ])
+        .chain([format!("type {query}"), format!("accessibility {name}")])
         .collect()
 }
 
@@ -279,13 +276,13 @@ fn search(query: &str, name: &str) -> Vec<String> {
 fn version_menu() -> Vec<String> {
     let mut steps: Vec<String> = ["modifiers command shift", "key p", "modifiers"]
         .into_iter()
-        .chain(["type Page Versions", "wait 300", "key Enter", "wait 1000"])
+        .chain(["type Page Versions", "settle", "key Enter", "settle"])
         .map(String::from)
         .collect();
     // The version row under the page, then the yellow bar above the version.
     for point in ["1003 114", "177 94"] {
         steps.extend([format!("move {point}"), "press".into(), "release".into()]);
-        steps.push("wait 1200".into());
+        steps.push("settle".into());
     }
     steps
 }
@@ -301,10 +298,10 @@ fn search_finds_what_a_template_put_on_the_page() {
     let scratch = Scratch::new("template-search");
     let notebook =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
-    let mut steps: Vec<String> = ["modifiers command", "key n", "modifiers", "wait 1200"]
+    let mut steps: Vec<String> = ["modifiers command", "key n", "modifiers", "settle"]
         .into_iter()
         // The Meeting tile of the template strip over the new page.
-        .chain(["move 615 287", "press", "release", "wait 3000"])
+        .chain(["move 615 287", "press", "release", "settle"])
         .map(String::from)
         .collect();
     steps.extend(search("Attendees", "found"));
@@ -325,7 +322,7 @@ fn search_finds_a_restored_version() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/page-versions/candidate-restore");
     let mut steps = version_menu();
     // Restore Version.
-    steps.extend(["key Down", "key Enter", "wait 2000"].map(String::from));
+    steps.extend(["key Down", "key Enter", "settle"].map(String::from));
     steps.extend(search("Second author", "found"));
     let [found] = run(&scratch, &notebook, &steps).try_into().unwrap();
     assert!(!search_results(&found).is_empty(), "{found}");
@@ -339,8 +336,8 @@ fn a_version_copied_into_its_section_is_listed_and_found() {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/page-versions/candidate-restore");
     let mut steps = version_menu();
     // Copy Page To…, then the section itself.
-    steps.extend(["key Down", "key Down", "key Down", "key Enter", "wait 600"].map(String::from));
-    steps.extend(["key Down", "key Enter", "wait 2000", "accessibility copied"].map(String::from));
+    steps.extend(["key Down", "key Down", "key Down", "key Enter", "settle"].map(String::from));
+    steps.extend(["key Down", "key Enter", "accessibility copied"].map(String::from));
     steps.extend(search("Second author", "found"));
     let [copied, found] = run(&scratch, &notebook, &steps).try_into().unwrap();
     let pages = page_tabs(&copied);
@@ -359,9 +356,9 @@ fn renaming_a_section_from_its_tab_types_into_the_sidebar_at_once() {
     let scratch = Scratch::new("rename-shut-sidebar");
     let notebook =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
-    let mut steps = vec!["move 53 53", "press right", "release right", "wait 400"];
-    steps.extend(["key Down", "key Enter", "wait 400"]);
-    steps.extend(["type Renamed", "wait 100", "accessibility typed"]);
+    let mut steps = vec!["move 53 53", "press right", "release right", "settle"];
+    steps.extend(["key Down", "key Enter", "settle"]);
+    steps.extend(["type Renamed", "accessibility typed"]);
     let [typed] = replay(&scratch, Some(&notebook), &steps)
         .try_into()
         .unwrap();
@@ -378,10 +375,10 @@ fn the_find_bar_keeps_room_for_the_query() {
     let scratch = Scratch::new("find-room");
     let notebook =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
-    let mut steps = vec!["modifiers command", "key f", "modifiers", "wait 200"];
-    steps.extend(["type Alpha", "wait 400", "move 600 600", "press", "release"]);
-    steps.extend(["wait 200", "move 1000 52", "press", "release", "wait 200"]);
-    steps.extend(["type zz", "wait 200", "accessibility found"]);
+    let mut steps = vec!["modifiers command", "key f", "modifiers", "settle"];
+    steps.extend(["type Alpha", "settle", "move 600 600", "press", "release"]);
+    steps.extend(["settle", "move 1000 52", "press", "release", "settle"]);
+    steps.extend(["type zz", "accessibility found"]);
     let [found] = replay(&scratch, Some(&notebook), &steps)
         .try_into()
         .unwrap();
@@ -417,8 +414,13 @@ fn a_launch_returns_to_the_page_each_notebook_was_left_on() {
     });
     std::fs::write(scratch.0.join("settings.json"), settings.to_string()).unwrap();
     // The other notebook's section in the sidebar.
-    let mut steps = vec!["accessibility launched", "move 63 104", "press", "release"];
-    steps.extend(["wait 4000", "accessibility other"]);
+    let steps = [
+        "accessibility launched",
+        "move 63 104",
+        "press",
+        "release",
+        "accessibility other",
+    ];
     let shown = |tree: &str| page_tabs(tree).into_iter().find(|tab| tab.starts_with('*'));
     let [launched, other] = replay(&scratch, Some(&source), &steps).try_into().unwrap();
     assert_eq!(

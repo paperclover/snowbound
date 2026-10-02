@@ -111,7 +111,11 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    },
 };
 use ui::{Axis, Flags, Id, Spec, Theme, Ui, children, fill, fit, px};
 use web_time::Instant;
@@ -886,7 +890,8 @@ struct State {
     snapshot: Option<PathBuf>,
     /// A replay waiting for nothing to be on its way, and where it wants the accessibility
     /// tree written then.
-    replay_settle: Option<(Option<PathBuf>, std::sync::mpsc::Sender<()>)>,
+    /// Whether the last frame found the window quiet too, which the tree waits for.
+    replay_settle: Option<(Option<PathBuf>, std::sync::mpsc::Sender<()>, bool)>,
     /// `SNOWBOUND_FRAMES`: a directory every frame drawn is also written to, named by
     /// milliseconds since the window opened.
     frames: Option<(PathBuf, Instant)>,
@@ -5629,7 +5634,15 @@ fn page_text(editor: &CanvasEditor) -> String {
 
 /// Runs `work` beside the frame: on a thread of its own, or in the browser, which gives the
 /// page one thread, once the frame under way is done.
+/// Work [`spawn`] started that has not ended.
+static RUNNING: AtomicUsize = AtomicUsize::new(0);
+
 fn spawn(work: impl FnOnce() + Send + 'static) {
+    RUNNING.fetch_add(1, Ordering::Relaxed);
+    let work = move || {
+        work();
+        RUNNING.fetch_sub(1, Ordering::Relaxed);
+    };
     #[cfg(not(target_arch = "wasm32"))]
     std::thread::spawn(work);
     #[cfg(target_arch = "wasm32")]
@@ -5714,7 +5727,9 @@ impl State {
                         }
                     }
                     Replay::Snapshot(path) => self.snapshot = Some(path),
-                    Replay::Settle(path, settled) => self.replay_settle = Some((path, settled)),
+                    Replay::Settle(path, settled) => {
+                        self.replay_settle = Some((path, settled, false));
+                    }
                     Replay::Tick | Replay::Quit => {}
                     Replay::Appearance(appearance) => {
                         self.window.set_theme(Some(appearance));
@@ -5730,15 +5745,22 @@ impl State {
                 if let Err(error) = self.frame() {
                     eprintln!("{error}");
                 }
-                if self.settled()
-                    && let Some((path, settled)) = self.replay_settle.take()
-                {
-                    if let Some(path) = path
-                        && let Err(error) = self.write_accessibility(&path)
-                    {
-                        eprintln!("{error}");
+                // Quiet on two frames apart, what a thread sent as it ended has been taken.
+                let quiet = self.settled()
+                    && self.opening.is_none()
+                    && RUNNING.load(Ordering::Relaxed) == 0
+                    && self.search.pending.load(Ordering::Relaxed) == 0;
+                if let Some((path, settled, was)) = self.replay_settle.take() {
+                    if !(quiet && was) {
+                        self.replay_settle = Some((path, settled, quiet));
+                    } else {
+                        if let Some(path) = path
+                            && let Err(error) = self.write_accessibility(&path)
+                        {
+                            eprintln!("{error}");
+                        }
+                        let _ = settled.send(());
                     }
-                    let _ = settled.send(());
                 }
             }
             #[cfg(not(target_arch = "wasm32"))]

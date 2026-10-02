@@ -754,7 +754,7 @@ impl State {
         if found.is_empty() {
             let status = if self.search.query.trim().is_empty() {
                 ""
-            } else if self.search.busy.load(Ordering::Relaxed) {
+            } else if self.search.pending.load(Ordering::Relaxed) > 0 {
                 "Searching…"
             } else {
                 "No matches"
@@ -837,7 +837,7 @@ impl State {
         mut unchecked: bool,
         mut scope: TagScope,
     ) {
-        let status = if self.search.busy.load(Ordering::Relaxed) {
+        let status = if self.search.pending.load(Ordering::Relaxed) > 0 {
             "Searching…"
         } else {
             "Search completed"

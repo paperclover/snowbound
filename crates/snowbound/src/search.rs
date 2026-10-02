@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, Weak,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
     time::{Duration, SystemTime},
@@ -115,7 +115,8 @@ pub struct Search {
     pub(crate) index: Arc<Mutex<Index>>,
     /// Counts the index's changes, so results are made again when it changes.
     version: Arc<AtomicU64>,
-    pub(crate) busy: Arc<AtomicBool>,
+    /// Jobs sent the index and not yet answered.
+    pub(crate) pending: Arc<AtomicUsize>,
     jobs: mpsc::Sender<Job>,
     /// The index's own state, which the browser, having no thread for it, keeps here to run
     /// the jobs sent after each frame.
@@ -140,10 +141,14 @@ impl Search {
         let (jobs, receiver) = mpsc::channel();
         let index = Arc::new(Mutex::new(Index::default()));
         let version = Arc::new(AtomicU64::new(0));
-        let busy = Arc::new(AtomicBool::new(false));
+        let pending = Arc::new(AtomicUsize::new(0));
         let indexing = Indexing {
             jobs: receiver,
-            shared: (Arc::clone(&index), Arc::clone(&version), Arc::clone(&busy)),
+            shared: (
+                Arc::clone(&index),
+                Arc::clone(&version),
+                Arc::clone(&pending),
+            ),
             redraw,
             stamps: HashMap::new(),
         };
@@ -163,7 +168,7 @@ impl Search {
             reveal: None,
             index,
             version,
-            busy,
+            pending,
             jobs,
             #[cfg(target_arch = "wasm32")]
             indexing,
@@ -189,6 +194,7 @@ impl Search {
     }
 
     fn send(&self, job: Job) {
+        self.pending.fetch_add(1, Ordering::Relaxed);
         let _ = self.jobs.send(job);
         #[cfg(target_arch = "wasm32")]
         {
@@ -239,7 +245,7 @@ pub(crate) fn now() -> u64 {
 /// The index thread's jobs and what it keeps between them.
 struct Indexing {
     jobs: mpsc::Receiver<Job>,
-    shared: (Arc<Mutex<Index>>, Arc<AtomicU64>, Arc<AtomicBool>),
+    shared: (Arc<Mutex<Index>>, Arc<AtomicU64>, Arc<AtomicUsize>),
     redraw: std::task::Waker,
     stamps: HashMap<String, Stamp>,
 }
@@ -249,7 +255,6 @@ impl Indexing {
     #[cfg(not(target_arch = "wasm32"))]
     fn run(mut self) {
         while let Ok(first) = self.jobs.recv() {
-            self.shared.2.store(true, Ordering::Relaxed);
             // Typing sends a job a keystroke; a pause gathers them into one read.
             if matches!(first, Job::Pages { .. }) {
                 std::thread::sleep(SETTLE);
@@ -261,13 +266,14 @@ impl Indexing {
     /// Answers `first` and the jobs waiting behind it, the newest notebooks first, then page
     /// changes, and wakes the window once the index changed.
     fn answer(&mut self, first: Job) {
-        let (index, version, busy) = &self.shared;
+        let (index, version, pending) = &self.shared;
         let (jobs, stamps) = (&self.jobs, &mut self.stamps);
-        busy.store(true, Ordering::Relaxed);
         let mut notebooks = None;
         let mut changed = HashSet::new();
         let mut pages: HashMap<String, (Weak<Replica>, HashSet<ExGuid>)> = HashMap::new();
+        let mut answered = 0;
         for job in std::iter::once(first).chain(jobs.try_iter()) {
+            answered += 1;
             match job {
                 Job::Notebooks {
                     libraries,
@@ -300,7 +306,7 @@ impl Indexing {
             version.fetch_add(1, Ordering::Relaxed);
         }
         lap("index", start);
-        busy.store(false, Ordering::Relaxed);
+        pending.fetch_sub(answered, Ordering::Relaxed);
         self.redraw.wake_by_ref();
     }
 }
@@ -933,7 +939,7 @@ impl State {
         // OneNote's status line: whether the search is done, and where it looked.
         let status = if query.is_empty() {
             "Search In:"
-        } else if self.search.busy.load(Ordering::Relaxed) {
+        } else if self.search.pending.load(Ordering::Relaxed) > 0 {
             "Searching:"
         } else if found.is_empty() {
             "No matches:"
