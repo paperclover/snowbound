@@ -324,7 +324,7 @@ impl TagIcon {
 }
 
 /// Whether tag symbol `shape` is a check box, as MS-ONE's NoteTagShape marks them.
-pub(crate) fn checkable(shape: u16) -> bool {
+pub fn checkable(shape: u16) -> bool {
     matches!(
         shape,
         1..=12 | 28 | 30 | 32 | 48 | 50 | 52 | 69 | 71 | 73 | 89..=99

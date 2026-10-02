@@ -2,7 +2,7 @@
 //! the page's context menu, and following a clicked link, to a page
 //! of the notebook or with the system's handler.
 
-use crate::{Command, State, page, platform};
+use crate::{Command, State, commands, page, platform};
 use onestore::ExGuid;
 use onestore::page::link::{LinkTarget, internal_link};
 use std::error::Error;
@@ -330,6 +330,14 @@ impl State {
             None => Vec::new(),
         };
         let corrections = items.len();
+        let format = self.format_state();
+        let lists = [commands::Id::ToDoList, commands::Id::BulletedList]
+            .into_iter()
+            .filter(|id| {
+                let choice = commands::Choice::Command(*id);
+                self.status(&choice, &format).enabled
+            })
+            .collect::<Vec<_>>();
         items.extend(if context.attachment.is_some() {
             // OneNote 2010's commands for the file itself; its clipboard holds text alone.
             vec![item("Open"), item("Save As…")]
@@ -367,6 +375,12 @@ impl State {
                     },
                     item("Copy Link to Paragraph"),
                 ]),
+            }
+            for (at, id) in lists.iter().enumerate() {
+                items.push(Item {
+                    separated: at == 0,
+                    ..item(commands::command(*id).title)
+                });
             }
             if context.equation {
                 items.extend([
@@ -413,6 +427,12 @@ impl State {
             };
             self.respond(response);
             return Ok(());
+        }
+        if let Some(id) = lists
+            .into_iter()
+            .find(|id| commands::command(*id).title == chosen_text)
+        {
+            return self.run(commands::Choice::Command(id));
         }
         let response = match chosen_text.as_str() {
             "Open" => return self.open_attachment(&context.attachment.unwrap()),

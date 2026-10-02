@@ -113,6 +113,11 @@ pub enum Id {
     CustomizeTags,
     RemoveTags,
     FindTags,
+    /// Gives the selected bulleted and numbered paragraphs the To Do tag in place of
+    /// their list.
+    ToDoList,
+    /// Gives the selected To Do paragraphs a bullet in place of their tag.
+    BulletedList,
     Help,
     CheckForUpdates,
 }
@@ -598,6 +603,8 @@ pub const COMMANDS: &[Command] = &[
         &[cmd('0')]
     ),
     row!(Id::FindTags, "Find Tags", NONE, NONE),
+    row!(Id::ToDoList, "Make To-Do List", NONE, NONE),
+    row!(Id::BulletedList, "Make Bulleted List", NONE, NONE),
     row!(Id::Help, "Snowbound Help", NONE, NONE),
     row!(Id::CheckForUpdates, "Check for Updates…", NONE, NONE),
 ];
@@ -1290,6 +1297,14 @@ impl State {
             Id::Theme(scope) => enabled(!modal && self.theme_target(scope).is_some()),
             // A selected picture or file takes tags too, as in OneNote.
             Id::RemoveTags => enabled(text || tagged),
+            Id::ToDoList => enabled(text && format.listed && self.to_do().is_some()),
+            Id::BulletedList => enabled(
+                text && self.to_do().is_some_and(|place| {
+                    format
+                        .tags
+                        .contains(&(self.tags[place].stored(), place as u16))
+                }),
+            ),
             Id::Toggle(toggle) => checked(format.toggles.contains(&toggle)),
             Id::Bullets => checked(format.bullets),
             Id::Numbering => checked(format.numbering),
@@ -1327,6 +1342,11 @@ impl State {
         let response = self.view.format(formatting)?;
         self.respond(response);
         Ok(())
+    }
+
+    /// The place of the first check box tag in the user's list, To Do in OneNote's.
+    fn to_do(&self) -> Option<usize> {
+        (self.tags.iter()).position(|tag| canvas::outline::checkable(tag.shape))
     }
 
     /// The notebook the open section, or the notebook showing none, belongs to.
@@ -1683,6 +1703,20 @@ impl State {
                 return Ok(());
             }
             Id::RemoveTags => return format(self, Formatting::RemoveTags),
+            Id::ToDoList | Id::BulletedList => {
+                let place = self.to_do().expect("Enabled with a To Do tag");
+                let tag = self.tags[place].clone();
+                format(
+                    self,
+                    if id == Id::ToDoList {
+                        Formatting::ToDoList(tag, place as u16)
+                    } else {
+                        Formatting::BulletedList(tag, place as u16)
+                    },
+                )?;
+                self.keep_tag_art(place);
+                return Ok(());
+            }
         };
         self.commands.push(response);
         Ok(())

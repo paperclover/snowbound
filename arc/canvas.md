@@ -129,6 +129,12 @@ it; a click checks its box (`corpus/object-tags`). A picture's link follows on
 Ctrl+click, Command+click on macOS, while a click selects it, as OneNote's
 tooltip says (`corpus/picture-link`).
 
+OneNote 2010's Ctrl+1 leaves a bulleted or numbered paragraph's list beside its
+new To Do box, and it has no command that converts a list. Make To-Do List, in
+the page's context menu and the palette, trades the selected paragraphs' bullets
+and numbers for the first check box tag in the user's list as one undo step;
+Make Bulleted List trades the tag back for a bullet (`corpus/to-do-list`).
+
 An outline holding only pictures or files takes a paragraph after them where a
 click beside them lands, as OneNote 2010 adds one when typing there. It is
 stored with the first edit that reaches it, and undoing back to it empty takes it

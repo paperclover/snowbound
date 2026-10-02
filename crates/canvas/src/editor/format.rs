@@ -40,6 +40,10 @@ pub enum Formatting {
     RemoveTags,
     /// Checks the selected paragraphs' check boxes, or clears them when all are checked.
     Check,
+    /// Gives the selected bulleted and numbered paragraphs this tag in place of their list.
+    ToDoList(NoteTag, u16),
+    /// Gives the selected paragraphs with this tag OneNote's default bullet in its place.
+    BulletedList(NoteTag, u16),
     /// Format Painter: gives the selection the character formatting and alignment of text
     /// picked up with [`CanvasEditor::painted_format`], as OneNote's does.
     Paint(Format),
@@ -344,6 +348,8 @@ pub struct FormatState {
     /// Whether every selected paragraph is bulleted or numbered.
     pub bullets: bool,
     pub numbering: bool,
+    /// Whether any selected paragraph is bulleted or numbered.
+    pub listed: bool,
     /// The library style every selected paragraph's list shares.
     pub list: Option<ListStyle>,
     /// Tags every selected paragraph has, with their action types.
@@ -701,6 +707,7 @@ impl CanvasEditor {
             })),
             bullets: list(Formatting::Bullets),
             numbering: list(Formatting::Numbering),
+            listed: paragraphs.iter().any(|node| self.list(node).is_some()),
             list: common(paragraphs.iter().map(|node| self.list_style(node))),
             tags: paragraphs.first().map_or_else(Vec::new, |first| {
                 let mut shared: Vec<_> = tags(first)
@@ -753,6 +760,8 @@ impl CanvasEditor {
             | Formatting::Tag(..)
             | Formatting::RemoveTags
             | Formatting::Check
+            | Formatting::ToDoList(..)
+            | Formatting::BulletedList(..)
             | Formatting::Style(_)
                 if title =>
             {
@@ -860,6 +869,46 @@ impl CanvasEditor {
                 }
             }
             Formatting::Check => self.check(&mut replacement, &ranges),
+            Formatting::ToDoList(tag, action_type) => {
+                let definition = tag.definition(*action_type);
+                let id = self.define_tag(&definition)?;
+                let created = time32();
+                for node in leaves_mut(&mut replacement) {
+                    if ranges.remove(&node.id).is_none() || self.list(node).is_none() {
+                        continue;
+                    }
+                    node.lists.clear();
+                    if tags(node).any(|tag| self.tag_kind(tag) == Some(&definition.kind)) {
+                        continue;
+                    }
+                    let ParagraphContent::Text(text) = &mut node.content else {
+                        unreachable!()
+                    };
+                    let added = Some((id, tag.shape, created));
+                    self.retag([&mut node.tags, &mut text.tags], &definition.kind, added);
+                }
+            }
+            Formatting::BulletedList(tag, action_type) => {
+                let kind = tag.definition(*action_type).kind;
+                for node in leaves_mut(&mut replacement) {
+                    if ranges.remove(&node.id).is_none()
+                        || !tags(node).any(|tag| self.tag_kind(tag) == Some(&kind))
+                    {
+                        continue;
+                    }
+                    if self.list(node) != Some(Formatting::Bullets) {
+                        let format = &node.text().unwrap().text.spans()[0].format;
+                        let list = list_definition(ListStyle::BULLET, format);
+                        let id = new_id()?;
+                        self.definitions.insert(id, list);
+                        node.lists = vec![id];
+                    }
+                    let ParagraphContent::Text(text) = &mut node.content else {
+                        unreachable!()
+                    };
+                    self.retag([&mut node.tags, &mut text.tags], &kind, None);
+                }
+            }
             Formatting::Style(definition) => {
                 let olds = bases(&replacement)?;
                 let style = self.define_style(definition)?;
@@ -2301,6 +2350,57 @@ mod tests {
     }
 
     #[test]
+    fn lists_become_to_do_lists_and_back_as_one_undo_step_each() {
+        let mut engine = TextEngine::default();
+        let mut editor = plain(&mut engine, &["one", "two", "three"]);
+        editor.select([at(0, 0), at(1, 3)].into()).unwrap();
+        editor.format(&mut engine, Formatting::Bullets).unwrap();
+        editor.select([at(1, 0); 2].into()).unwrap();
+        editor.format(&mut engine, Formatting::Numbering).unwrap();
+        let listed = editor.active_outline().document.clone();
+        let all = Selection::from([at(0, 0), at(2, 5)]);
+        editor.select(all).unwrap();
+        assert!(editor.format_state().unwrap().listed);
+        let to_do = NoteTag::defaults()[0].clone();
+        editor
+            .format(&mut engine, Formatting::ToDoList(to_do.clone(), 0))
+            .unwrap();
+        let lists = |editor: &CanvasEditor| {
+            let document = &editor.active_outline().document;
+            document
+                .nodes()
+                .iter()
+                .map(|node| editor.list(node))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lists(&editor), [None, None, None]);
+        let task = || vec![("To Do".to_owned(), 0, true)];
+        assert_eq!(
+            (0..3).map(|at| text_tags(&editor, at)).collect::<Vec<_>>(),
+            [task(), task(), vec![]]
+        );
+        let state = editor.format_state().unwrap();
+        assert!(!state.listed && state.tags.is_empty());
+        editor.select([at(0, 0), at(1, 3)].into()).unwrap();
+        assert_eq!(editor.format_state().unwrap().tags, [(to_do.clone(), 0)]);
+        editor
+            .format(&mut engine, Formatting::BulletedList(to_do, 0))
+            .unwrap();
+        assert_eq!(
+            lists(&editor),
+            [Some(Formatting::Bullets), Some(Formatting::Bullets), None]
+        );
+        assert_eq!(text_tags(&editor, 0), []);
+        assert_eq!(text_tags(&editor, 1), []);
+        let state = editor.format_state().unwrap();
+        assert_eq!((state.list, state.tags), (Some(ListStyle::BULLET), vec![]));
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(text_tags(&editor, 1), task());
+        editor.undo(&mut engine).unwrap();
+        assert_eq!(editor.active_outline().document, listed);
+    }
+
+    #[test]
     fn the_default_tags_are_onenotes_stored_definitions_and_all_draw() {
         use onestore::{RevisionIndex, Store, document::Document};
         let bytes = include_bytes!("../../../../corpus/structural-probe/tag-gallery.one");
@@ -2522,6 +2622,7 @@ mod tests {
                 alignment: Some(Alignment::Center),
                 bullets: false,
                 numbering: true,
+                listed: true,
                 list: Some(ListStyle::NUMBER),
                 tags: vec![
                     (NoteTag::defaults()[0].clone(), 0),
