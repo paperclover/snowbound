@@ -174,7 +174,8 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   it is uncertain, as one whose answer was lost, and it goes again on top of another app's
   write. The sync popup says the folder isn't locked.
 - Menus are the kit's own, as on Linux, with the PC's chords and ⌘ for Ctrl on a Mac; the
-  browser keeps its own window and tab chords. Dialogs are the browser's; Insert, and Open
+  browser keeps its own window and tab chords, so New Page and New Section add Alt to
+  theirs. Dialogs are the browser's; Insert, and Open
   without a folder to give, ask for files to copy in; printing downloads the PDF. Servers and
   recording are still to come.
 - Spelling is Hunspell's dictionaries through `spellbook`, each fetched beside the module the

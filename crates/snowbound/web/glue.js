@@ -597,13 +597,18 @@ export function attach(module) {
   );
 
   input.addEventListener("keydown", (event) => {
-    if (event.isComposing || ["Process", "Dead", "Unidentified"].includes(event.key)) return;
+    // A Mac reports ⌘⌥N as Option makes N (a dead key), where chords name the key itself.
+    const key =
+      event.metaKey && event.altKey && /^(Key[A-Z]|Digit\d)$/.test(event.code)
+        ? event.code.slice(-1).toLowerCase()
+        : event.key;
+    if (event.isComposing || ["Process", "Dead", "Unidentified"].includes(key)) return;
     const bits = modifiers(event);
-    if (!wasm.takes(event.key, bits)) return;
+    if (!wasm.takes(key, bits)) return;
     event.preventDefault();
     const shortcut = event.ctrlKey || event.metaKey;
-    const text = [...event.key].length === 1 && !shortcut ? event.key : undefined;
-    wasm.key(event.key, text, bits);
+    const text = [...key].length === 1 && !shortcut ? key : undefined;
+    wasm.key(key, text, bits);
   });
   input.addEventListener("keyup", (event) => wasm.modifiers(modifiers(event)));
   input.addEventListener("compositionupdate", (event) => wasm.compose(event.data));

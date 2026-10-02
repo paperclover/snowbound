@@ -622,9 +622,22 @@ pub fn command(id: Id) -> &'static Command {
         .expect("Every command has a row")
 }
 
+/// Commands whose chords the browser keeps for itself (Chrome, Firefox and Safari never pass
+/// a page Ctrl or ⌘ with N, T or W), and theirs there: Alt joins them, as Ctrl+Alt+N is
+/// OneNote 2010's other New Page.
+#[cfg(target_arch = "wasm32")]
+const BROWSER: [(Id, &[Chord]); 2] = [
+    (Id::NewSection, &[cmd('t').option()]),
+    (Id::NewPage, &[cmd('n').option()]),
+];
+
 impl Command {
     /// The table's chords on `platform`, which the user's may replace.
     pub fn chords(&self, platform: Platform) -> &'static [Chord] {
+        #[cfg(target_arch = "wasm32")]
+        if let Some((_, chords)) = BROWSER.iter().find(|(id, _)| *id == self.id) {
+            return chords;
+        }
         match platform {
             Platform::MacOs => self.mac,
             Platform::Gtk | Platform::Windows => self.pc,

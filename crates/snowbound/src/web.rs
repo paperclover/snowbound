@@ -1050,7 +1050,8 @@ fn queue(input: Input) {
 #[wasm_bindgen]
 pub fn takes(key: &str, held: u8) -> bool {
     let command = held & if MAC.get() { 8 } else { 2 } != 0;
-    if !command {
+    // The browser's own chords take Ctrl or ⌘ without Alt (see `commands::BROWSER`).
+    if !command || held & 4 != 0 {
         return true;
     }
     !matches!(
