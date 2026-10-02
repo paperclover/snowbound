@@ -17,9 +17,10 @@ use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy,
     backend::{Backend, ObjectId},
     globals::{GlobalList, GlobalListContents, registry_queue_init},
-    protocol::{wl_buffer, wl_registry, wl_shm, wl_shm_pool},
+    protocol::{wl_buffer, wl_registry, wl_shm, wl_shm_pool, wl_surface::WlSurface},
 };
 use wayland_protocols::xdg::{
+    activation::v1::client::xdg_activation_v1::XdgActivationV1,
     shell::client::xdg_toplevel::XdgToplevel,
     toplevel_icon::v1::client::{
         xdg_toplevel_icon_manager_v1::XdgToplevelIconManagerV1,
@@ -29,7 +30,7 @@ use wayland_protocols::xdg::{
 use winit::{
     event_loop::EventLoop,
     platform::wayland::{EventLoopExtWayland, WindowExtWayland},
-    raw_window_handle::{HasDisplayHandle, RawDisplayHandle},
+    raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle},
     window::{Icon, Window},
 };
 
@@ -248,6 +249,7 @@ wayland_client::delegate_noop!(Wayland: wl_shm_pool::WlShmPool);
 wayland_client::delegate_noop!(Wayland: ignore wl_buffer::WlBuffer);
 wayland_client::delegate_noop!(Wayland: ignore XdgToplevelIconManagerV1);
 wayland_client::delegate_noop!(Wayland: XdgToplevelIconV1);
+wayland_client::delegate_noop!(Wayland: XdgActivationV1);
 
 fn display(handle: &impl HasDisplayHandle) -> Option<NonNull<c_void>> {
     match handle.display_handle().ok()?.as_raw() {
@@ -347,6 +349,79 @@ pub fn set_toplevel_icon(window: &Window) -> Option<()> {
     manager.destroy();
     queue.roundtrip(&mut Wayland).ok()?;
     Some(())
+}
+
+/// The token the launcher gave this launch for its window to take the focus with: an
+/// xdg-activation token on Wayland, a startup notification ID on X11.
+pub fn activation_token() -> Option<String> {
+    std::env::var("XDG_ACTIVATION_TOKEN")
+        .or_else(|_| std::env::var("DESKTOP_STARTUP_ID"))
+        .ok()
+        .filter(|token| !token.is_empty())
+}
+
+/// Brings the window forward with the token a later launch handed over.
+pub fn activate(window: &Window, token: &str) {
+    match window.window_handle().map(|handle| handle.as_raw()) {
+        Ok(RawWindowHandle::Wayland(handle)) => {
+            activate_wayland(window, handle.surface, token);
+        }
+        Ok(RawWindowHandle::Xlib(handle)) => {
+            if let Err(error) = activate_x11(handle.window as u32, token) {
+                eprintln!("Cannot activate the window: {error}");
+            }
+        }
+        _ => {}
+    }
+}
+
+fn activate_wayland(window: &Window, surface: NonNull<c_void>, token: &str) -> Option<()> {
+    let (connection, globals, mut queue) = connect(display(window)?)?;
+    let activation: XdgActivationV1 = globals.bind(&queue.handle(), 1..=1, ()).ok()?;
+    // Safety: winit's surface lives as long as the window.
+    let id = unsafe { ObjectId::from_ptr(WlSurface::interface(), surface.as_ptr().cast()) };
+    let surface = WlSurface::from_id(&connection, id.ok()?).ok()?;
+    activation.activate(token.into(), &surface);
+    activation.destroy();
+    queue.roundtrip(&mut Wayland).ok()?;
+    Some(())
+}
+
+/// Asks for the focus at the launch's time, which the window manager weighs against the
+/// user's latest input, then ends the launch's startup notification.
+fn activate_x11(window: u32, token: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use x11rb::{
+        connection::Connection as _,
+        protocol::xproto::{ClientMessageEvent, ConnectionExt as _, EventMask},
+    };
+    let (connection, screen) = x11rb::connect(None)?;
+    let root = connection.setup().roots[screen].root;
+    let atom = |name: &str| -> Result<u32, Box<dyn std::error::Error>> {
+        Ok(connection
+            .intern_atom(false, name.as_bytes())?
+            .reply()?
+            .atom)
+    };
+    let time = token
+        .rsplit_once("_TIME")
+        .and_then(|(_, time)| time.parse().ok())
+        .unwrap_or(x11rb::CURRENT_TIME);
+    let active =
+        ClientMessageEvent::new(32, window, atom("_NET_ACTIVE_WINDOW")?, [1, time, 0, 0, 0]);
+    let mask = EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY;
+    connection.send_event(false, root, mask, active)?;
+    let quoted = token.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut kind = atom("_NET_STARTUP_INFO_BEGIN")?;
+    let more = atom("_NET_STARTUP_INFO")?;
+    for chunk in format!("remove: ID=\"{quoted}\"\0").as_bytes().chunks(20) {
+        let mut data = [0; 20];
+        data[..chunk.len()].copy_from_slice(chunk);
+        let message = ClientMessageEvent::new(8, window, kind, data);
+        connection.send_event(false, root, EventMask::PROPERTY_CHANGE, message)?;
+        kind = more;
+    }
+    connection.flush()?;
+    Ok(())
 }
 
 /// Copies this executable to `~/.local/bin` unless it runs from there, adds Snowbound to the

@@ -118,6 +118,8 @@ sctk-adwaita = { version = "0.10.1", default-features = false }
 wayland-backend = { version = "0.3.17", features = ["client_system"] }
 wayland-client = "0.31.15"
 wayland-protocols = { version = "0.32.13", features = ["client", "staging"] }
+# Brings the window forward on X11, on a connection of its own.
+x11rb = "0.13.2"
 
 [dev-dependencies]
 # Draws the pictures of the video recording the tests store.

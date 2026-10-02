@@ -23,10 +23,11 @@ use ui::{Flags, Spec, Ui, px};
 use winit::{
     event_loop::{EventLoop, EventLoopProxy},
     platform::{
+        startup_notify::WindowAttributesExtStartupNotify,
         wayland::{EventLoopExtWayland, WindowAttributesExtWayland},
         x11::EventLoopBuilderExtX11,
     },
-    window::{ResizeDirection, Theme, Window, WindowAttributes},
+    window::{ActivationToken, ResizeDirection, Theme, Window, WindowAttributes},
 };
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
@@ -191,13 +192,18 @@ fn breeze_radius(connection: &zbus::blocking::Connection) -> Option<f32> {
 
 /// Decorated by the window manager, or on Wayland by the compositor where it offers
 /// xdg-decoration and otherwise by winit's Adwaita frame; named so the desktop entry supplies
-/// the icon on Wayland, while X11 takes it from the window.
+/// the icon on Wayland, while X11 takes it from the window. It opens in front with the
+/// launcher's activation token, which also ends the launch's startup notification.
 pub fn window_attributes() -> WindowAttributes {
     use crate::desktop::APP_ID;
-    Window::default_attributes()
+    let attributes = Window::default_attributes()
         .with_name(APP_ID, APP_ID)
         .with_window_icon(crate::desktop::window_icon())
-        .with_transparent(cuts_corners())
+        .with_transparent(cuts_corners());
+    match crate::desktop::activation_token() {
+        Some(token) => attributes.with_activation_token(ActivationToken::from_raw(token)),
+        None => attributes,
+    }
 }
 
 /// The window manager or the frame draws the title bar; the icon is the window's own where

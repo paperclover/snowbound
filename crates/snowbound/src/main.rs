@@ -291,6 +291,10 @@ enum UserEvent {
     /// The system or a later launch asked to open notebook folders, tables of contents or
     /// sections, as the Finder does with a double-clicked file; none brings the window forward.
     Open(Vec<PathBuf>),
+    /// The activation token a later launch's launcher gave it, which lets the window come
+    /// forward despite the desktop's focus-stealing prevention.
+    #[cfg(target_os = "linux")]
+    Activate(String),
 }
 
 /// Asks the event loop for a frame from any thread.
@@ -5662,6 +5666,8 @@ impl State {
                 self.window.focus_window();
                 self.window.request_redraw();
             }
+            #[cfg(target_os = "linux")]
+            UserEvent::Activate(token) => desktop::activate(&self.window, &token),
             UserEvent::Update => {
                 self.updated();
                 self.window.request_redraw();

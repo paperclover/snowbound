@@ -8,4 +8,5 @@ Icon=net.paperclover.snowbound
 Terminal=false
 Categories=Office;
 MimeType=application/onenote;
+StartupNotify=true
 StartupWMClass=net.paperclover.snowbound

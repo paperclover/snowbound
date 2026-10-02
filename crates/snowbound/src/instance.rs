@@ -6,9 +6,11 @@
 use std::path::{Path, PathBuf};
 use winit::event_loop::EventLoopProxy;
 
-/// The files a launch asks to open, separated by NULs, which no path holds.
-fn encode(paths: &[PathBuf]) -> Vec<u8> {
-    let mut bytes = Vec::new();
+/// The launcher's activation token, which may be empty, then the files a launch asks to open,
+/// each ended by a NUL, which neither holds.
+fn encode(token: Option<&str>, paths: &[PathBuf]) -> Vec<u8> {
+    let mut bytes = token.unwrap_or_default().as_bytes().to_vec();
+    bytes.push(0);
     for path in paths {
         bytes.extend(path_bytes(path));
         bytes.push(0);
@@ -16,12 +18,17 @@ fn encode(paths: &[PathBuf]) -> Vec<u8> {
     bytes
 }
 
-fn decode(bytes: &[u8]) -> Vec<PathBuf> {
-    bytes
-        .split(|&byte| byte == 0)
+fn decode(bytes: &[u8]) -> (Option<String>, Vec<PathBuf>) {
+    let mut fields = bytes.split(|&byte| byte == 0);
+    let token = fields
+        .next()
+        .filter(|token| !token.is_empty())
+        .map(|token| String::from_utf8_lossy(token).into_owned());
+    let paths = fields
         .filter(|path| !path.is_empty())
         .map(bytes_path)
-        .collect()
+        .collect();
+    (token, paths)
 }
 
 /// Opens what each later launch hands over, on a thread of its own.
@@ -33,7 +40,13 @@ fn serve<C: std::io::Read + Send + 'static>(
         while let Some(mut connection) = accept() {
             let mut bytes = Vec::new();
             if connection.read_to_end(&mut bytes).is_ok() {
-                let _ = proxy.send_event(crate::UserEvent::Open(decode(&bytes)));
+                #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+                let (token, paths) = decode(&bytes);
+                let _ = proxy.send_event(crate::UserEvent::Open(paths));
+                #[cfg(target_os = "linux")]
+                if let Some(token) = token {
+                    let _ = proxy.send_event(crate::UserEvent::Activate(token));
+                }
             }
         }
     });
@@ -81,7 +94,8 @@ mod linux {
         for _ in 0..3 {
             match UnixStream::connect(&socket) {
                 Ok(mut stream) => {
-                    if stream.write_all(&encode(paths)).is_ok() {
+                    let token = crate::desktop::activation_token();
+                    if stream.write_all(&encode(token.as_deref(), paths)).is_ok() {
                         return None;
                     }
                 }
@@ -192,7 +206,7 @@ mod windows {
                 // The running app may then bring its window to the front.
                 unsafe { AllowSetForegroundWindow(ASFW_ANY) };
                 let mut pipe = unsafe { File::from_raw_handle(handle) };
-                if pipe.write_all(&encode(paths)).is_ok() {
+                if pipe.write_all(&encode(None, paths)).is_ok() {
                     return None;
                 }
             } else if unsafe { GetLastError() } == ERROR_PIPE_BUSY {
@@ -236,12 +250,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn handed_paths_read_back() {
+    fn handed_token_and_paths_read_back() {
         let paths = [
             PathBuf::from("/notes/Personal/Garden.one"),
             PathBuf::from("/notes/a b/Open Notebook.onetoc2"),
         ];
-        assert_eq!(decode(&encode(&paths)), paths);
-        assert!(decode(&encode(&[])).is_empty());
+        assert_eq!(decode(&encode(None, &paths)), (None, paths.to_vec()));
+        let token = Some("gnome-shell/Snowbound/1234-0-host_TIME5678".to_owned());
+        assert_eq!(decode(&encode(token.as_deref(), &[])), (token, vec![]));
     }
 }
