@@ -3154,3 +3154,26 @@ fn a_box_squeezed_past_its_inset_paints_empty_not_inverted() {
         [left, top, right, bottom]
     );
 }
+
+#[test]
+fn a_box_has_no_rectangle_until_it_is_first_laid_out() {
+    let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
+    let build = |ui: &mut Ui| {
+        ui.leaf(
+            "new",
+            Spec {
+                size: [px(40.0), px(20.0)],
+                ..Spec::default()
+            },
+        );
+        ui.rect(Id::ROOT.child("new"))
+    };
+    let mut seen = Vec::new();
+    frame(&mut ui, |ui| seen.push(build(ui)));
+    frame(&mut ui, |ui| seen.push(build(ui)));
+    assert_eq!(
+        seen[0], None,
+        "a box placed against nothing would sit at the origin"
+    );
+    assert_eq!(seen[1], Some([0.0, 0.0, 40.0, 20.0]));
+}

@@ -557,7 +557,8 @@ struct State {
     scroll_target: f32,
     /// Height of a scrolling box's children last frame.
     content: f32,
-    rect: [f32; 4],
+    /// As last laid out; none for a box built this frame for the first time.
+    rect: Option<[f32; 4]>,
     /// A text field's selection, and the selection and unit of the press a drag extends.
     selection: Selection,
     press: (Selection, SelectionUnit),
@@ -860,9 +861,9 @@ impl Ui {
         Some(layout::narrowest(&self.nodes, index))
     }
 
-    /// The box's rectangle from the latest layout.
+    /// The box's rectangle from the latest layout; none for one not laid out yet.
     pub fn rect(&self, id: Id) -> Option<[f32; 4]> {
-        self.states.get(&id).map(|state| state.rect)
+        self.states.get(&id).and_then(|state| state.rect)
     }
 
     /// Scrolls `scroller`, a scrolling box, until `target` within it starts at its top, both
@@ -872,7 +873,7 @@ impl Ui {
             return;
         };
         let state = self.states.entry(scroller).or_default();
-        let most = (state.content - (state.rect[3] - state.rect[1])).max(0.0);
+        let most = (state.content - (start[3] - start[1])).max(0.0);
         state.scroll_target = (state.scroll + top[1] - start[1]).clamp(0.0, most);
         self.animating |= state.scroll != state.scroll_target;
     }
@@ -1035,7 +1036,8 @@ impl Ui {
                     }
                     Some(id) => {
                         let state = self.states.entry(id).or_default();
-                        let most = (state.content - (state.rect[3] - state.rect[1])).max(0.0);
+                        let shown = state.rect.map_or(0.0, |rect| rect[3] - rect[1]);
+                        let most = (state.content - shown).max(0.0);
                         // The wheel moves the content at once, as on the page; only jumps ease.
                         state.scroll = (state.scroll - delta[1]).clamp(0.0, most);
                         state.scroll_target = state.scroll;
@@ -1363,7 +1365,7 @@ impl Ui {
         );
         for node in &self.nodes {
             let state = self.states.entry(node.id).or_default();
-            state.rect = node.rect;
+            state.rect = Some(node.rect);
             state.hovers = node.hover_fill.is_some() || node.hover_border.is_some();
             if node.flags.contains(Flags::SCROLL) {
                 state.content = node.content;
