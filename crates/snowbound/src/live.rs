@@ -1,8 +1,9 @@
 //! Live presence in the window (feature `live`, on where `SNOWBOUND_LIVE` is `network` or
-//! `loopback`): the others with the notebook open as avatars beside the search box, a dot on
-//! the tab of the page each has open, and their carets on the page, each in a colour of their
-//! own. They meet through the notebook's identity, or through `SNOWBOUND_LIVE_CODE` where it
-//! is set (`resources/live-share.md`).
+//! `loopback`, or `SNOWBOUND_LIVE_RELAY` names a relay, `wss://live.example.net`): the others
+//! with the notebook open as avatars beside the search box, a dot on the tab of the page each
+//! has open, and their carets on the page, each in a colour of their own. They meet through
+//! the notebook's identity, or through `SNOWBOUND_LIVE_CODE` where it is set; through a relay,
+//! its words alone ask the relay to number it (`resources/live-share.md`).
 
 use crate::{Command, Session, State, TAB_ROW, page, platform};
 use canvas::{document::TextPosition, editor::TextOutline};
@@ -37,9 +38,10 @@ fn reach() -> Option<Reach> {
 impl State {
     /// Joins the open notebook's room, leaving any other, and says where this window is.
     pub(crate) fn follow_peers(&mut self) {
-        let Some(reach) = reach() else {
+        let (reach, relay) = (reach(), std::env::var("SNOWBOUND_LIVE_RELAY").ok());
+        if reach.is_none() && relay.is_none() {
             return;
-        };
+        }
         let room = match std::env::var("SNOWBOUND_LIVE_CODE") {
             Ok(code) => Some(Room::Code(code)),
             Err(_) => self
@@ -57,7 +59,9 @@ impl State {
                     .flatten();
                 let live = Hello::new(self.author.clone(), picture)
                     .and_then(|me| {
-                        live::Live::start(me, &room, Some(reach), move || redraw.wake_by_ref())
+                        live::Live::start(me, &room, reach, relay.as_deref(), move || {
+                            redraw.wake_by_ref()
+                        })
                     })
                     .inspect_err(|error| eprintln!("Live presence: {error}"))
                     .ok();

@@ -2189,8 +2189,11 @@ dependencies = [
  "minicbor",
  "nix",
  "onestore",
+ "relay",
  "rsqlite-vfs",
  "rusqlite",
+ "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "sha2",
@@ -2202,6 +2205,7 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-time",
+ "webpki-root-certs",
  "windows-sys 0.61.2",
  "zeroize",
 ]
@@ -3130,6 +3134,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "737970939a87c6fa31e7acad13307bccbb017a073b695b6089a2c484f929e20e"
 dependencies = [
  "bitflags 2.13.1",
+]
+
+[[package]]
+name = "relay"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "getrandom 0.4.3",
+ "sha1",
 ]
 
 [[package]]

@@ -1,0 +1,16 @@
+[package]
+name = "relay"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The relay Live Share meets through off the LAN (resources/live-share.md), and the WebSocket
+# framing and notices its clients share with it.
+[[bin]]
+name = "snowbound-relay"
+path = "src/main.rs"
+
+[dependencies]
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
+getrandom = "0.4.3"
+sha1 = "0.11.0"

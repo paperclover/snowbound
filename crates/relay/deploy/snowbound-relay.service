@@ -1,0 +1,33 @@
+# /etc/systemd/system/snowbound-relay.service: the Live Share relay behind a TLS proxy on
+# this machine (README.md). Options go on ExecStart, or as SNOWBOUND_RELAY_* in Environment.
+[Unit]
+Description=Snowbound Live Share relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/snowbound-relay --listen 127.0.0.1:7650 --trust-forwarded true
+Restart=always
+RestartSec=2
+DynamicUser=yes
+# Two threads a connection, and a few more.
+TasksMax=600
+LimitNOFILE=1024
+MemoryMax=512M
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

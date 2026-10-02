@@ -531,16 +531,22 @@ physical power-loss durability.
 
 ## Live presence (feature `live`)
 
-`live::Live::start(hello, room, reach, notify)` listens on a TCP port and, with a `Reach`,
-advertises `_snowbound._tcp` by mDNS on every network or on loopback alone, connecting to the
-peers in the same `Room` that it finds: a notebook's identity, or a code typed on both
-(`Room::Code("4-violet-otter")`). `connect(address)` meets a peer discovery did not find.
-Peers meet through SPAKE2 on the room's secret, then every frame is AES-256-GCM under the keys
-it agreed: a message kind and a CBOR map (`live::wire`). A reader skips kinds and map keys it
-doesn't know, so later versions add both freely. `set_presence` says which section, page and
-caret this end has (text object and UTF-16 offset, as ops address text); a connection sends
-only the newest. `peers()` lists each connected peer's `Hello` (name, picture) and presence,
-and `notify` runs whenever that changes. Dropping the `Live` leaves.
+`live::Live::start(hello, room, reach, relay, notify)` listens on a TCP port and, with a
+`Reach`, advertises `_snowbound._tcp` by mDNS on every network or on loopback alone,
+connecting to the peers in the same `Room` that it finds: a notebook's identity, or a code
+typed on both (`Room::Code("4-violet-otter")`). With a `relay` (`wss://live.example.net`,
+`crates/relay`) it also joins the room there and meets its peers through it; a code's words
+alone (`Room::Code("violet-otter")`) ask the relay for a number, and `code()` then has the
+whole code. `connect(address)` meets a peer discovery did not find. Peers meet through
+SPAKE2 on the room's secret, then every frame is AES-256-GCM under the keys it agreed: its
+number, which is also its nonce, then a message kind and a CBOR map (`live::wire`). A frame
+lost, repeated, reordered or forged on the way fails where it lands; the connection is
+dropped as broken, nothing from it after the fault is applied, and the ends meet again from
+scratch. A reader skips kinds and map keys it doesn't know, so later versions add both
+freely. `set_presence` says which section, page and caret this end has (text object and
+UTF-16 offset, as ops address text); a connection sends only the newest. `peers()` lists
+each connected peer's `Hello` (name, picture) and presence, and `notify` runs whenever that
+changes. Dropping the `Live` leaves.
 
 ## Queue measurement
 

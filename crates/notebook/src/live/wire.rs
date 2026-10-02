@@ -136,7 +136,9 @@ struct Open {
     pake: Vec<u8>,
 }
 
-/// One direction's AEAD key and the count of frames sealed under it, which is each frame's nonce.
+/// One direction's AEAD key and the count of frames sealed under it. Each frame carries its
+/// number, which is also its nonce, so a frame lost, repeated, reordered or forged on the way
+/// is caught before anything in it or after it is read.
 pub struct Sealer {
     cipher: Aes256Gcm,
     count: u64,
@@ -152,13 +154,6 @@ impl Sealer {
         }
     }
 
-    fn nonce(&mut self) -> [u8; 12] {
-        let mut nonce = [0; 12];
-        nonce[4..].copy_from_slice(&self.count.to_be_bytes());
-        self.count += 1;
-        nonce
-    }
-
     /// Writes message `kind` holding `body`.
     pub fn send(
         &mut self,
@@ -168,26 +163,52 @@ impl Sealer {
     ) -> io::Result<()> {
         let mut clear = kind.to_be_bytes().to_vec();
         minicbor::encode(body, &mut clear).map_err(io::Error::other)?;
-        let nonce = self.nonce();
+        let number = self.count.to_be_bytes();
         let sealed = self
             .cipher
-            .encrypt(&nonce.into(), clear.as_slice())
+            .encrypt(&nonce(number).into(), clear.as_slice())
             .map_err(|_| io::Error::other("A frame could not be sealed"))?;
-        write_block(to, &sealed)
+        self.count += 1;
+        write_block(to, &[&number[..], &sealed].concat())
     }
 
-    /// Reads the next message: its kind and body.
+    /// Reads the next message: its kind and body. An error of kind `InvalidData` means the
+    /// stream broke, and nothing more on it can be trusted.
     pub fn receive(&mut self, from: &mut impl Read) -> io::Result<(u16, Vec<u8>)> {
-        let sealed = read_block(from)?;
-        let nonce = self.nonce();
+        let block = read_block(from)?;
+        let (number, sealed) = block
+            .split_first_chunk::<8>()
+            .ok_or_else(|| invalid("A frame without its number"))?;
+        let due = self.count;
+        if u64::from_be_bytes(*number) != due {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Frame {} came where frame {due} was due",
+                    u64::from_be_bytes(*number)
+                ),
+            ));
+        }
         let mut clear = self
             .cipher
-            .decrypt(&nonce.into(), sealed.as_slice())
-            .map_err(|_| invalid("A frame does not open under the agreed key"))?;
+            .decrypt(&nonce(*number).into(), sealed)
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Frame {due} does not open under the agreed key"),
+                )
+            })?;
+        self.count += 1;
         let body = clear.split_off(2.min(clear.len()));
         let kind = u16::from_be_bytes(clear.try_into().map_err(|_| invalid("An empty frame"))?);
         Ok((kind, body))
     }
+}
+
+fn nonce(number: [u8; 8]) -> [u8; 12] {
+    let mut nonce = [0; 12];
+    nonce[4..].copy_from_slice(&number);
+    nonce
 }
 
 /// Which end of the connection this is.
