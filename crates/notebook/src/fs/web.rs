@@ -1,7 +1,7 @@
 //! The browser's file system: std's calls over files held in memory, which the host loads
-//! before anything opens (`restore`) and writes out as they change (`changes`). SQLite reaches
-//! the same files through `sqlite`, its default VFS here, so a replica is a file like any other.
-//! One thread: no file is ever locked.
+//! before anything opens (`restore`) and writes out as they change, by the byte ranges that
+//! changed (`changes`). SQLite reaches the same files through `sqlite`, its default VFS here,
+//! so a replica is a file like any other. One thread: no file is ever locked.
 
 use onestore::{CommitError, CommitIo, CommitState, Stamp, Transaction};
 use std::{
@@ -9,6 +9,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     io::{self, ErrorKind, Read, Seek, SeekFrom, Write},
+    ops::Range,
     path::{Component, Path, PathBuf},
     rc::Rc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -23,6 +24,47 @@ struct Data {
     modified: f64,
     /// Where the file is, which a rename moves; none once it is removed.
     path: Option<PathBuf>,
+    /// The ranges written since the host last wrote the file out, or none for all of it.
+    unwritten: Option<Vec<Range<usize>>>,
+}
+
+/// More ranges than this write the whole file out instead.
+const RANGES: usize = 64;
+
+impl Data {
+    fn new(
+        bytes: Vec<u8>,
+        modified: f64,
+        path: PathBuf,
+        unwritten: Option<Vec<Range<usize>>>,
+    ) -> Shared {
+        Rc::new(RefCell::new(Self {
+            bytes,
+            modified,
+            path: Some(path),
+            unwritten,
+        }))
+    }
+
+    /// Notes `range` written now, merged into a written range it meets.
+    fn wrote(&mut self, range: Range<usize>) {
+        self.modified = now();
+        if let Some(ranges) = &mut self.unwritten {
+            match ranges
+                .iter_mut()
+                .find(|known| known.start <= range.end && range.start <= known.end)
+            {
+                Some(known) => *known = known.start.min(range.start)..known.end.max(range.end),
+                None => ranges.push(range),
+            }
+            if ranges.len() > RANGES {
+                self.unwritten = None;
+            }
+        }
+        if let Some(path) = self.path.clone() {
+            with(|files| files.changed.insert(path));
+        }
+    }
 }
 
 type Shared = Rc<RefCell<Data>>;
@@ -59,14 +101,23 @@ pub fn restore(path: impl AsRef<Path>, saved: Saved) {
     FILES.with_borrow_mut(|files| {
         let node = match saved {
             Saved::Directory => Node::Directory,
-            Saved::File(bytes, modified) => Node::File(Rc::new(RefCell::new(Data {
-                bytes,
-                modified,
-                path: Some(path.clone()),
-            }))),
+            Saved::File(bytes, modified) => {
+                Node::File(Data::new(bytes, modified, path.clone(), Some(Vec::new())))
+            }
         };
         files.nodes.insert(path, node);
     });
+}
+
+/// How a path changed, as the host writes it out.
+pub enum Change {
+    Removed,
+    Directory,
+    /// The file's length, and the ranges that changed with their bytes.
+    File {
+        length: u64,
+        ranges: Vec<(u64, Vec<u8>)>,
+    },
 }
 
 /// Whether any path changed since `changes` was last called.
@@ -74,20 +125,34 @@ pub fn changed() -> bool {
     FILES.with_borrow(|files| !files.changed.is_empty())
 }
 
-/// The paths changed since the last call, each with what it holds now, if anything.
-pub fn changes() -> Vec<(PathBuf, Option<Saved>)> {
+/// The paths changed since the last call, each with how; a folder before what it holds.
+pub fn changes() -> Vec<(PathBuf, Change)> {
     FILES.with_borrow_mut(|files| {
         std::mem::take(&mut files.changed)
             .into_iter()
             .map(|path| {
-                let saved = files.nodes.get(&path).map(|node| match node {
-                    Node::Directory => Saved::Directory,
-                    Node::File(data) => {
-                        let data = data.borrow();
-                        Saved::File(data.bytes.clone(), data.modified)
+                let change = match files.nodes.get(&path) {
+                    None => Change::Removed,
+                    Some(Node::Directory) => Change::Directory,
+                    Some(Node::File(data)) => {
+                        let mut data = data.borrow_mut();
+                        let length = data.bytes.len();
+                        let ranges = data
+                            .unwritten
+                            .replace(Vec::new())
+                            .unwrap_or_else(|| std::iter::once(0..length).collect());
+                        Change::File {
+                            length: length as u64,
+                            ranges: ranges
+                                .into_iter()
+                                .map(|range| range.start.min(length)..range.end.min(length))
+                                .filter(|range| !range.is_empty())
+                                .map(|range| (range.start as u64, data.bytes[range].to_vec()))
+                                .collect(),
+                        }
                     }
-                });
-                (path, saved)
+                };
+                (path, change)
             })
             .collect()
     })
@@ -139,11 +204,7 @@ impl Files {
         if self.nodes.contains_key(&path) {
             return Err(ErrorKind::AlreadyExists.into());
         }
-        let data = Rc::new(RefCell::new(Data {
-            bytes: Vec::new(),
-            modified: now(),
-            path: Some(path.clone()),
-        }));
+        let data = Data::new(Vec::new(), now(), path.clone(), None);
         self.nodes
             .insert(path.clone(), Node::File(Rc::clone(&data)));
         self.changed.insert(path);
@@ -161,14 +222,6 @@ impl Files {
 
 fn with<T>(act: impl FnOnce(&mut Files) -> T) -> T {
     FILES.with_borrow_mut(act)
-}
-
-/// Marks `data` changed now, where it still has a path.
-fn touched(data: &mut Data) {
-    data.modified = now();
-    if let Some(path) = data.path.clone() {
-        with(|files| files.changed.insert(path));
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -295,7 +348,8 @@ pub fn write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> io::Result<(
     let data = with(|files| files.file(&path).or_else(|_| files.create(path.clone())))?;
     let mut data = data.borrow_mut();
     data.bytes = contents.as_ref().to_vec();
-    touched(&mut data);
+    let length = data.bytes.len();
+    data.wrote(0..length);
     Ok(())
 }
 
@@ -425,7 +479,9 @@ pub fn rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> io::Result<()> {
             };
             let target = to.join(each.strip_prefix(&from).unwrap_or(Path::new("")));
             if let Node::File(data) = &node {
-                data.borrow_mut().path = Some(target.clone());
+                let mut data = data.borrow_mut();
+                data.path = Some(target.clone());
+                data.unwritten = None;
             }
             files.changed.insert(each);
             files.changed.insert(target.clone());
@@ -546,7 +602,7 @@ impl OpenOptions {
         if self.truncate && self.write {
             let mut data = data.borrow_mut();
             data.bytes.clear();
-            touched(&mut data);
+            data.wrote(0..0);
         }
         Ok(File {
             data,
@@ -598,8 +654,9 @@ impl File {
 
     pub fn set_len(&self, size: u64) -> io::Result<()> {
         let mut data = self.data.borrow_mut();
+        let old = data.bytes.len();
         data.bytes.resize(size as usize, 0);
-        touched(&mut data);
+        data.wrote(old.min(size as usize)..size as usize);
         Ok(())
     }
 
@@ -618,7 +675,7 @@ impl File {
             data.bytes.resize(end, 0);
         }
         data.bytes[offset as usize..end].copy_from_slice(input);
-        touched(&mut data);
+        data.wrote(offset as usize..end);
     }
 }
 

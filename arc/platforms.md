@@ -156,9 +156,11 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
 - The page has one thread. The notebook's section thread, sync worker and background run as
   tasks on its event loop (`notebook::task`), and work the desktop gives a thread runs once
   the frame is done (`spawn`).
-- Files are `notebook::fs`'s: std's elsewhere, here held in memory and kept in IndexedDB,
-  with SQLite's VFS over the same files, so replicas and notebooks live side by side under
-  `/Notebooks` and `/Cache`. One tab at a time holds them.
+- Files are `notebook::fs`'s: std's elsewhere, here held in memory, with SQLite's VFS over
+  the same files, so replicas and notebooks live side by side under `/Notebooks` and
+  `/Cache`. A storage worker keeps them in the origin's private file system, writing the
+  byte ranges each burst changed through OPFS's synchronous handles, which only workers get.
+  One tab at a time holds them.
 - Menus are the kit's own, as on Linux, with the PC's chords and ⌘ for Ctrl on a Mac; the
   browser keeps its own window and tab chords. Dialogs are the browser's; Open and Insert
   ask for files to copy in; printing downloads the PDF. Servers, recording and accessibility

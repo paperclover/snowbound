@@ -27,7 +27,7 @@ use winit::{
 #[wasm_bindgen(module = "/web/glue.js")]
 extern "C" {
     fn attach(module: JsValue);
-    /// The files IndexedDB kept: `[path, bytes or null for a folder, modified]`.
+    /// The files the browser kept: `[path, bytes or null for a folder, modified]`.
     #[wasm_bindgen(js_name = loadFiles, catch)]
     async fn load_files() -> Result<js_sys::Array, JsValue>;
     #[wasm_bindgen(js_name = requestFrame)]
@@ -58,8 +58,8 @@ extern "C" {
     fn tell(message: &str);
     #[wasm_bindgen(js_name = openLink)]
     fn open_link(url: &str);
-    /// Writes changed files to IndexedDB: `[path, bytes or null for a folder or undefined
-    /// for a removal, modified]` triples.
+    /// Writes changes out: `[path]` removed, `[path, null]` a folder, and `[path, length,
+    /// [[offset, bytes], ...]]` a file's new length and the ranges that changed.
     #[wasm_bindgen(js_name = storeFiles)]
     fn store_files(changes: js_sys::Array);
 }
@@ -710,19 +710,28 @@ fn restore(files: js_sys::Array) {
     }
 }
 
-/// Writes the files changed since the last time out to IndexedDB.
+/// Writes the files changed since the last time out to the browser's storage.
 fn store() {
+    use notebook::fs::Change;
     STORE_DUE.set(None);
     let changes = js_sys::Array::new();
-    for (path, saved) in notebook::fs::changes() {
+    for (path, change) in notebook::fs::changes() {
         let path = JsValue::from_str(&path.to_string_lossy());
-        let entry = match saved {
-            None => js_sys::Array::of1(&path),
-            Some(notebook::fs::Saved::Directory) => js_sys::Array::of2(&path, &JsValue::NULL),
-            Some(notebook::fs::Saved::File(bytes, modified)) => js_sys::Array::of3(
+        let entry = match change {
+            Change::Removed => js_sys::Array::of1(&path),
+            Change::Directory => js_sys::Array::of2(&path, &JsValue::NULL),
+            Change::File { length, ranges } => js_sys::Array::of3(
                 &path,
-                &js_sys::Uint8Array::from(bytes.as_slice()),
-                &modified.into(),
+                &(length as f64).into(),
+                &ranges
+                    .into_iter()
+                    .map(|(offset, bytes)| {
+                        js_sys::Array::of2(
+                            &(offset as f64).into(),
+                            &js_sys::Uint8Array::from(bytes.as_slice()),
+                        )
+                    })
+                    .collect::<js_sys::Array>(),
             ),
         };
         changes.push(&entry);

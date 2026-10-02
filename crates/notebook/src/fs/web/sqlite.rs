@@ -2,7 +2,7 @@
 //! log and the notebook it caches are kept and written out alike.
 #![allow(unsafe_code)]
 
-use super::{FILES, Node, Shared, normal, touched, with};
+use super::{FILES, Node, Shared, normal, with};
 use rsqlite_vfs::{
     OsCallback, SQLiteIoMethods, SQLiteVfs, SQLiteVfsFile, VfsError, VfsFile, VfsResult, VfsStore,
     ffi::{SQLITE_CANTOPEN, SQLITE_IOERR, SQLITE_IOERR_DELETE, sqlite3_vfs},
@@ -37,14 +37,14 @@ impl VfsFile for File {
             data.bytes.resize(end, 0);
         }
         data.bytes[offset..end].copy_from_slice(input);
-        touched(&mut data);
+        data.wrote(offset..end);
         Ok(())
     }
 
     fn truncate(&mut self, size: usize) -> VfsResult<()> {
         let mut data = self.0.borrow_mut();
         data.bytes.truncate(size);
-        touched(&mut data);
+        data.wrote(size..size);
         Ok(())
     }
 

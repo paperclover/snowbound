@@ -1,5 +1,6 @@
 // The browser's half of Snowbound (src/web.rs): the page's input, its dialogs and files, and
-// IndexedDB, which keeps the files `notebook::fs` holds between visits.
+// the files `notebook::fs` holds, which a storage worker keeps in the origin's private file
+// system (OPFS) between visits.
 
 let wasm;
 let canvas;
@@ -7,75 +8,134 @@ let input;
 let picker;
 let framePending = false;
 let wakeTimer;
+let storage;
 
-const DB = "snowbound";
-// `files` holds every path: `{path, bytes}`, `bytes` null for a folder. `sections` is the first
-// web build's store, whose sections move into a notebook once.
-const FILES = "files";
-const SECTIONS = "sections";
-const MIGRATED = "/Notebooks/Web Notebook";
+/** The storage worker: the only place OPFS hands out synchronous handles, which write a
+ * file's changed ranges in place. Runs as a worker of its own, from this source. */
+function storageWorker() {
+  // IndexedDB held the files before OPFS did: `files` by path, and before that the first web
+  // build's `sections`, which move into a notebook of their own.
+  const DB = "snowbound";
+  const MIGRATED = "/Notebooks/Web Notebook";
+  const handles = new Map();
+  let root;
+  let queue = Promise.resolve();
 
-function database() {
-  return new Promise((resolve, reject) => {
-    const open = indexedDB.open(DB, 2);
-    open.onupgradeneeded = () => {
-      const db = open.result;
-      if (!db.objectStoreNames.contains(FILES)) db.createObjectStore(FILES, { keyPath: "path" });
-      if (!db.objectStoreNames.contains(SECTIONS))
-        db.createObjectStore(SECTIONS, { keyPath: "file" });
-    };
-    open.onsuccess = () => resolve(open.result);
-    open.onerror = () => reject(open.error);
-  });
-}
-
-function done(transaction) {
-  return new Promise((resolve, reject) => {
-    transaction.oncomplete = resolve;
-    transaction.onerror = () => reject(transaction.error);
-    transaction.onabort = () => reject(transaction.error);
-  });
-}
-
-/** Every file kept, as `[path, bytes or null, modified]`, the first web build's sections moved
- * into a notebook of their own first. */
-export async function loadFiles() {
-  const db = await database();
-  const read = db.transaction([FILES, SECTIONS], "readonly");
-  const files = read.objectStore(FILES).getAll();
-  const sections = read.objectStore(SECTIONS).getAll();
-  await done(read);
-  let rows = files.result;
-  if (!rows.length && sections.result.length) {
-    const moved = [
-      { path: "/Notebooks", bytes: null },
-      { path: MIGRATED, bytes: null },
-      ...sections.result
-        .sort((a, b) => a.order - b.order)
-        .map(({ file, bytes }) => ({ path: `${MIGRATED}/${file}`, bytes, modified: Date.now() })),
-    ];
-    const write = db.transaction([FILES, SECTIONS], "readwrite");
-    for (const row of moved) write.objectStore(FILES).put(row);
-    write.objectStore(SECTIONS).clear();
-    await done(write);
-    rows = moved;
-  }
-  return rows.map(({ path, bytes, modified }) => [path, bytes, modified ?? 0]);
-}
-
-/** Writes `[path]` (removed), `[path, null]` (a folder) and `[path, bytes, modified]` entries. */
-export function storeFiles(changes) {
-  database()
-    .then((db) => {
-      const transaction = db.transaction(FILES, "readwrite");
-      const store = transaction.objectStore(FILES);
-      for (const [path, bytes, modified] of changes) {
-        if (bytes === undefined) store.delete(path);
-        else store.put({ path, bytes, modified });
+  const names = (path) => path.split("/").filter(Boolean);
+  const folder = async (parts) => {
+    let dir = root;
+    for (const name of parts) dir = await dir.getDirectoryHandle(name, { create: true });
+    return dir;
+  };
+  const handle = async (path) => {
+    if (!handles.has(path)) {
+      const parts = names(path);
+      const file = await (await folder(parts.slice(0, -1))).getFileHandle(parts.at(-1), { create: true });
+      handles.set(path, await file.createSyncAccessHandle());
+    }
+    return handles.get(path);
+  };
+  const close = (path) => {
+    for (const [held, open] of handles)
+      if (held === path || held.startsWith(`${path}/`)) {
+        open.close();
+        handles.delete(held);
       }
-      return done(transaction);
-    })
-    .catch((error) => console.error("Keeping files", error));
+  };
+  const write = async (path, length, ranges) => {
+    const open = await handle(path);
+    for (const [offset, bytes] of ranges) open.write(bytes, { at: offset });
+    open.truncate(length);
+    open.flush();
+  };
+  const remove = async (path) => {
+    close(path);
+    const parts = names(path);
+    try {
+      await (await folder(parts.slice(0, -1))).removeEntry(parts.at(-1), { recursive: true });
+    } catch (error) {
+      if (error.name !== "NotFoundError") throw error;
+    }
+  };
+  const list = async (dir, path, out) => {
+    for await (const [name, entry] of dir.entries()) {
+      const at = `${path}/${name}`;
+      if (entry.kind === "directory") {
+        out.push([at, null, 0]);
+        await list(entry, at, out);
+      } else {
+        const file = await entry.getFile();
+        out.push([at, new Uint8Array(await file.arrayBuffer()), file.lastModified]);
+      }
+    }
+    return out;
+  };
+  const migrate = async () => {
+    const db = await new Promise((resolve, reject) => {
+      const open = indexedDB.open(DB);
+      open.onsuccess = () => resolve(open.result);
+      open.onerror = () => reject(open.error);
+    });
+    const stores = [...db.objectStoreNames];
+    const all = (store) =>
+      new Promise((resolve, reject) => {
+        const request = db.transaction(store).objectStore(store).getAll();
+        request.onsuccess = () => resolve(request.result);
+        request.onerror = () => reject(request.error);
+      });
+    const files = stores.includes("files") ? await all("files") : [];
+    const sections = stores.includes("sections") ? await all("sections") : [];
+    db.close();
+    const moved = files.length
+      ? files
+      : sections
+          .sort((a, b) => a.order - b.order)
+          .map(({ file, bytes }) => ({ path: `${MIGRATED}/${file}`, bytes }));
+    for (const { path, bytes } of moved)
+      if (bytes) await write(path, bytes.length, [[0, bytes]]);
+      else await folder(names(path));
+    await new Promise((resolve) => {
+      const removal = indexedDB.deleteDatabase(DB);
+      removal.onsuccess = removal.onerror = removal.onblocked = resolve;
+    });
+  };
+
+  onmessage = ({ data }) => {
+    queue = queue
+      .then(async () => {
+        if (data.kind === "load") {
+          root = await navigator.storage.getDirectory();
+          let files = await list(root, "", []);
+          if (!files.length) {
+            await migrate();
+            files = await list(root, "", []);
+          }
+          postMessage(files, files.flatMap(([, bytes]) => (bytes ? [bytes.buffer] : [])));
+        } else
+          for (const [path, length, ranges] of data.changes)
+            if (length === undefined) await remove(path);
+            else if (length === null) await folder(names(path));
+            else await write(path, length, ranges);
+      })
+      .catch((error) => console.error("Keeping files", error));
+  };
+}
+
+/** Every file kept, as `[path, bytes or null for a folder, modified]`. */
+export function loadFiles() {
+  const source = URL.createObjectURL(new Blob([`(${storageWorker})()`], { type: "text/javascript" }));
+  storage = new Worker(source);
+  storage.postMessage({ kind: "load" });
+  return new Promise((resolve, reject) => {
+    storage.onmessage = ({ data }) => resolve(data);
+    storage.onerror = (error) => reject(new Error(`The storage worker failed: ${error.message}`));
+  });
+}
+
+/** Writes `[path]` (removed), `[path, null]` (a folder) and `[path, length, ranges]` entries. */
+export function storeFiles(changes) {
+  const buffers = changes.flatMap(([, , ranges]) => (ranges ?? []).map(([, bytes]) => bytes.buffer));
+  storage.postMessage({ kind: "store", changes }, buffers);
 }
 
 export function requestFrame() {
