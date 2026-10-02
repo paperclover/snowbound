@@ -1754,6 +1754,7 @@ impl State {
                 -self.view.viewport.origin[index],
                 [scroll.min[index], scroll.max[index]],
                 self.view.viewport.size[index] as f32,
+                scroll.max[1 - index] > scroll.min[1 - index],
                 [0.18, 0.18, 0.18, 0.45],
             ) {
                 let response = self.view.scroll_to(index, offset)?;

@@ -862,13 +862,20 @@ fn scrollbar_thumbs_track_the_offset_and_drags_reach_both_ends() {
                 "view",
                 Spec {
                     flags: Flags::CUSTOM,
-                    size: [px(200.0), px(220.0)],
+                    size: [px(200.0), px(218.0)],
                     ..Spec::default()
                 },
             );
-            if let Some(chosen) =
-                scrollbar(ui, "bar", Axis::Y, *offset, [0.0, 1000.0], 400.0, [0.5; 4])
-            {
+            if let Some(chosen) = scrollbar(
+                ui,
+                "bar",
+                Axis::Y,
+                *offset,
+                [0.0, 1000.0],
+                400.0,
+                true,
+                [0.5; 4],
+            ) {
                 *offset = chosen;
             }
             ui.close();
@@ -900,6 +907,36 @@ fn scrollbar_thumbs_track_the_offset_and_drags_reach_both_ends() {
     ui.event(Event::PointerMoved([193.0, -500.0]));
     build(&mut ui, &mut offset);
     assert_eq!(offset, 0.0);
+}
+
+#[test]
+fn a_scrollbar_without_a_corner_ends_as_far_from_its_end_as_from_its_start() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    for _ in 0..2 {
+        frame(&mut ui, |ui| {
+            ui.open(
+                "view",
+                Spec {
+                    flags: Flags::CUSTOM,
+                    size: [px(200.0), px(208.0)],
+                    ..Spec::default()
+                },
+            );
+            scrollbar(
+                ui,
+                "bar",
+                Axis::Y,
+                1000.0,
+                [0.0, 1000.0],
+                400.0,
+                false,
+                [0.5; 4],
+            );
+            ui.close();
+        });
+    }
+    let rect = ui.rect(Id::ROOT.child("view").child("bar")).unwrap();
+    assert_eq!(rect[3], 204.0);
 }
 
 #[test]
@@ -936,9 +973,16 @@ fn system_scrollers_step_page_and_drag_by_the_parts_the_platform_paints() {
                     ..Spec::default()
                 },
             );
-            if let Some(chosen) =
-                scrollbar(ui, "bar", Axis::Y, *offset, [0.0, 1000.0], 400.0, [0.5; 4])
-            {
+            if let Some(chosen) = scrollbar(
+                ui,
+                "bar",
+                Axis::Y,
+                *offset,
+                [0.0, 1000.0],
+                400.0,
+                true,
+                [0.5; 4],
+            ) {
                 *offset = chosen;
             }
             ui.close();

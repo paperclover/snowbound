@@ -130,8 +130,10 @@ const REPEAT: Duration = Duration::from_millis(50);
 
 /// A scrollbar along the far edge of the current box, for content whose scroll offset
 /// ranges over `range` while `view` of it shows, all in one unit: the platform's scroller
-/// where `Ui::scrollers` has one, otherwise a thumb in `color` over the content. Returns
-/// the offset the scrollbar chose.
+/// where `Ui::scrollers` has one, otherwise a thumb in `color` over the content. With a
+/// `corner`, its far end leaves room for the other axis's scrollbar. Returns the offset
+/// the scrollbar chose.
+#[allow(clippy::too_many_arguments)]
 pub fn scrollbar(
     ui: &mut Ui,
     part: impl Hash,
@@ -139,18 +141,19 @@ pub fn scrollbar(
     offset: f32,
     range: [f32; 2],
     view: f32,
+    corner: bool,
     color: [f32; 4],
 ) -> Option<f32> {
     if ui.scrollers.is_some() {
-        return system_scrollbar(ui, part, axis, offset, range, view);
+        return system_scrollbar(ui, part, axis, offset, range, view, corner);
     }
     let along = usize::from(axis == Axis::Y);
     let rect = ui.rect(ui.current())?;
     let length = rect[along + 2] - rect[along];
     let cross = rect[3 - along] - rect[1 - along];
     let span = range[1] - range[0];
-    // The far end leaves room for the other axis's bar.
-    let track = length - 20.0;
+    // A thumb keeps 4 from each end and the box's far edge, and is 6 across.
+    let track = length - 8.0 - if corner { 10.0 } else { 0.0 };
     if span <= 0.0 || track <= 0.0 {
         return None;
     }
@@ -197,13 +200,13 @@ fn system_scrollbar(
     offset: f32,
     range: [f32; 2],
     view: f32,
+    corner: bool,
 ) -> Option<f32> {
     let along = usize::from(axis == Axis::Y);
     let rect = ui.rect(ui.current())?;
     let span = range[1] - range[0];
     let thickness = ui.scrollers.as_ref()?.thickness;
-    // The far end leaves the corner beside the other axis's scroller.
-    let length = rect[along + 2] - rect[along] - thickness;
+    let length = rect[along + 2] - rect[along] - if corner { thickness } else { 0.0 };
     if span <= 0.0 || length <= 0.0 {
         return None;
     }
@@ -283,7 +286,7 @@ fn system_scrollbar(
             ..Spec::default()
         },
     );
-    if axis == Axis::Y {
+    if axis == Axis::Y && corner {
         // The corner between the two scrollers shows the content's white, as AppKit's does.
         ui.leaf(
             ("corner", &part),

@@ -246,6 +246,7 @@ pub fn list<R: Rows>(
         scroll as f32,
         [0.0, most as f32],
         view as f32,
+        false,
         thumb,
     ) {
         // Rows keep their places relative to the new offset, or next frame's hold on the
