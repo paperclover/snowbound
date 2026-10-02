@@ -26,6 +26,8 @@ mod instance;
 mod keys;
 mod library;
 mod link;
+#[cfg(feature = "live")]
+mod live;
 #[cfg(target_os = "linux")]
 #[path = "loader_linux.rs"]
 mod loader;
@@ -795,6 +797,8 @@ struct State {
     asking: std::collections::VecDeque<dialog::Dialog>,
     /// What has been read in each notebook, on this computer.
     reads: unread::Reads,
+    #[cfg(feature = "live")]
+    peers: Option<live::Peers>,
     /// Open Notebook from Server while it is open.
     server: Option<server::Connect>,
     /// New iCloud Notebook while it is open.
@@ -1171,6 +1175,8 @@ impl State {
             #[cfg(target_os = "linux")]
             asking: Default::default(),
             reads,
+            #[cfg(feature = "live")]
+            peers: None,
             server: None,
             new_icloud: None,
             icloud_reading: HashSet::new(),
@@ -1279,6 +1285,8 @@ impl State {
             let response = self.view.scale_factor_changed(scale)?;
             self.respond(response);
         }
+        #[cfg(feature = "live")]
+        self.follow_peers();
         self.layout(
             [size.width, size.height].map(|side| side as f32 / self.window.scale_factor() as f32),
             scale,
@@ -1629,6 +1637,8 @@ impl State {
                 ..Spec::default()
             },
         );
+        #[cfg(feature = "live")]
+        self.avatars();
         if self.session.is_some() {
             self.page_tools(&theme);
         }
@@ -1749,6 +1759,10 @@ impl State {
                 let response = self.view.scroll_to(index, offset)?;
                 self.respond(response);
             }
+        }
+        #[cfg(feature = "live")]
+        if !opening {
+            self.peer_carets();
         }
         self.ui.close();
         if let Some(task) = self.view.task_under_pointer() {
@@ -2948,6 +2962,10 @@ impl State {
         }
         let found = self.search.found_in(&session.key());
         let unread = self.unread_pages();
+        #[cfg(feature = "live")]
+        let peers = self.peer_pages();
+        #[cfg(not(feature = "live"))]
+        let peers = HashMap::new();
         let rounding = self.rounding();
         let dragged = self.dragged_page();
         let rows = page_rows(
@@ -2956,6 +2974,7 @@ impl State {
             section,
             session,
             [&found, &unread],
+            &peers,
             (rounding, self.page_tabs_left),
             self.renaming.as_mut(),
             dragged,
@@ -4583,6 +4602,7 @@ fn page_rows(
     section: &ui::Section,
     session: &Session,
     marked: [&HashSet<ExGuid>; 2],
+    peers: &HashMap<ExGuid, Vec<[f32; 4]>>,
     shape: (f32, bool),
     mut renaming: Option<&mut rename::Renaming>,
     dragged: Option<PageDrag>,
@@ -4628,6 +4648,7 @@ fn page_rows(
             section,
             session,
             marked,
+            peers,
             shape,
             renaming.as_deref_mut(),
             (space, title, *level),
@@ -4655,6 +4676,7 @@ fn page_rows(
             section,
             session,
             marked,
+            peers,
             shape,
             renaming,
             (space, title, *level),
@@ -4676,6 +4698,7 @@ fn page_row(
     section: &ui::Section,
     session: &Session,
     [found, unread]: [&HashSet<ExGuid>; 2],
+    peers: &HashMap<ExGuid, Vec<[f32; 4]>>,
     shape: (f32, bool),
     renaming: Option<&mut rename::Renaming>,
     (space, title, level): (&ExGuid, &String, u32),
@@ -4696,6 +4719,7 @@ fn page_row(
         conflicted: !versions.is_empty(),
         found: found.contains(space),
         unread: unread.contains(space),
+        peers: peers.get(space).map_or(&[], Vec::as_slice),
         renaming: renaming
             .filter(|renaming| renaming.page(*space))
             .map(|renaming| &mut renaming.name),
@@ -4756,6 +4780,7 @@ fn page_row(
             conflicted: false,
             found: false,
             unread: false,
+            peers: &[],
             renaming: None,
             shift,
             lifted: false,
@@ -4788,6 +4813,8 @@ struct PageTab<'a> {
     found: bool,
     /// Another author changed it since it was last viewed, which OneNote sets bold.
     unread: bool,
+    /// The colours of the others who have it open.
+    peers: &'a [[f32; 4]],
     /// The name typed in the tab's rename field, while it shows one.
     renaming: Option<&'a mut String>,
     /// How far down from its place in the list it is drawn.
@@ -4885,6 +4912,19 @@ fn page_tab(
             None
         }
     };
+    for (index, color) in tab.peers.iter().enumerate() {
+        let inset = (ROW - ROW_GAP - 8.0) / 2.0;
+        ui.leaf(
+            ("peer", index),
+            Spec {
+                size: [px(10.0), px(ROW - ROW_GAP)],
+                fill: Some(*color),
+                radius: 4.0,
+                inset: [1.0, inset, 1.0, inset],
+                ..Spec::default()
+            },
+        );
+    }
     if tab.conflicted {
         ui.leaf(
             "conflict",

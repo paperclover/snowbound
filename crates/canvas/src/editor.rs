@@ -529,6 +529,23 @@ impl TextOutline {
         .into()
     }
 
+    /// The caret at `focus`, in the outline's coordinates.
+    pub fn caret_at(
+        &self,
+        focus: TextPosition,
+        affinity: Affinity,
+        width: f32,
+    ) -> Result<BoundingBox, EditError> {
+        let paragraph = self.paragraph_layout(focus.paragraph)?;
+        let cursor = paragraph.cursor(focus.offset, affinity)?;
+        let mut rect = paragraph.text.caret(cursor, width);
+        rect.x0 += f64::from(paragraph.origin[0]);
+        rect.x1 += f64::from(paragraph.origin[0]);
+        rect.y0 += f64::from(paragraph.origin[1]);
+        rect.y1 += f64::from(paragraph.origin[1]);
+        Ok(rect)
+    }
+
     /// Highlight rectangles of `selection` in the outline, in its coordinates.
     pub fn range_rects(&self, selection: Selection) -> Result<Vec<BoundingBox>, EditError> {
         let [anchor, focus] = selection.positions;
@@ -2989,14 +3006,7 @@ impl CanvasEditor {
         affinity: Affinity,
         width: f32,
     ) -> Result<BoundingBox, EditError> {
-        let paragraph = self.active_outline().paragraph_layout(focus.paragraph)?;
-        let cursor = paragraph.cursor(focus.offset, affinity)?;
-        let mut rect = paragraph.text.caret(cursor, width);
-        rect.x0 += f64::from(paragraph.origin[0]);
-        rect.x1 += f64::from(paragraph.origin[0]);
-        rect.y0 += f64::from(paragraph.origin[1]);
-        rect.y1 += f64::from(paragraph.origin[1]);
-        Ok(rect)
+        self.active_outline().caret_at(focus, affinity, width)
     }
 
     pub fn move_selection(

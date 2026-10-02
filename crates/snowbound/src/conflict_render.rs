@@ -65,6 +65,7 @@ fn layout(ui: &mut Ui, session: &Session, menu: bool) -> Vec<Command> {
         &section,
         session,
         [&HashSet::new(); 2],
+        &HashMap::new(),
         (0.0, false),
         None,
         None,

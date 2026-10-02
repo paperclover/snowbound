@@ -529,6 +529,19 @@ Device and simulator builds link for iOS. Native acceptance uses disposable
 OneNote 2010 clients and Samba; it does not establish on-device execution or
 physical power-loss durability.
 
+## Live presence (feature `live`)
+
+`live::Live::start(hello, room, reach, notify)` listens on a TCP port and, with a `Reach`,
+advertises `_snowbound._tcp` by mDNS on every network or on loopback alone, connecting to the
+peers in the same `Room` that it finds: a notebook's identity, or a code typed on both
+(`Room::Code("4-violet-otter")`). `connect(address)` meets a peer discovery did not find.
+Peers meet through SPAKE2 on the room's secret, then every frame is AES-256-GCM under the keys
+it agreed: a message kind and a CBOR map (`live::wire`). A reader skips kinds and map keys it
+doesn't know, so later versions add both freely. `set_presence` says which section, page and
+caret this end has (text object and UTF-16 offset, as ops address text); a connection sends
+only the newest. `peers()` lists each connected peer's `Hello` (name, picture) and presence,
+and `notify` runs whenever that changes. Dropping the `Live` leaves.
+
 ## Queue measurement
 
 `cargo run -p notebook --release --example queue_scale -- NEW_DIRECTORY 1000`

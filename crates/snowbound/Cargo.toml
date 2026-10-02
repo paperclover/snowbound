@@ -8,6 +8,9 @@ publish = false
 default = ["wgpu"]
 # Paints through wgpu; without it through OpenGL 2.1, for Mac OS X 10.6.
 wgpu = ["draw/wgpu", "dep:wgpu"]
+# Live presence: the others with a notebook open, their pages and carets, met over the
+# network (resources/live-share.md). Runs only where SNOWBOUND_LIVE asks.
+live = ["notebook/live"]
 
 [dependencies]
 canvas = { path = "../canvas", features = ["interaction", "pdf"] }

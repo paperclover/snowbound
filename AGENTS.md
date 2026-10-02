@@ -13,7 +13,7 @@ novel UI kit, each new platform port is extremely lightweight.
 | Path | Owns | Depends on |
 | --- | --- | --- |
 | `crates/onestore` | The file format: revision stores (`.one`, `.onetoc2`), the page model, ops, the commit protocol. No network, no SQLite, no `unsafe`. | none |
-| `crates/notebook` | From editor to disk or share: discovery, notebook structure, sessions, the SQLite replica, sync and merging, conflict pages, the embedded SMB client (feature `smb`). | onestore |
+| `crates/notebook` | From editor to disk or share: discovery, notebook structure, sessions, the SQLite replica, sync and merging, conflict pages, the embedded SMB client (feature `smb`), live presence between peers (feature `live`). | onestore |
 | `crates/draw` | The wgpu renderer that page and chrome both paint through, and the text-editing core (keys, chords, carets) they share. | none |
 | `crates/canvas` | The page: editor, OneNote-faithful layout, page scene, interaction, the page's accessibility tree. | onestore, draw |
 | `crates/ui` | The immediate-mode interface kit and OneNote's chrome controls. Knows nothing of notebooks. | draw |

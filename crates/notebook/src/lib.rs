@@ -4,6 +4,8 @@
 
 pub mod discover;
 pub mod fs;
+#[cfg(feature = "live")]
+pub mod live;
 #[cfg(feature = "smb")]
 pub mod smb;
 

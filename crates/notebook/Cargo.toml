@@ -6,6 +6,9 @@ publish = false
 
 [features]
 smb = ["dep:smb2", "dep:tokio"]
+# Live presence: peers found on the network, met through a shared secret, over an encrypted
+# stream (resources/live-share.md).
+live = ["dep:mdns-sd", "dep:minicbor", "dep:spake2"]
 
 [dependencies]
 onestore = { path = "../onestore" }
@@ -23,6 +26,9 @@ aes-gcm = "0.11.1"
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 getrandom = "0.4.3"
 hmac = "0.13.0"
+mdns-sd = { version = "0.21.4", default-features = false, optional = true }
+minicbor = { version = "2.3.0", features = ["derive", "alloc"], optional = true }
+spake2 = { version = "=0.5.0-pre.0", features = ["getrandom"], optional = true }
 # OneNote packages (.onepkg) are cabinet files.
 cab = "0.6"
 # std's clock where there is one; the browser's on wasm32-unknown-unknown, whose std has none.
