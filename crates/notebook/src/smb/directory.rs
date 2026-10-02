@@ -140,7 +140,7 @@ impl Client {
                 {
                     io::Error::new(io::ErrorKind::Unsupported, error)
                 }
-                _ => io::Error::other(error),
+                _ => super::io_error(error),
             })?;
         // However the task ends, the connection failing or the client retiring its runtime,
         // `changed` hears that the watch did.

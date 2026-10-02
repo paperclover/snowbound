@@ -77,7 +77,7 @@ impl Client {
                     let mut connection = sign_in(address, &credentials, timeout).await?;
                     let tree = Tree::connect(&mut connection, share)
                         .await
-                        .map_err(io::Error::other)?;
+                        .map_err(io_error)?;
                     Ok::<_, io::Error>((connection, tree))
                 })
                 .await
@@ -150,7 +150,7 @@ impl Client {
         };
         let frame = frame
             .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))
-            .and_then(|result| result.map_err(io::Error::other))
+            .and_then(|result| result.map_err(io_error))
             .inspect_err(|_| self.retire())?;
         self.unpack(&self.body(command, frame)?)
     }
@@ -184,15 +184,13 @@ impl Client {
         };
         let frames = frames
             .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))
-            .and_then(|result| result.map_err(io::Error::other))
+            .and_then(|result| result.map_err(io_error))
             .inspect_err(|_| self.retire())?;
         Ok(frames
             .into_iter()
             .zip(requests)
             .map(|(frame, (command, _))| {
-                let frame = frame
-                    .map_err(io::Error::other)
-                    .inspect_err(|_| self.retire())?;
+                let frame = frame.map_err(io_error).inspect_err(|_| self.retire())?;
                 self.body(*command, frame)
             })
             .collect())
@@ -568,7 +566,7 @@ pub fn shares(
                 let mut connection = sign_in(address, &credentials, timeout).await?;
                 let shares = smb2::client::list_shares(&mut connection)
                     .await
-                    .map_err(io::Error::other);
+                    .map_err(io_error);
                 connection.mark_dead();
                 shares
             })
@@ -576,6 +574,20 @@ pub fn shares(
         })
         .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??;
     Ok(shares.into_iter().map(|share| share.name).collect())
+}
+
+/// `error` inside an `io::Error` whose kind says whether the server was reached: a lost or
+/// unanswered connection is `NotConnected` or `TimedOut`, and a socket's failure keeps its kind.
+fn io_error(error: smb2::Error) -> io::Error {
+    let kind = match &error {
+        smb2::Error::Io(source) => source.kind(),
+        error => match error.kind() {
+            smb2::ErrorKind::ConnectionLost => io::ErrorKind::NotConnected,
+            smb2::ErrorKind::TimedOut => io::ErrorKind::TimedOut,
+            _ => io::ErrorKind::Other,
+        },
+    };
+    io::Error::new(kind, error)
 }
 
 /// A negotiated session with the server at `address`, signed in with `credentials`.
@@ -586,14 +598,14 @@ async fn sign_in(
 ) -> io::Result<Connection> {
     let mut connection = Connection::connect(address, timeout)
         .await
-        .map_err(io::Error::other)?;
+        .map_err(io_error)?;
     connection.set_compression_requested(false);
     if let Err(error) = connection.negotiate().await {
         connection.mark_dead();
         return Err(if speaks_only_smb1(address, timeout).await {
             io::Error::new(io::ErrorKind::Unsupported, Refusal::Smb1)
         } else {
-            io::Error::other(error)
+            io_error(error)
         });
     }
     Session::setup(
@@ -603,7 +615,7 @@ async fn sign_in(
         credentials.domain,
     )
     .await
-    .map_err(io::Error::other)?;
+    .map_err(io_error)?;
     Ok(connection)
 }
 

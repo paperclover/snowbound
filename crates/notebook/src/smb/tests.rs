@@ -1047,3 +1047,34 @@ fn a_torn_read_is_contention() {
     let error = snapshot(torn, 1 << 20).unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
 }
+
+#[test]
+fn unreachable_server_is_not_connected() {
+    use crate::session::{SyncState, SyncStatus};
+    let state = |error: smb2::Error| {
+        SyncStatus {
+            synced: Some(1),
+            error: Some(io_error(error)),
+            queued: 1,
+        }
+        .state()
+    };
+    for kind in [
+        io::ErrorKind::ConnectionRefused,
+        io::ErrorKind::HostUnreachable,
+        io::ErrorKind::TimedOut,
+    ] {
+        assert_eq!(
+            state(smb2::Error::Io(kind.into())),
+            SyncState::NotConnected,
+            "{kind}"
+        );
+    }
+    assert_eq!(state(smb2::Error::Disconnected), SyncState::NotConnected);
+    assert_eq!(state(smb2::Error::Timeout), SyncState::NotConnected);
+    let denied = smb2::Error::Protocol {
+        status: smb2::types::status::NtStatus(0xc0000022),
+        command: Command::Create,
+    };
+    assert_eq!(io_error(denied).kind(), io::ErrorKind::Other);
+}
