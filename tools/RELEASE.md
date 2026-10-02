@@ -22,6 +22,7 @@ latest.json                    {"macos-aarch64": "2026-09-29-r10", "macos-x86_64
 2026-09-29.r10/
   build.json                   version, commit, changes, and per platform: file, size, sha256, signature
   build.json.sig               ed25519 signature of build.json, hex
+  build.json.minisig           and a minisign signature beside every file but build.json.sig
   Snowbound-2026-09-29-r10-macos-aarch64.zip
   Snowbound-2026-09-29-r10-macos-x86_64.zip
   Snowbound-2026-09-29-r10-macos-10.6.zip
@@ -32,6 +33,10 @@ latest.json                    {"macos-aarch64": "2026-09-29-r10", "macos-x86_64
   Snowbound-2026-09-29-r10-macos-aarch64.dSYM.zip    debug info, optional: one per archive
   snowbound-2026-09-29-r10-linux-x86_64.debug.zip
   snowbound-2026-09-29-r10-windows-x86_64.debug.zip
+  ...
+latest/                        each platform's newest archive, the version dropped from its name
+  Snowbound-macos-aarch64.zip
+  Snowbound-macos-aarch64.zip.minisig
   ...
 ```
 
@@ -67,11 +72,31 @@ they don't know, and builds without `changes` read as listing none.
 
 Every `build.json` and archive is signed with the ed25519 release key in
 `~/.config/snowbound/release-key` (PKCS#8, mode 600, never in the repository).
-Its public half is `crates/snowbound/release-key.pub`, compiled into the app.
+Its public half is `minisign.pub` at the repository's root, in minisign's
+format, which the app compiles in.
 `cargo run -p snowbound --example release_sign -- KEY FILE...` prints
-signatures and refuses a key that doesn't match `release-key.pub`;
-`release_sign new KEY` makes a new key. Replacing the key means shipping a
-build with the new public half, signed with the old key.
+signatures and refuses a key that doesn't match `minisign.pub`;
+`release_sign new KEY` makes a new key and prints its `minisign.pub`. Replacing
+the key means shipping a build with the new public half, signed with the old
+key.
+
+Every published file but `build.json.sig` also gets `FILE.minisig`, which
+[minisign](https://jedisct1.github.io/minisign/) (or `rsign verify`) checks:
+
+```sh
+minisign -Vm Snowbound-macos-aarch64.zip -P RWRa9nZujiIE7lr2dm6OIgTuUvMpr09SM747BkGcHfD4x9ghErMdNGsJ
+```
+
+minisign is Ed25519, so the release key makes these too, with no second key to
+guard: `release.py` has `release_sign` sign each file's BLAKE2b-512, then that
+signature followed by the trusted comment, as `minisign -S` does, and the key id
+is the public key's first 8 bytes. Neither scheme's signature passes for the
+other's: what minisign signs is a 64-byte hash, or a signature and a comment,
+never a `build.json` or an archive with the hash `build.json` lists.
+
+The app reads the archive's size and SHA-256 from the signed `build.json`.
+Each archive's `signature` there, the release key's of its raw bytes, is for
+apps that predate that, which check it as well.
 
 The macOS app is signed with Clover's Developer ID Application certificate
 (team 9R7DPNW28H), named in `release.py` by its SHA-1 hash, since its name is
@@ -103,7 +128,14 @@ or with an app-specific password from account.apple.com:
 `xcrun notarytool store-credentials snowbound --apple-id EMAIL --team-id 9R7DPNW28H --password APP-SPECIFIC-PASSWORD`.
 Until the app is notarized, a download opened in Finder needs Open from its
 context menu the first time; updates the app installs itself carry no
-quarantine and open directly.
+quarantine and open directly. The zips carry their `.minisig` like every
+download, which for the unsigned 10.6 app is the only signature.
+
+Windows executables are unsigned, so SmartScreen warns on a download.
+Authenticode would take a code signing certificate: Azure Trusted Signing at
+about $10 a month, where it accepts an individual developer, or an OV
+certificate at a few hundred dollars a year, now kept on a hardware token or
+cloud HSM. `osslsigncode` or `jsign` would sign from the Mac.
 
 ## Publishing
 
@@ -184,8 +216,8 @@ published build, it checks shortly after launch and then daily, skipping while
 Work Offline is on; Check for Updates… (the app menu on macOS, the command
 palette elsewhere) checks at once and reports what it found. A check reads
 `latest.json`, then the named build's `build.json` and signature, and
-downloads the archive for this platform, verifying size, SHA-256 and
-signature. An Intel build that Rosetta runs takes `macos-aarch64`'s, even at
+downloads the archive for this platform, verifying its size and SHA-256
+against the signed `build.json` before unpacking it. An Intel build that Rosetta runs takes `macos-aarch64`'s, even at
 its own version. It stages the update beside the install, so the swap is a rename:
 the app unpacked into `.Snowbound.app.update` next to the bundle on macOS, the
 executable into `.snowbound.update` next to it on Linux (`.snowbound.exe.update` on

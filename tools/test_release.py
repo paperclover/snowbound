@@ -1,4 +1,6 @@
+import base64
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 import runpy
 import tempfile
@@ -51,6 +53,31 @@ class ReleaseTest(unittest.TestCase):
         self.assertEqual(moved, {'macos-aarch64': '2026-09-29-r10', 'linux-x86_64': '2026-09-30-r1',
                                  'macos-10.6': '2026-09-29-r10'})
         self.assertEqual(release['newest'](latest, {'macos-aarch64': {}}, ('2026-09-29', 9)), latest)
+
+    def test_minisig_signs_the_files_blake2b_then_that_with_its_comment(self):
+        minisign, scope = release['minisign'], release['minisign'].__globals__
+        messages = []
+
+        def sign(paths):
+            messages.extend(Path(path).read_bytes() for path in paths)
+            return [bytes([len(messages)]).hex() * 64 for _ in paths]
+
+        real, scope['sign'] = scope['sign'], sign
+        try:
+            with tempfile.TemporaryDirectory() as folder:
+                file = Path(folder) / 'snowbound-linux-x86_64'
+                file.write_bytes(b'an executable')
+                minisign([file])
+                untrusted, signature, trusted, global_signature = Path(f'{file}.minisig').read_text().splitlines()
+        finally:
+            scope['sign'] = real
+        key_id = base64.b64decode(release['MINISIGN'].read_text().splitlines()[1])[2:10]
+        self.assertTrue(untrusted.startswith('untrusted comment: '))
+        self.assertEqual(base64.b64decode(signature), b'ED' + key_id + bytes([1]) * 64)
+        self.assertRegex(trusted, r'^trusted comment: timestamp:\d+\tfile:snowbound-linux-x86_64\thashed$')
+        self.assertEqual(base64.b64decode(global_signature), bytes([2]) * 64)
+        self.assertEqual(messages, [hashlib.blake2b(b'an executable').digest(),
+                                    bytes([1]) * 64 + trusted.removeprefix('trusted comment: ').encode()])
 
     def test_build_macos_signs_each_mac_app(self):
         build_mac, scope = release['build_mac'], release['build_mac'].__globals__

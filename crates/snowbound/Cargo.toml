@@ -45,6 +45,8 @@ ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 rustls-native-certs = "0.8"
 webpki-root-certs = "1.0"
 ring = "0.17"
+# Reads minisign.pub, the release key the updates are checked against.
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 
 # The browser: see arc/platforms.md.
 [target.'cfg(target_arch = "wasm32")'.dependencies]

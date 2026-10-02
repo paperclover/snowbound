@@ -3672,6 +3672,7 @@ dependencies = [
  "accesskit_consumer",
  "accesskit_winit",
  "arboard",
+ "base64",
  "block2 0.5.1",
  "canvas",
  "draw",

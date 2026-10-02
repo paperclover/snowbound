@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Builds, signs and publishes Snowbound for each desktop platform; see tools/RELEASE.md."""
 import argparse
+import base64
 from datetime import datetime
 import hashlib
 import json
@@ -11,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from zoneinfo import ZoneInfo
 
@@ -18,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PUBLISHED = Path('/Volumes/clover/Documents/Public/Snowbound')
 URL = 'https://file.paperclover.net/shr/snowbound/'
 KEY = Path.home() / '.config/snowbound/release-key'
+# Its public half, which the app checks updates against.
+MINISIGN = ROOT / 'minisign.pub'
 ZONE = ZoneInfo('America/Los_Angeles')
 PLATFORMS = ['macos-aarch64', 'macos-x86_64', 'macos-10.6', 'linux-x86_64', 'linux-aarch64',
              'windows-x86_64', 'windows-aarch64']
@@ -140,6 +144,26 @@ def sign(files):
         ['cargo', 'run', '--quiet', '--release', '-p', 'snowbound', '--example', 'release_sign', '--', KEY, *files],
         cwd=ROOT, text=True)
     return output.split()
+
+
+def minisign(files):
+    """Writes FILE.minisig beside each of `files` as `minisign -S` would with the release key:
+    a signature of the file's BLAKE2b-512, then one of that and the trusted comment."""
+    key_id = base64.b64decode(MINISIGN.read_text().splitlines()[1])[2:10]
+    comments = [f'timestamp:{int(time.time())}\tfile:{file.name}\thashed' for file in files]
+    with tempfile.TemporaryDirectory() as scratch:
+        def signed(messages):
+            paths = [Path(scratch) / str(index) for index in range(len(messages))]
+            for path, message in zip(paths, messages):
+                path.write_bytes(message)
+            return [bytes.fromhex(signature) for signature in sign(paths)]
+        signatures = signed([hashlib.blake2b(file.read_bytes()).digest() for file in files])
+        global_signatures = signed([signature + comment.encode() for signature, comment in zip(signatures, comments)])
+    for file, signature, comment, global_signature in zip(files, signatures, comments, global_signatures):
+        Path(f'{file}.minisig').write_text(
+            'untrusted comment: signature from the Snowbound release key\n'
+            f'{base64.b64encode(b"ED" + key_id + signature).decode()}\n'
+            f'trusted comment: {comment}\n{base64.b64encode(global_signature).decode()}\n')
 
 
 def split_debug(executable, debug):
@@ -285,15 +309,18 @@ def main():
                 'file': file.name,
                 'size': file.stat().st_size,
                 'sha256': hashlib.sha256(file.read_bytes()).hexdigest(),
+                # Older apps check it; newer ones trust the sha256 build.json.sig vouches for.
                 'signature': signature,
             } for (platform, file), signature in zip(files.items(), signatures)},
         }
         (stage / 'build.json').write_text(json.dumps(build, indent=2) + '\n')
         (stage / 'build.json.sig').write_text(sign([stage / 'build.json'])[0] + '\n')
+        downloads = [*files.values(), *symbols, stage / 'build.json']
+        minisign(downloads)
         partial = target.with_name(f'.{target.name}.partial')
         shutil.rmtree(partial, ignore_errors=True)
         partial.mkdir()
-        for file in [*files.values(), *symbols, stage / 'build.json', stage / 'build.json.sig']:
+        for file in [*downloads, *(Path(f'{file}.minisig') for file in downloads), stage / 'build.json.sig']:
             # copy() keeps the Linux executables executable for anyone running them off the share.
             shutil.copy(file, partial / file.name)
         partial.rename(target)
@@ -316,10 +343,11 @@ def main():
         if newest_name != name(version):
             continue
         file = build['archives'][platform]['file']
-        stable = downloads / file.replace(f'-{name(version)}', '')
-        partial = stable.with_name(f'.{stable.name}.partial')
-        shutil.copy(target / file, partial)
-        os.replace(partial, stable)
+        for published_name in (file, f'{file}.minisig'):
+            stable = downloads / published_name.replace(f'-{name(version)}', '')
+            partial = stable.with_name(f'.{stable.name}.partial')
+            shutil.copy(target / published_name, partial)
+            os.replace(partial, stable)
     if not args.dry_run:
         print(f'{URL}{folder(version)}/')
 

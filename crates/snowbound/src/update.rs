@@ -28,8 +28,8 @@ use ureq::tls::{Certificate, RootCerts, TlsConfig};
 /// Where the builds are published.
 const BASE: &str = "https://file.paperclover.net/shr/snowbound/";
 
-/// The release key's public half, in hex.
-const KEY: &str = include_str!("../release-key.pub");
+/// The release key's public half, as `minisign -V` reads it.
+const KEY: &str = include_str!("../../../minisign.pub");
 
 /// The argument `relaunch` starts the old executable with to finish an update.
 pub const FINISH: &str = "--finish-update";
@@ -190,13 +190,13 @@ pub fn summary(changes: &[Change]) -> Option<String> {
     }
 }
 
+/// What the signed `build.json` says of an archive. The `signature` it also gives, the release
+/// key's of the archive's bytes, is for older apps, which check it too.
 #[derive(Clone, Debug, Deserialize)]
 struct Archive {
     file: String,
     size: u64,
     sha256: String,
-    /// The release key's signature of the archive's bytes.
-    signature: String,
 }
 
 fn unhex(text: &str) -> Option<Vec<u8>> {
@@ -220,6 +220,15 @@ fn verify(_: &[u8], _: &[u8], _: &str) -> Result<(), String> {
 /// Why the browser installs no builds: it loads the newest each time the page opens.
 #[cfg(target_arch = "wasm32")]
 const BROWSER: &str = "The browser loads the newest Snowbound each time the page opens.";
+
+/// `KEY`'s ed25519 public key, after minisign's algorithm and key id.
+#[cfg(not(target_arch = "wasm32"))]
+fn release_key() -> Vec<u8> {
+    use base64::Engine;
+    let line = KEY.lines().nth(1).expect("minisign.pub holds a key");
+    let key = base64::engine::general_purpose::STANDARD.decode(line);
+    key.expect("minisign.pub's key is base64")[10..].to_vec()
+}
 
 #[cfg(not(target_arch = "wasm32"))]
 fn verify(key: &[u8], message: &[u8], signature: &str) -> Result<(), String> {
@@ -278,7 +287,7 @@ fn archive(
     Ok((archive, changes))
 }
 
-fn check_archive(key: &[u8], archive: &Archive, bytes: &[u8]) -> Result<(), String> {
+fn check_archive(archive: &Archive, bytes: &[u8]) -> Result<(), String> {
     if bytes.len() as u64 != archive.size {
         return Err(format!(
             "{} is {} bytes, not {}",
@@ -294,7 +303,7 @@ fn check_archive(key: &[u8], archive: &Archive, bytes: &[u8]) -> Result<(), Stri
             return Err(format!("{}’s SHA-256 doesn’t match", archive.file));
         }
     }
-    verify(key, bytes, &archive.signature)
+    Ok(())
 }
 
 /// What an update replaces: the app bundle on macOS, the executable elsewhere. Development
@@ -455,7 +464,7 @@ fn check(
             &format!("{}{}", version.folder(), archive.file),
             archive.size,
         )?;
-        check_archive(key, &archive, &bytes).map_err(unverified)?;
+        check_archive(&archive, &bytes).map_err(unverified)?;
         Ok(match stage(&bytes, &folder, &version) {
             Ok(item) => Status::Ready(version, item, changes),
             Err(error) => {
@@ -532,15 +541,15 @@ impl Updates {
             automatic,
             ..Shared::default()
         }));
-        let key = unhex(KEY).expect("release-key.pub holds a key in hex");
         #[cfg(target_arch = "wasm32")]
         let thread = {
-            let _ = (key, proxy);
+            let _ = proxy;
             std::thread::current()
         };
         #[cfg(not(target_arch = "wasm32"))]
         let thread = {
             let shared = Arc::clone(&shared);
+            let key = release_key();
             std::thread::Builder::new()
                 .name("updates".into())
                 .spawn(move || {
@@ -882,7 +891,6 @@ mod tests {
                 "file": file,
                 "size": bytes.len(),
                 "sha256": hex(digest.as_ref()),
-                "signature": hex(pair.sign(bytes).as_ref()),
             }},
         }))
         .unwrap();
@@ -892,6 +900,7 @@ mod tests {
 
     #[test]
     fn signatures_and_hashes_are_checked() {
+        assert_eq!(release_key().len(), 32);
         let pair = generate();
         let key = pair.public_key().as_ref();
         let tenth = version("2026-09-29-r10");
@@ -899,7 +908,7 @@ mod tests {
         let (build, signature) =
             publish(&pair, "2026-09-29-r10", "linux-x86_64", "a.tar.gz", &bytes);
         let (found, _) = archive(key, &build, &signature, &tenth, "linux-x86_64", None).unwrap();
-        check_archive(key, &found, &bytes).unwrap();
+        check_archive(&found, &bytes).unwrap();
 
         let mut tampered = build.clone();
         let at = tampered.iter().position(|&byte| byte == b'a').unwrap();
@@ -931,24 +940,14 @@ mod tests {
         assert!(archive(key, &build, &signature, &tenth, "macos-aarch64", None).is_err());
 
         assert!(
-            check_archive(key, &found, b"an archivf")
+            check_archive(&found, b"an archivf")
                 .unwrap_err()
                 .contains("SHA-256")
         );
         assert!(
-            check_archive(key, &found, b"an archive!")
+            check_archive(&found, b"an archive!")
                 .unwrap_err()
                 .contains("bytes")
-        );
-        // Right size and hash, but signed by another key.
-        let forged = Archive {
-            signature: hex(generate().sign(&bytes).as_ref()),
-            ..found
-        };
-        assert!(
-            check_archive(key, &forged, &bytes)
-                .unwrap_err()
-                .contains("signature")
         );
     }
 
@@ -1236,7 +1235,7 @@ mod tests {
         let old = version("2000-01-01-r1");
         let status = check(
             &download,
-            &unhex(KEY).unwrap(),
+            &release_key(),
             Some(&old),
             Some(&install),
             &|_| {},
