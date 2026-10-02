@@ -350,3 +350,22 @@ fn a_version_copied_into_its_section_is_listed_and_found() {
     assert_eq!(versioned, 3, "{pages:?}");
     assert!(!search_results(&found).is_empty(), "{found}");
 }
+
+/// Rename on a section tab's menu opens the shut sidebar on a field that takes what is
+/// typed over the old name at once.
+#[test]
+fn renaming_a_section_from_its_tab_types_into_the_sidebar_at_once() {
+    let scratch = Scratch::new("rename-shut-sidebar");
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
+    let mut steps = vec!["move 53 53", "press right", "release right", "wait 400"];
+    steps.extend(["key Down", "key Enter", "wait 400"]);
+    steps.extend(["type Renamed", "wait 100", "accessibility typed"]);
+    let [typed] = replay(&scratch, Some(&notebook), &steps)
+        .try_into()
+        .unwrap();
+    assert!(
+        typed.contains(r#"TextInput "Name" = "Renamed" [focused]"#),
+        "{typed}"
+    );
+}

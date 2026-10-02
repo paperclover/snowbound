@@ -766,7 +766,8 @@ impl crate::State {
             &mut tree,
             &self.notebooks,
             drags,
-            width > 0.5,
+            // Opening, the rows are built at once, so a rename field there takes the focus.
+            width > 0.5 || self.sidebar && !self.full_page,
             self.navigation_bar_right,
         );
         let Tree {
