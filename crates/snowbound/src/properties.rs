@@ -132,7 +132,12 @@ impl State {
         let renamable = dialog.name.trim() != dialog.library.name
             && (dialog.library.renamed_location(dialog.name.trim())).is_some();
         if renamable {
-            let rename = ui::check_box(ui, "rename", "Rename the folder too", dialog.rename_folder);
+            let rename = ui::check_box(
+                ui,
+                "rename",
+                "Rename the folder on disk",
+                dialog.rename_folder,
+            );
             if rename.clicked {
                 dialog.rename_folder = !dialog.rename_folder;
             }
