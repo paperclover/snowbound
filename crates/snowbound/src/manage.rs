@@ -65,20 +65,6 @@ pub enum Structure {
     },
 }
 
-/// New iCloud Notebook while it is open: the name typed, and why the last was refused.
-pub struct Naming {
-    name: String,
-    problem: Option<String>,
-}
-
-fn naming() -> ui::Id {
-    ui::Id::ROOT.child("new icloud notebook")
-}
-
-fn naming_field() -> ui::Id {
-    naming().child("name")
-}
-
 /// Whether the notebook at `location` is a folder at the top of the app's iCloud Drive folder,
 /// which the sidebar lists as long as it is there.
 pub fn in_icloud_folder(location: &str) -> bool {
@@ -260,7 +246,7 @@ impl State {
     }
 
     /// Asks where to create a notebook and creates it, as File, New does in OneNote; the
-    /// panel starts in iCloud Drive, as Notes keeps notes there.
+    /// panel starts in Snowbound's iCloud Drive folder, whose notebooks every Mac lists.
     pub(crate) fn new_notebook(&mut self) {
         let icloud = crate::icloud::folder().or_else(crate::icloud::drive);
         let reply = self.reply(|state, root| state.create_notebook(root));
@@ -271,128 +257,6 @@ impl State {
             icloud.as_deref(),
             reply,
         );
-    }
-
-    /// New iCloud Notebook: asks for a name, the first free of "iCloud Notebook", "iCloud
-    /// Notebook 2"…, for a notebook at the top of the app's iCloud Drive folder.
-    pub(crate) fn new_icloud_notebook(&mut self) {
-        let taken: Vec<String> = self
-            .notebooks
-            .iter()
-            .map(|library| library.name.clone())
-            .collect();
-        self.new_icloud = Some(Naming {
-            name: unused(&taken, "iCloud Notebook", false),
-            problem: None,
-        });
-        self.ui.open_popup(naming());
-        self.ui.focus_all(naming_field());
-    }
-
-    /// Builds New iCloud Notebook while it is open.
-    pub(crate) fn new_icloud_dialog(&mut self) {
-        use ui::{Anchor, Axis, Spec, children, fill, px};
-        let Some(dialog) = &mut self.new_icloud else {
-            return;
-        };
-        if !self.ui.popup_open(naming()) {
-            self.new_icloud = None;
-            return;
-        }
-        let ui = &mut self.ui;
-        let theme = ui.theme.clone();
-        let row = theme.font_size * 2.0;
-        let entered =
-            ui::popup::navigation(ui, &[naming_field()], &[winit::keyboard::NamedKey::Enter])
-                .contains(&winit::keyboard::NamedKey::Enter);
-        ui.open_as(
-            naming(),
-            Spec {
-                axis: Axis::Y,
-                size: [px(320.0), children()],
-                fill: Some(theme.popup),
-                border: Some(theme.chip),
-                shadow: Some(theme.shadow),
-                radius: 8.0,
-                pad: [16.0, 12.0],
-                gap: 6.0,
-                anchor: Some(Anchor::Dialog),
-                role: Some(accesskit::Role::Dialog),
-                ..Spec::default()
-            },
-        );
-        if let Some(node) = ui.access(naming()) {
-            node.set_label("New iCloud Notebook");
-        }
-        ui.leaf(
-            "title",
-            Spec {
-                size: [fill(), px(row)],
-                text: Some("New iCloud Notebook"),
-                bold: true,
-                role: Some(accesskit::Role::Heading),
-                ..Spec::default()
-            },
-        );
-        ui::text_field(
-            ui,
-            naming_field(),
-            &mut dialog.name,
-            "",
-            Spec {
-                size: [fill(), px(row)],
-                fill: Some(theme.base),
-                border: Some(theme.accent),
-                radius: 4.0,
-                pad: [6.0, 0.0],
-                ..Spec::default()
-            },
-        );
-        crate::name(ui, naming_field(), "Name");
-        if let Some(problem) = &dialog.problem {
-            ui.leaf(
-                "problem",
-                Spec {
-                    size: [fill(), ui::fit()],
-                    text: Some(problem),
-                    overflow: ui::Overflow::Wrap,
-                    pad: [0.0, 4.0],
-                    role: Some(accesskit::Role::Status),
-                    ..Spec::default()
-                },
-            );
-        }
-        crate::buttons(ui);
-        let cancel = ui::button(ui, "cancel", "Cancel").clicked;
-        let create = ui::button(ui, "create", "Create").clicked || entered;
-        ui.close();
-        ui.close();
-        if cancel {
-            self.ui.close_popup(naming());
-            self.ui.set_focus(Some(crate::page()));
-            self.new_icloud = None;
-        } else if create {
-            let name = dialog.name.trim().to_owned();
-            let folder = crate::icloud::folder();
-            dialog.problem = match &folder {
-                None => Some("Turn on iCloud Drive in System Settings.".into()),
-                Some(_) if name.is_empty() => Some("Enter a name.".into()),
-                Some(_) if name.starts_with('.') || name.contains(['/', ':']) => {
-                    Some("Use a name without “/”, “:” or a leading “.”.".into())
-                }
-                Some(folder) if folder.join(&name).exists() => Some(format!(
-                    "“{name}” is already in iCloud Drive. Choose another name."
-                )),
-                Some(_) => None,
-            };
-            if let (None, Some(folder)) = (&dialog.problem, folder) {
-                self.ui.close_popup(naming());
-                self.new_icloud = None;
-                if let Err(error) = self.create_notebook(folder.join(name)) {
-                    platform::alert("Couldn't create the notebook", &error.to_string());
-                }
-            }
-        }
     }
 
     /// Lists the folders at the top of the app's iCloud Drive folder in the sidebar, each a

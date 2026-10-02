@@ -31,11 +31,9 @@ pub enum Action {
     /// Folds or unfolds a notebook's or section group's rows, by `Library::key`.
     Fold(String),
     NewNotebook,
-    NewICloudNotebook,
     OpenNotebook,
     /// Signs in again to the notebook opened from its server at this location.
     SignIn(String),
-    /// Opens the Options dialog, which macOS reaches from the application menu instead.
     Options,
     /// A row's context menu, opened here.
     Menu(Target, [f32; 2]),
@@ -251,23 +249,11 @@ fn sidebar(
             ..Spec::default()
         },
     );
-    let options = ("options", art::OPTIONS, "Options", Action::Options);
-    let icloud = crate::icloud::folder().map(|_| {
-        (
-            "new icloud",
-            art::ICLOUD,
-            "New iCloud Notebook",
-            Action::NewICloudNotebook,
-        )
-    });
-    for (part, icon, label, chosen) in icloud
-        .into_iter()
-        .chain([
-            ("new", art::PLUS, "New Notebook", Action::NewNotebook),
-            ("open", art::NOTEBOOK, "Open Existing", Action::OpenNotebook),
-        ])
-        .chain((!cfg!(target_os = "macos")).then_some(options))
-    {
+    for (part, icon, label, chosen) in [
+        ("new", art::PLUS, "New Notebook", Action::NewNotebook),
+        ("open", art::NOTEBOOK, "Open Existing", Action::OpenNotebook),
+        ("options", art::OPTIONS, "Options", Action::Options),
+    ] {
         let (row, _) = tree_row(
             ui,
             tree,
@@ -815,9 +801,6 @@ impl crate::State {
             }
             Some(Action::Renamed(keep)) => self.finish_renaming(keep),
             Some(Action::NewNotebook) => self.commands.push(crate::Command::NewNotebook),
-            Some(Action::NewICloudNotebook) => {
-                self.commands.push(crate::Command::NewICloudNotebook)
-            }
             Some(Action::OpenNotebook) => self.commands.push(crate::Command::OpenNotebook),
             Some(Action::SignIn(location)) => self
                 .commands
@@ -1174,44 +1157,35 @@ impl crate::State {
             theme.base,
             "No notebooks open",
             &servers,
-            crate::icloud::folder()
-                .map(|_| {
-                    (
-                        "icloud",
-                        art::ICLOUD,
-                        "New iCloud Notebook",
-                        crate::Command::NewICloudNotebook,
-                    )
-                })
-                .into_iter()
-                .chain([
-                    (
-                        "new",
-                        art::PLUS,
-                        "New Notebook",
-                        crate::Command::NewNotebook,
-                    ),
-                    (
-                        "open",
-                        art::NOTEBOOK,
-                        "Open Existing",
-                        crate::Command::OpenNotebook,
-                    ),
-                    (
-                        "server",
-                        art::SERVER,
-                        "Open Notebook from Server…",
-                        crate::Command::OpenFromServer(None),
-                    ),
-                ])
-                .chain(crate::guide::OFFERED.then_some((
-                    "guide",
-                    art::PAGE,
-                    "Open the Snowbound Guide",
-                    crate::Command::OpenGuide,
-                )))
-                .chain(install)
-                .collect(),
+            [
+                (
+                    "new",
+                    art::PLUS,
+                    "New Notebook",
+                    crate::Command::NewNotebook,
+                ),
+                (
+                    "open",
+                    art::NOTEBOOK,
+                    "Open Existing",
+                    crate::Command::OpenNotebook,
+                ),
+                (
+                    "server",
+                    art::SERVER,
+                    "Open Notebook from Server…",
+                    crate::Command::OpenFromServer(None),
+                ),
+            ]
+            .into_iter()
+            .chain(crate::guide::OFFERED.then_some((
+                "guide",
+                art::PAGE,
+                "Open the Snowbound Guide",
+                crate::Command::OpenGuide,
+            )))
+            .chain(install)
+            .collect(),
         );
     }
 

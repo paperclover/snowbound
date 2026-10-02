@@ -653,8 +653,6 @@ enum Command {
     OpenFromServer(Option<String>),
     /// Asks where to keep a new notebook and creates it.
     NewNotebook,
-    /// Asks for a name and creates a notebook at the top of the app's iCloud Drive folder.
-    NewICloudNotebook,
     /// Opens the Snowbound Guide from the user's documents, copying it there first.
     OpenGuide,
     /// Adds Snowbound to the app menu.
@@ -801,8 +799,6 @@ struct State {
     peers: Option<live::Peers>,
     /// Open Notebook from Server while it is open.
     server: Option<server::Connect>,
-    /// New iCloud Notebook while it is open.
-    new_icloud: Option<manage::Naming>,
     /// Notebooks in iCloud Drive a thread is reading, or following the download of, by
     /// location.
     icloud_reading: HashSet<String>,
@@ -1178,7 +1174,6 @@ impl State {
             #[cfg(feature = "live")]
             peers: None,
             server: None,
-            new_icloud: None,
             icloud_reading: HashSet::new(),
             tags: stored
                 .tags
@@ -1347,7 +1342,6 @@ impl State {
         self.themes_dialog();
         self.print_dialog();
         self.server_dialog();
-        self.new_icloud_dialog();
         self.link_dialog()?;
         self.properties_dialog();
         self.symbols_dialog();
@@ -3221,7 +3215,6 @@ impl State {
             ),
             Command::OpenFromServer(location) => self.open_server(location.as_deref()),
             Command::NewNotebook => self.new_notebook(),
-            Command::NewICloudNotebook => self.new_icloud_notebook(),
             Command::OpenGuide => self.open_guide()?,
             #[cfg(target_os = "linux")]
             Command::Install => desktop::install(),
