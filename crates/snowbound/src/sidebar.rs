@@ -1150,7 +1150,7 @@ impl crate::State {
 
     /// The window below the title bar on the first run, or once every notebook is closed:
     /// what is missing, and the ways to start.
-    pub(crate) fn welcome(&mut self, theme: &Theme) {
+    pub(crate) fn welcome(&mut self) {
         let id = self.ui.id("welcome");
         #[cfg(target_os = "linux")]
         let install = crate::desktop::installable().then_some((
@@ -1163,9 +1163,7 @@ impl crate::State {
         let install = None;
         let servers = self.servers.clone();
         self.notice(
-            theme,
             id,
-            theme.base,
             "No notebooks open",
             &servers,
             [
@@ -1202,7 +1200,7 @@ impl crate::State {
 
     /// The page's place while notebook `library` has no sections, as OneNote 2010 shows
     /// it, with a button to add one; or while none is on this computer yet.
-    pub(crate) fn no_sections(&mut self, theme: &Theme, library: Arc<Library>) {
+    pub(crate) fn no_sections(&mut self, library: Arc<Library>) {
         let downloading = library.downloading();
         let new = crate::Command::Structure(
             library,
@@ -1219,27 +1217,27 @@ impl crate::State {
                 vec![("new", art::PLUS, "New Section", new)],
             )
         };
-        self.notice(theme, id, theme.strip, title, &[], buttons);
+        self.notice(id, title, &[], buttons);
     }
 
-    /// A box `id` filled with `background`, showing `title` above `buttons` in its middle: each
+    /// A box `id` in the page's colours, showing `title` above `buttons` in its middle: each
     /// a part, an icon, a label and what it does; then the saved `servers` to reconnect to.
     fn notice(
         &mut self,
-        theme: &Theme,
         id: ui::Id,
-        background: [f32; 4],
         title: &str,
         servers: &[String],
         buttons: Vec<(&str, &'static [&'static str], &str, crate::Command)>,
     ) {
         const BUTTON: [f32; 2] = [240.0, 32.0];
+        let theme = self.page_area_theme();
+        let chrome = std::mem::replace(&mut self.ui.theme, theme.clone());
         let [left, top, right, bottom] = self.ui.rect(id).unwrap_or_default();
         self.ui.open_as(
             id,
             Spec {
                 size: [fill(), fill()],
-                fill: Some(background),
+                fill: Some(theme.paper),
                 ..Spec::default()
             },
         );
@@ -1292,6 +1290,7 @@ impl crate::State {
         let saved = crate::server::saved_servers(&mut self.ui, servers);
         self.ui.close();
         self.ui.close();
+        self.ui.theme = chrome;
         if let Some(saved) = saved {
             self.saved_server(saved);
         }

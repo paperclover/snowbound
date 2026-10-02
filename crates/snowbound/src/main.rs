@@ -1474,7 +1474,7 @@ impl State {
             && self.locked.is_none();
         self.toolbar(&theme, !welcome)?;
         if welcome {
-            self.welcome(&theme);
+            self.welcome();
             return Ok((section, Id::ROOT, None));
         }
         self.ui.open(
@@ -1704,7 +1704,7 @@ impl State {
             recycle::bar(&mut self.ui);
         }
         if self.session.is_none() && self.locked.is_some() {
-            self.locked_page(&theme);
+            self.locked_page();
             self.ui.close();
             self.ui.close();
             self.ui.close();
@@ -1717,7 +1717,7 @@ impl State {
             return Ok((section, open_tab, None));
         }
         if let Some(library) = self.sectionless.clone().filter(|_| self.session.is_none()) {
-            self.no_sections(&theme, library);
+            self.no_sections(library);
             self.ui.close();
             self.ui.close();
             self.ui.close();
@@ -4191,6 +4191,20 @@ impl State {
             ink: self.ui.theme.paper_ink,
         }
         .colored(self.view.editor.page_color())
+    }
+
+    /// The colours of what the page area shows in place of a page, which follow the page's:
+    /// the light theme's on white pages, as Pages Match UI Theme off keeps them in a dark
+    /// appearance.
+    pub(crate) fn page_area_theme(&self) -> Theme {
+        if self.light_pages {
+            Theme {
+                accent: self.ui.theme.accent,
+                ..Theme::light()
+            }
+        } else {
+            self.ui.theme.clone()
+        }
     }
 
     /// Paints the interface with the page in its box.

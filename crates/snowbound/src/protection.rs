@@ -2,7 +2,7 @@
 //! dialogs that unlock one and set, change or remove its password, Lock All, and locking a
 //! section after a while unused or as it is left. Keys live in memory only (`Library`).
 
-use crate::{Command, Library, State, Theme, art, manage::Structure};
+use crate::{Command, Library, State, art, manage::Structure};
 use accesskit::Role;
 use std::{error::Error, sync::Arc, time::Duration};
 use ui::{Anchor, Axis, Flags, Id, Spec, Ui, children, fill, px};
@@ -155,11 +155,13 @@ impl State {
     }
 
     /// The locked section's page, as OneNote 2010 draws it: a click or Enter unlocks.
-    pub(crate) fn locked_page(&mut self, theme: &Theme) {
+    pub(crate) fn locked_page(&mut self) {
         let Some(locked) = &self.locked else {
             return;
         };
         let (library, path) = (Arc::clone(&locked.library), locked.path.clone());
+        let theme = &self.page_area_theme();
+        let chrome = std::mem::replace(&mut self.ui.theme, theme.clone());
         let ui = &mut self.ui;
         let entered =
             ui::popup::navigation(ui, &[notice()], &[NamedKey::Enter]).contains(&NamedKey::Enter);
@@ -229,6 +231,7 @@ impl State {
         ui.close();
         ui.close();
         ui.close();
+        ui.theme = chrome;
         if ui.signal(open).clicked || entered {
             self.ask_password(library, path, Dialog::Unlock(Zeroizing::default(), false));
         }
