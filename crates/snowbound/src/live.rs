@@ -1,5 +1,5 @@
 //! Live presence in the window (feature `live`, on where `SNOWBOUND_LIVE` is `network` or
-//! `loopback`, or `SNOWBOUND_LIVE_RELAY` names a relay, `wss://live.example.net`): the others
+//! `loopback`, through the default relay unless `SNOWBOUND_LIVE_RELAY` names another or `off`): the others
 //! with the notebook open as avatars beside the search box, a dot on the tab of the page each
 //! has open, and their carets on the page, each in a colour of their own. They meet through
 //! the notebook's identity, or through `SNOWBOUND_LIVE_CODE` where it is set; through a relay,
@@ -27,6 +27,9 @@ pub(crate) struct Peers {
     pictures: HashMap<[u8; 16], Option<draw::RasterImage>>,
 }
 
+/// The relay used when `SNOWBOUND_LIVE_RELAY` names none; `off` keeps peers to the LAN.
+const DEFAULT_RELAY: &str = "wss://relay.snowbound.paperclover.net";
+
 fn reach() -> Option<Reach> {
     match std::env::var("SNOWBOUND_LIVE").ok()?.as_str() {
         "network" => Some(Reach::Network),
@@ -42,6 +45,11 @@ impl State {
         if reach.is_none() && relay.is_none() {
             return;
         }
+        let relay = match relay.as_deref() {
+            Some("off") => None,
+            Some(_) => relay,
+            None => Some(DEFAULT_RELAY.to_owned()),
+        };
         let room = match std::env::var("SNOWBOUND_LIVE_CODE") {
             Ok(code) => Some(Room::Code(code)),
             Err(_) => self

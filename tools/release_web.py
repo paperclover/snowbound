@@ -57,7 +57,7 @@ def environment():
 
 def build(out):
     """Writes index.html, the module, its JavaScript and the fonts to `out`."""
-    run(['cargo', 'build', '--locked', '-p', 'snowbound', '--release', '--target', 'wasm32-unknown-unknown',
+    run(['cargo', 'build', '--locked', '-p', 'snowbound', '--release', '--target', 'wasm32-unknown-unknown', '--no-default-features', '--features', 'wgpu',
          *PROFILE], env=environment())
     if out.exists():
         shutil.rmtree(out)
