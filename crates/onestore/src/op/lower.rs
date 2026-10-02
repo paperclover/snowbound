@@ -1901,7 +1901,22 @@ impl Lowering {
                 return Err(invalid("Text edits did not converge on the model"));
             }
             let fresh = !stored_texts.contains(&text.id);
-            for (range, set, clear) in format_edits(&stored.text, &text.text, fresh)? {
+            let edits = format_edits(&stored.text, &text.text, fresh)?;
+            // Math runs refuse formatting, so a style that restyled them is undone whole.
+            let math = |at: u32| {
+                stored
+                    .text
+                    .format_at(at + 1)
+                    .is_ok_and(|format| format.math == Some(true))
+            };
+            if edits.iter().any(|(range, ..)| range.clone().any(math)) {
+                self.emit(PageOp::Equation {
+                    text: stored.id,
+                    math: text.text.clone(),
+                })?;
+                continue;
+            }
+            for (range, set, clear) in edits {
                 self.emit(PageOp::Format {
                     text: stored.id,
                     range,

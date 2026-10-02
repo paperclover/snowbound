@@ -3320,3 +3320,54 @@ fn restyle_refuses_renames_and_missing_styles() {
         assert!(section.page(space).unwrap() == page);
     }
 }
+
+/// An equation's paragraph restyled in italics, then lowered back to the page before it, as
+/// undo does: the math runs a style left italic go back whole, since they refuse formatting.
+#[test]
+fn a_restyled_equation_lowers_back() {
+    let (_, source) = SOURCES.iter().find(|(name, _)| *name == "math").unwrap();
+    let space = pages(source)[0];
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, source.to_vec()).unwrap();
+    let before = section.page(space).unwrap();
+    let paragraph = model::lists(&before)
+        .into_iter()
+        .flat_map(|(_, _, list)| list.iter())
+        .find(|paragraph| {
+            paragraph
+                .text()
+                .is_some_and(|text| crate::page::Math::is_equation(&text.text))
+        })
+        .unwrap()
+        .id;
+    let style = PageOp::Style {
+        paragraph,
+        style: id(),
+        definition: Definition {
+            kind: Kind::Style {
+                name: Some("Quote".into()),
+                next: None,
+            },
+            format: Format {
+                italic: Some(true),
+                ..Default::default()
+            },
+        },
+    };
+    let edit = |ops: Vec<PageOp>| Edit {
+        at: AT,
+        ops: ops.into_iter().map(|op| Op::Page { space, op }).collect(),
+    };
+    section.apply("Author", &edit(vec![style])).unwrap();
+    let styled = section.page(space).unwrap();
+    section
+        .apply("Author", &edit(lower_page(&styled, &before).unwrap()))
+        .unwrap();
+    let after = section.page(space).unwrap();
+    assert_eq!(
+        normalize(&after),
+        normalize(&before),
+        "{}",
+        first_difference(&normalize(&after), &normalize(&before))
+    );
+}
