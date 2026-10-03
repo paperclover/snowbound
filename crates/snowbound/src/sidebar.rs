@@ -39,6 +39,8 @@ pub enum Action {
     Fold(String),
     NewNotebook,
     OpenNotebook,
+    #[cfg(feature = "live")]
+    OpenShared,
     /// Signs in again to the notebook opened from its server at this location.
     SignIn(String),
     Options,
@@ -272,6 +274,13 @@ fn sidebar(
             Leading::Notebook(art::NOTEBOOK, None),
             "Open Existing",
             Action::OpenNotebook,
+        ),
+        #[cfg(feature = "live")]
+        (
+            "shared",
+            Leading::Icon(art::LINK),
+            "Open Shared…",
+            Action::OpenShared,
         ),
         (
             "options",
@@ -843,6 +852,8 @@ impl crate::State {
             Some(Action::Renamed(keep)) => self.finish_renaming(keep),
             Some(Action::NewNotebook) => self.commands.push(crate::Command::NewNotebook),
             Some(Action::OpenNotebook) => self.commands.push(crate::Command::OpenNotebook),
+            #[cfg(feature = "live")]
+            Some(Action::OpenShared) => self.open_shared(),
             Some(Action::SignIn(location)) => self
                 .commands
                 .push(crate::Command::OpenFromServer(Some(location))),
@@ -1252,18 +1263,18 @@ impl crate::State {
                     "Open Existing",
                     crate::Command::OpenNotebook,
                 ),
-                (
-                    "server",
-                    Leading::Icon(art::SERVER),
-                    "Open Notebook from Server…",
-                    crate::Command::OpenFromServer(None),
-                ),
                 #[cfg(feature = "live")]
                 (
                     "shared",
                     Leading::Icon(art::LINK),
                     "Open Shared Notebook…",
                     crate::Command::OpenShared,
+                ),
+                (
+                    "server",
+                    Leading::Icon(art::SERVER),
+                    "Open Notebook from Server…",
+                    crate::Command::OpenFromServer(None),
                 ),
             ]
             .into_iter()

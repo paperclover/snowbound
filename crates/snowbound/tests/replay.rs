@@ -549,3 +549,36 @@ fn stop_sharing_ends_the_share() {
     let kept = std::fs::read_to_string(kept).unwrap_or_default();
     assert!(!kept.contains("code"), "still kept: {kept}");
 }
+
+/// Open Shared Notebook is where people look with notebooks open: in the sidebar's footer,
+/// and in the palette, which opens it.
+#[cfg(feature = "live")]
+#[test]
+fn open_shared_notebook_is_offered_with_notebooks_open() {
+    let scratch = Scratch::new("open-shared");
+    std::fs::write(
+        scratch.0.join("settings.json"),
+        r#"{"user_name": "Snowbound Test", "sidebar": true}"#,
+    )
+    .unwrap();
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
+    let mut steps = vec!["accessibility sidebar", "modifiers command shift", "key p"];
+    steps.extend([
+        "modifiers",
+        "settle",
+        "type Open Shared",
+        "settle",
+        "key Enter",
+    ]);
+    steps.extend(["settle", "accessibility dialog"]);
+    let variables = [("SNOWBOUND_LIVE", "off"), ("SNOWBOUND_LIVE_RELAY", "off")];
+    let [sidebar, dialog] = replay_with(&scratch, Some(&notebook), &steps, &variables)
+        .try_into()
+        .unwrap();
+    assert!(sidebar.contains(r#""Open Shared…""#), "{sidebar}");
+    assert!(
+        dialog.contains(r#"Dialog "Open Shared Notebook""#),
+        "{dialog}"
+    );
+}
