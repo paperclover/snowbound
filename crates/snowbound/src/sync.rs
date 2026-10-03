@@ -280,50 +280,13 @@ struct Picked {
     build_folder: bool,
     restart: bool,
     list_changes: bool,
+    check: bool,
 }
 
-/// What a newer build changes: `summary`, which unfolds the titles under their kinds when
-/// `listed`. Returns whether the summary was clicked.
-fn changes_list(ui: &mut Ui, summary: &str, changes: &update::Changes, listed: bool) -> bool {
+/// What a newer build changes, unfolded under the popup's foot while `listed`.
+fn changes_list(ui: &mut Ui, changes: &update::Changes, listed: bool) {
     let theme = ui.theme.clone();
     let line = theme.font_size * 1.6;
-    let toggle = ui.open(
-        "summary",
-        Spec {
-            flags: Flags::CLICKABLE,
-            size: [fill(), px(line)],
-            gap: 4.0,
-            role: Some(accesskit::Role::Button),
-            ..Spec::default()
-        },
-    );
-    if let Some(node) = ui.access(toggle) {
-        node.set_label(summary);
-        node.set_expanded(listed);
-    }
-    ui.leaf(
-        "label",
-        Spec {
-            size: [fit(), px(line)],
-            text: Some(summary),
-            overflow: Overflow::Ellipsis,
-            ..Spec::default()
-        },
-    );
-    ui.leaf(
-        "chevron",
-        Spec {
-            size: [fit(), px(line)],
-            icon: Some(if listed {
-                art::CHEVRON_UP
-            } else {
-                ui::shell::CHEVRON
-            }),
-            color: Some(theme.text_dim),
-            ..Spec::default()
-        },
-    );
-    ui.close();
     // Unfolds to the titles' height, scrolling past a few dozen lines.
     let list = ui.id("changes");
     let rows = ui
@@ -410,7 +373,126 @@ fn changes_list(ui: &mut Ui, summary: &str, changes: &update::Changes, listed: b
         ui.close();
         ui.close();
     }
-    ui.signal(toggle).clicked
+}
+
+/// The popup's foot, one row tall whatever the update's state: Check for Updates, or the
+/// newer build on its way or here, which unfolds what it changes, and what installs it.
+fn update_row(ui: &mut Ui, update: &update::Status, listed: bool, picked: &mut Picked) {
+    let theme = ui.theme.clone();
+    let height = theme.font_size * 2.0;
+    let changes = match update {
+        update::Status::Ready(_, _, changes) | update::Status::Available(_, changes) => {
+            Some(changes).filter(|changes| !changes.list.is_empty())
+        }
+        _ => None,
+    };
+    ui.open(
+        "update",
+        Spec {
+            size: [fill(), px(height)],
+            gap: 8.0,
+            ..Spec::default()
+        },
+    );
+    let note = match update {
+        update::Status::Downloading(_) => Some("Downloading update…"),
+        update::Status::Ready(..) => Some("Update ready"),
+        update::Status::Available(..) => Some("Update available"),
+        _ => None,
+    };
+    match note {
+        None => {
+            picked.check = ui
+                .leaf(
+                    "check",
+                    Spec {
+                        flags: Flags::CLICKABLE,
+                        size: [fit(), px(height)],
+                        icon: Some(art::UPDATE),
+                        text: Some("Check for Updates"),
+                        color: Some(theme.accent),
+                        role: Some(accesskit::Role::Link),
+                        ..Spec::default()
+                    },
+                )
+                .clicked;
+        }
+        Some(note) => {
+            let toggle = ui.open(
+                "note",
+                Spec {
+                    flags: if changes.is_some() {
+                        Flags::CLICKABLE
+                    } else {
+                        Flags::default()
+                    },
+                    size: [fit(), px(height)],
+                    gap: 4.0,
+                    role: changes.is_some().then_some(accesskit::Role::Button),
+                    ..Spec::default()
+                },
+            );
+            // The version and what it brings, which the row leaves to its tooltip.
+            let version =
+                update_note(update).map_or_else(String::new, |note| format!("Snowbound {note}"));
+            let summary = changes.and_then(update::summary);
+            if let Some(node) = ui.access(toggle) {
+                node.set_label(note);
+                node.set_description(version.as_str());
+                if changes.is_some() {
+                    node.set_expanded(listed);
+                }
+            }
+            ui.leaf(
+                "label",
+                Spec {
+                    size: [fit(), px(height)],
+                    text: Some(note),
+                    icon: Some(art::UPDATE),
+                    overflow: Overflow::Ellipsis,
+                    ..Spec::default()
+                },
+            );
+            if changes.is_some() {
+                ui.leaf(
+                    "chevron",
+                    Spec {
+                        size: [fit(), px(height)],
+                        icon: Some(if listed {
+                            art::CHEVRON_UP
+                        } else {
+                            ui::shell::CHEVRON
+                        }),
+                        color: Some(theme.text_dim),
+                        ..Spec::default()
+                    },
+                );
+            }
+            ui.close();
+            ui::popup::tooltip(ui, &version, "", summary.as_deref());
+            picked.list_changes = changes.is_some() && ui.signal(toggle).clicked;
+        }
+    }
+    ui.leaf(
+        "space",
+        Spec {
+            size: [fill(), px(1.0)],
+            ..Spec::default()
+        },
+    );
+    match update {
+        update::Status::Ready(..) => {
+            picked.restart = ui::button(ui, "restart", "Restart to Update").clicked;
+        }
+        update::Status::Available(..) => {
+            picked.build_folder = ui::button(ui, "build-folder", "Build Folder").clicked;
+        }
+        _ => {}
+    }
+    ui.close();
+    if let Some(changes) = changes {
+        changes_list(ui, changes, listed);
+    }
 }
 
 /// Lays out the open popup's contents.
@@ -872,48 +954,6 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
     }
     ui.close();
 
-    if let Some(note) = update_note(facts.update) {
-        rule(ui, "update-rule");
-        ui.open(
-            "update",
-            Spec {
-                axis: Axis::Y,
-                size: [fill(), children()],
-                gap: 4.0,
-                ..Spec::default()
-            },
-        );
-        text(ui, "note", &format!("Snowbound {note}"), theme.text);
-        if let update::Status::Ready(_, _, changes) | update::Status::Available(_, changes) =
-            facts.update
-            && let Some(summary) = update::summary(changes)
-        {
-            picked.list_changes = changes_list(ui, &summary, changes, facts.changes_listed);
-        }
-        ui.open(
-            "actions",
-            Spec {
-                size: [fill(), children()],
-                pad: [0.0, 4.0],
-                gap: 8.0,
-                ..Spec::default()
-            },
-        );
-        ui.leaf(
-            "space",
-            Spec {
-                size: [fill(), px(1.0)],
-                ..Spec::default()
-            },
-        );
-        picked.build_folder = ui::button(ui, "build-folder", "Build Folder").clicked;
-        if matches!(facts.update, update::Status::Ready(..)) {
-            picked.restart = ui::button(ui, "restart", "Restart to Update").clicked;
-        }
-        ui.close();
-        ui.close();
-    }
-
     ui.open(
         "controls",
         Spec {
@@ -957,6 +997,8 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
     picked.show_file = button(ui, "show-file", platform::SHOW_FILE, facts.local);
     picked.sync_now = button(ui, "sync-now", "Sync Now", !facts.offline);
     ui.close();
+    rule(ui, "update-rule");
+    update_row(ui, facts.update, facts.changes_listed, &mut picked);
     picked
 }
 
@@ -1113,6 +1155,7 @@ impl State {
             }
             _ if picked.restart => self.restart_to_update(),
             _ if picked.list_changes => self.updates.changes_listed ^= true,
+            _ if picked.check => self.updates.check_now(),
             _ => {}
         }
         Ok(())
@@ -1446,6 +1489,16 @@ mod tests {
                 update: ready(false),
                 ..facts(sections(|_| status(true, 0, None)))
             }),
+            ("downloading", || Facts {
+                update: Box::leak(Box::new(update::Status::Downloading(
+                    update::Version::parse("2026-10-01-r5").unwrap(),
+                ))),
+                ..facts(sections(|_| status(true, 0, None)))
+            }),
+            ("available", || Facts {
+                update: available(),
+                ..facts(sections(|_| status(true, 0, None)))
+            }),
             ("update-listed", || Facts {
                 update: ready(true),
                 changes_listed: true,
@@ -1470,6 +1523,39 @@ mod tests {
             std::path::PathBuf::new(),
             update::Changes { list, more },
         )))
+    }
+
+    /// The build `ready` brings, newer than one that can't install it itself.
+    fn available() -> &'static update::Status {
+        let update::Status::Ready(version, _, changes) = ready(false) else {
+            unreachable!()
+        };
+        Box::leak(Box::new(update::Status::Available(
+            version.clone(),
+            changes.clone(),
+        )))
+    }
+
+    /// The popup stands as tall with an update on its way, here or none: its foot reads
+    /// Check for Updates or holds the update in the same row.
+    #[test]
+    fn an_update_keeps_the_popup_its_height() {
+        let heights: Vec<(&str, f32)> = states()
+            .into_iter()
+            .filter(|(name, _)| ["up-to-date", "downloading", "available", "update"].contains(name))
+            .map(|(name, made)| {
+                let mut ui = ui(Appearance::Light);
+                let mut now = Instant::now();
+                settle(&mut ui, &mut now, &made());
+                let [_, top, _, bottom] = ui.rect(id()).unwrap();
+                (name, bottom - top)
+            })
+            .collect();
+        assert_eq!(heights.len(), 4);
+        assert!(
+            heights.windows(2).all(|pair| pair[0].1 == pair[1].1),
+            "{heights:?}"
+        );
     }
 
     /// Work offline's switch, and everything below it, stays put as it turns on and off.
