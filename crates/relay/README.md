@@ -86,8 +86,13 @@ code (`/7KQ-4MZ-9XR`, read as loosely as the app reads one) a page that opens it
 `snowbound://join/<code>`, and in the web build where `--web` names where (once the web build
 joins shares). Anything else under the folder is a file; `/` is its `index.html`. A build's
 module and JavaScript sit in `b/<hash>/` and are cached for good; `index.html` and the
-codes' pages are checked on every load, and the rest (fonts, dictionaries) for a day. It
-holds no state.
+codes' pages are checked on every load, and the rest (fonts, dictionaries) for a day.
+
+`POST /crash` takes a crash report the app sends when its user chooses Send Report: plain
+text or JSON up to 64 KB, ten an hour from one address and 500 an hour in all, each kept as
+a file named for when it came (`2026-10-03T21-04-05Z-1a2b3c4d.txt`) in `--crashes`, by
+default `crashes` beside the root. Nothing else is kept, and nothing sent comes back. Behind
+a proxy, `--trust-forwarded true` counts senders by the address it adds, as the relay does.
 
 `python3 tools/release_web.py --deploy` builds the web app and the site for the VPS's
 architecture, copies the build into `~/snowbound-web/site/` (keeping the last three builds'
@@ -99,7 +104,7 @@ ssh vps
 mkdir -p ~/snowbound-web/site
 # after the first `release_web.py --deploy` has put the binary there:
 pm2 start ~/snowbound-web/snowbound-site --name snowbound-site -- \
-    --listen 127.0.0.1:23593 --root "$HOME/snowbound-web/site"
+    --listen 127.0.0.1:23593 --root "$HOME/snowbound-web/site" --trust-forwarded true
 pm2 save
 ```
 
@@ -112,7 +117,8 @@ snowbound.paperclover.net {
 }
 ```
 
-`snowbound-site.service` runs it under systemd instead (`--root /srv/snowbound/web`).
+`snowbound-site.service` runs it under systemd instead (`--root /srv/snowbound/web`, the
+reports in `/var/lib/snowbound-site`).
 `snowbound-site --help` lists the options, each also `SNOWBOUND_SITE_<OPTION>`.
 
 ## Options

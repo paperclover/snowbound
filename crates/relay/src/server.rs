@@ -6,7 +6,7 @@ use crate::{BROADCAST, GROUP, Notice, SLOT, Verdict, ws};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     io::{BufReader, Write},
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, TcpListener, TcpStream},
+    net::{IpAddr, Shutdown, TcpListener, TcpStream},
     ops::RangeInclusive,
     sync::{
         Arc, Condvar, Mutex,
@@ -209,7 +209,7 @@ impl Relay {
 
     /// Answers the request `head`: whether the connection serves another.
     fn request(&self, stream: &TcpStream, reader: &mut BufReader<TcpStream>, head: &str) -> bool {
-        let address = self.address(stream, head);
+        let address = crate::peer(stream, head, self.config.trust_forwarded);
         let target = head.split(' ').nth(1).unwrap_or_default();
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
         if let Some(id) = path.strip_prefix("/v1/poll/") {
@@ -374,27 +374,6 @@ impl Relay {
                 poll.slot,
                 Instant::now(),
             );
-        }
-    }
-
-    /// Where a peer counts: the address it connected from, or its proxy says it did.
-    fn address(&self, stream: &TcpStream, head: &str) -> IpAddr {
-        let forwarded = ws::header(head, "X-Forwarded-For")
-            .filter(|_| self.config.trust_forwarded)
-            .and_then(|value| value.rsplit(',').next()?.trim().parse().ok());
-        let ip = forwarded
-            .or_else(|| stream.peer_addr().ok().map(|address| address.ip()))
-            .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-        match ip {
-            IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-                Some(v4) => IpAddr::V4(v4),
-                // One subscriber is usually given a whole /64.
-                None => {
-                    let [a, b, c, d, ..] = v6.segments();
-                    IpAddr::V6(Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0))
-                }
-            },
-            v4 => v4,
         }
     }
 
@@ -1082,25 +1061,15 @@ mod tests {
 
     #[test]
     fn ipv6_addresses_count_by_their_64() {
-        let relay = Relay {
-            config: Config {
-                trust_forwarded: true,
-                ..Config::default()
-            },
-            state: Mutex::default(),
-            connections: AtomicUsize::new(0),
-            relayed: Default::default(),
-            started: Instant::now(),
-        };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let stream = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
         let head = "GET / HTTP/1.1\r\nX-Forwarded-For: 1.2.3.4, 2001:db8:1:2:3:4:5:6\r\n\r\n";
         assert_eq!(
-            relay.address(&stream, head),
+            crate::peer(&stream, head, true),
             "2001:db8:1:2::".parse::<IpAddr>().unwrap()
         );
         assert_eq!(
-            relay.address(&stream, "GET / HTTP/1.1\r\n\r\n"),
+            crate::peer(&stream, head, false),
             "127.0.0.1".parse::<IpAddr>().unwrap()
         );
     }

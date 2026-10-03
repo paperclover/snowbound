@@ -1,4 +1,5 @@
-//! The site as shipped: a code's page, the web build's files, nothing outside them.
+//! The site as shipped: a code's page, the web build's files, nothing outside them, and crash
+//! reports kept.
 
 use std::{
     io::{BufRead, BufReader, Read, Write},
@@ -36,11 +37,26 @@ impl Site {
     }
 
     fn get(&self, path: &str) -> String {
+        self.send(format!("GET {path} HTTP/1.1\r\nHost: site\r\n\r\n").as_bytes())
+    }
+
+    /// The status line answering a crash report of `body` as `kind`, with `extra` headers.
+    fn report(&self, kind: &str, body: &str, extra: &str) -> String {
+        let request = format!(
+            "POST /crash HTTP/1.1\r\nHost: site\r\nContent-Type: {kind}\r\nContent-Length: {}\r\n{extra}\r\n{body}",
+            body.len()
+        );
+        let response = self.send(request.as_bytes());
+        assert!(!response.contains(body), "{response}");
+        response.lines().next().unwrap().to_owned()
+    }
+
+    fn send(&self, request: &[u8]) -> String {
         let mut stream = TcpStream::connect(self.address).unwrap();
-        write!(stream, "GET {path} HTTP/1.1\r\nHost: site\r\n\r\n").unwrap();
-        let mut response = String::new();
-        stream.read_to_string(&mut response).unwrap();
-        response
+        stream.write_all(request).unwrap();
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response);
+        String::from_utf8_lossy(&response).into_owned()
     }
 }
 
@@ -104,4 +120,78 @@ fn a_code_gets_its_page_and_the_web_build_its_files() {
         page.contains(&format!("https://snowbound.paperclover.net/?join={code}")),
         "{page}"
     );
+}
+
+#[test]
+fn crash_reports_are_kept_small_and_few_and_never_echoed() {
+    let folder = tempfile::tempdir().unwrap();
+    let root = folder.path().join("web");
+    std::fs::create_dir_all(&root).unwrap();
+    let site = Site::start(&root, &["--trust-forwarded", "true"]);
+    let report = "Snowbound 2026-10-03-r46\npanicked at crates/canvas/src/view.rs:1:1";
+    assert_eq!(
+        site.report("text/plain; charset=utf-8", report, ""),
+        "HTTP/1.1 200 OK"
+    );
+    // Kept beside the root, as sent, under a name that sorts by when it came.
+    let crashes = folder.path().join("crashes");
+    let kept: Vec<_> = std::fs::read_dir(&crashes)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(kept.len(), 1);
+    assert_eq!(std::fs::read_to_string(&kept[0]).unwrap(), report);
+    let name = kept[0].file_name().unwrap().to_str().unwrap();
+    assert!(name.starts_with("20") && name.ends_with(".txt"), "{name}");
+
+    assert_eq!(
+        site.report("application/json", r#"{"panic":"x"}"#, ""),
+        "HTTP/1.1 200 OK"
+    );
+    assert_eq!(
+        site.report("text/html", "<p>no</p>", ""),
+        "HTTP/1.1 415 Unsupported Media Type"
+    );
+    // Refused from its head alone, before any of it is read.
+    let large = site.send(
+        format!(
+            "POST /crash HTTP/1.1\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
+            relay::site::REPORT + 1
+        )
+        .as_bytes(),
+    );
+    assert!(large.starts_with("HTTP/1.1 413"), "{large}");
+    let chunked = site.send(
+        b"POST /crash HTTP/1.1\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nabc\r\n0\r\n\r\n",
+    );
+    assert!(chunked.starts_with("HTTP/1.1 411"), "{chunked}");
+    assert_eq!(site.report("text/plain", "\u{fffd}", ""), "HTTP/1.1 200 OK");
+    let invalid = site.send(
+        b"POST /crash HTTP/1.1\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n\xff\xfe",
+    );
+    assert!(invalid.starts_with("HTTP/1.1 400"), "{invalid}");
+
+    // One sender is held to a few an hour; another, by the proxy's word, still gets in.
+    let sent = (0..relay::site::PER_ADDRESS)
+        .map(|_| site.report("text/plain", "again", ""))
+        .filter(|status| status == "HTTP/1.1 200 OK")
+        .count();
+    assert_eq!(sent, relay::site::PER_ADDRESS - 4);
+    assert_eq!(
+        site.report("text/plain", "again", ""),
+        "HTTP/1.1 429 Too Many Requests"
+    );
+    assert_eq!(
+        site.report(
+            "text/plain",
+            "elsewhere",
+            "X-Forwarded-For: 203.0.113.9\r\n"
+        ),
+        "HTTP/1.1 200 OK"
+    );
+    assert_eq!(
+        std::fs::read_dir(&crashes).unwrap().count(),
+        relay::site::PER_ADDRESS
+    );
+    assert!(site.get("/crash").starts_with("HTTP/1.1 404"));
 }

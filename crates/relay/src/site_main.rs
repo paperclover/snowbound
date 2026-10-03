@@ -6,13 +6,16 @@ use std::{net::TcpListener, path::PathBuf, process::ExitCode};
 const USAGE: &str = "\
 usage: snowbound-site [OPTION VALUE]...
 
-Each option may also come from the environment as SNOWBOUND_SITE_<OPTION>, upper case:
-SNOWBOUND_SITE_ROOT=/srv/snowbound/web. Flags win.
+Each option may also come from the environment as SNOWBOUND_SITE_<OPTION>, upper case with
+underscores: SNOWBOUND_SITE_ROOT=/srv/snowbound/web. Flags win.
 
   --listen ADDRESS    where to listen (127.0.0.1:23593)
   --root FOLDER       the web build's folder (web)
   --web URL           where Open in Web goes, the code appended, as
                       https://snowbound.paperclover.net/?join= (none: no Open in Web)
+  --crashes FOLDER    where crash reports are kept (crashes, beside the root)
+  --trust-forwarded true|false
+                      count senders by X-Forwarded-For, behind a proxy (false)
 ";
 
 fn main() -> ExitCode {
@@ -20,9 +23,13 @@ fn main() -> ExitCode {
     let mut site = Site {
         root: PathBuf::from("web"),
         web: None,
+        crashes: PathBuf::new(),
+        trust_forwarded: false,
     };
+    let mut crashes = None;
     let from_environment = std::env::vars().filter_map(|(key, value)| {
-        Some((key.strip_prefix("SNOWBOUND_SITE_")?.to_lowercase(), value))
+        let option = key.strip_prefix("SNOWBOUND_SITE_")?;
+        Some((option.to_lowercase().replace('_', "-"), value))
     });
     let mut arguments = std::env::args().skip(1);
     let mut from_flags = Vec::new();
@@ -42,12 +49,21 @@ fn main() -> ExitCode {
             "listen" => listen = value,
             "root" => site.root = PathBuf::from(value),
             "web" => site.web = Some(value).filter(|web| !web.is_empty()),
+            "crashes" => crashes = Some(PathBuf::from(value)),
+            "trust-forwarded" => match value.parse() {
+                Ok(trust) => site.trust_forwarded = trust,
+                Err(_) => {
+                    eprintln!("--trust-forwarded {value}: true or false\n\n{USAGE}");
+                    return ExitCode::from(2);
+                }
+            },
             _ => {
                 eprintln!("--{option}: no such option\n\n{USAGE}");
                 return ExitCode::from(2);
             }
         }
     }
+    site.crashes = crashes.unwrap_or_else(|| site.root.with_file_name("crashes"));
     let listener = match TcpListener::bind(&listen) {
         Ok(listener) => listener,
         Err(error) => {

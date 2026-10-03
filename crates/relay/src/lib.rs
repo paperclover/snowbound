@@ -23,7 +23,33 @@ pub mod server;
 pub mod site;
 pub mod ws;
 
-use std::{fmt, str::FromStr};
+use std::{
+    fmt,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpStream},
+    str::FromStr,
+};
+
+/// Where a request counts against limits: the address it connected from, or with
+/// `trust_forwarded` the one its proxy says, an IPv6 address by its /64.
+pub fn peer(stream: &TcpStream, head: &str, trust_forwarded: bool) -> IpAddr {
+    let forwarded = ws::header(head, "X-Forwarded-For")
+        .filter(|_| trust_forwarded)
+        .and_then(|value| value.rsplit(',').next()?.trim().parse().ok());
+    let ip = forwarded
+        .or_else(|| stream.peer_addr().ok().map(|address| address.ip()))
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            // One subscriber is usually given a whole /64.
+            None => {
+                let [a, b, c, d, ..] = v6.segments();
+                IpAddr::V6(Ipv6Addr::new(a, b, c, d, 0, 0, 0, 0))
+            }
+        },
+        v4 => v4,
+    }
+}
 
 /// The bytes before a binary message's payload: the slot it goes to or came from.
 pub const SLOT: usize = 4;
