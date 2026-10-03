@@ -579,6 +579,10 @@ fn choose(
             return Some((mode, index));
         }
         state(ui, id).submenu = Some((matches.key(row), Some(ui.now)));
+    } else if role == Role::Menu && !typed.is_empty() && keys.contains(&NamedKey::Enter) {
+        // Enter on a menu offering nothing for what was typed leaves things as they were.
+        ui.close_popup(id);
+        return None;
     }
     let popup = state(ui, id);
     popup.query = query;

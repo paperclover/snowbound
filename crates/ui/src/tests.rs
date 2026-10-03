@@ -1545,15 +1545,18 @@ fn typing_filters_to_the_best_matches_first() {
 }
 
 #[test]
-fn nothing_matching_leaves_nothing_to_choose() {
+fn nothing_matching_leaves_nothing_to_choose_and_enter_leaves_the_menu() {
     let mut ui = open_menu(Some("Filter"));
     ui.event(typed("z"));
     menu_frame(&mut ui, BELOW, Some("Filter"));
     ui.event(key(NamedKey::ArrowDown));
-    ui.event(key(NamedKey::Enter));
     let (_, chosen) = menu_frame(&mut ui, BELOW, Some("Filter"));
     assert_eq!(chosen, None);
     assert!(ui.popup_open(menu_id()));
+    ui.event(key(NamedKey::Enter));
+    let (_, chosen) = menu_frame(&mut ui, BELOW, Some("Filter"));
+    assert_eq!(chosen, None);
+    assert!(!ui.popup_open(menu_id()));
 }
 
 #[test]

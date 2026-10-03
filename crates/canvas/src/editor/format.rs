@@ -356,6 +356,10 @@ pub struct FormatState {
     pub tags: Vec<(NoteTag, u16)>,
     /// The stored name of the paragraph style every selected paragraph shares.
     pub style: Option<String>,
+    /// The font and size the selected paragraphs' style gives, or else the Default font,
+    /// where they share one: what their text is in without formatting of its own.
+    pub style_font: Option<String>,
+    pub style_size: Option<f32>,
 }
 
 impl Toggle {
@@ -703,6 +707,11 @@ impl CanvasEditor {
                 .iter()
                 .all(|node| self.list(node).as_ref() == Some(&kind))
         };
+        let styled = |node: &&PageParagraph| {
+            (node.style.as_ref())
+                .and_then(|style| self.definitions.get(style))
+                .map(|definition| &definition.format)
+        };
         Ok(FormatState {
             toggles: Toggle::ALL
                 .into_iter()
@@ -753,6 +762,20 @@ impl CanvasEditor {
                     Kind::Style { name, .. } => name.clone(),
                     _ => None,
                 }
+            })),
+            style_font: common(paragraphs.iter().map(|node| {
+                Some(
+                    styled(node)
+                        .and_then(|format| format.font.clone())
+                        .unwrap_or_else(|| self.default_font.face.clone()),
+                )
+            })),
+            style_size: common(paragraphs.iter().map(|node| {
+                Some(
+                    styled(node)
+                        .and_then(|format| format.font_size)
+                        .unwrap_or(self.default_font.size),
+                )
             })),
         })
     }
@@ -2665,6 +2688,8 @@ mod tests {
                     (NoteTag::defaults()[2].clone(), 2)
                 ],
                 style: state.style.clone(),
+                style_font: state.style_font.clone(),
+                style_size: state.style_size,
             }
         );
         // Format Painter, a gallery tag and an inserted table write as well.

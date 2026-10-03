@@ -2331,6 +2331,11 @@ impl State {
                 current: *name == Some(font.as_str()),
                 heading: name.is_none(),
                 separated: *separated,
+                shortcut: if name.is_some() && *name == state.style_font.as_deref() {
+                    "Default"
+                } else {
+                    ""
+                },
                 ..Default::default()
             })
             .collect();
@@ -2344,26 +2349,45 @@ impl State {
         let combo = ui.id("size");
         let menu = toolbar_popup("size");
         ui::shell::combo(ui, "size", "Font Size", &size, 44.0, menu, fonts_apply);
-        // A size typed in the field joins the list, in half points as stored.
-        let mut sizes = SIZES.to_vec();
-        if let Some(typed) = ui::popup::query(ui, toolbar_popup("size"))
-            .and_then(|query| query.trim().parse::<f32>().ok())
-            .map(|typed| (typed * 2.0).round() / 2.0)
-            .filter(|typed| onestore::FONT_SIZES.contains(typed) && !sizes.contains(typed))
-        {
-            let at = sizes.partition_point(|size| *size < typed);
-            sizes.insert(at, typed);
-        }
+        // A number typed offers that size alone, cut to the half point below, or else the
+        // range OneNote 2010 takes, as the lab's OneNote 2010 does.
+        let typed = ui::popup::query(ui, toolbar_popup("size")).map(str::trim);
+        let number = typed.and_then(|typed| typed.parse::<f32>().ok());
+        let sizes = match number.map(|typed| (typed * 2.0).floor() / 2.0) {
+            Some(typed) if onestore::FONT_SIZES.contains(&typed) => vec![typed],
+            Some(_) => Vec::new(),
+            None => SIZES.to_vec(),
+        };
         let labels: Vec<_> = sizes.iter().map(|size| format!("{size}")).collect();
-        let items: Vec<_> = labels
+        let mut items: Vec<_> = labels
             .iter()
-            .map(|label| ui::popup::Item {
+            .zip(&sizes)
+            .map(|(label, points)| ui::popup::Item {
                 text: label,
                 checked: Some(*label == size),
                 current: *label == size,
+                shortcut: if state.style_size == Some(*points) {
+                    "Default"
+                } else {
+                    ""
+                },
+                fallback: number.is_some(),
                 ..Default::default()
             })
             .collect();
+        let range = format!(
+            "Type a size from {} to {}",
+            onestore::FONT_SIZES.start(),
+            onestore::FONT_SIZES.end()
+        );
+        if items.is_empty() || typed.is_some_and(|typed| !typed.is_empty()) && number.is_none() {
+            items.push(ui::popup::Item {
+                text: &range,
+                disabled: true,
+                fallback: true,
+                ..Default::default()
+            });
+        }
         let anchor = ui::Anchor::Over(ui.rect(combo).unwrap_or_default());
         if let Some(index) = ui::popup::menu(ui, toolbar_popup("size"), anchor, &items, Some(&size))
         {
