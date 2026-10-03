@@ -84,6 +84,7 @@ uint8_t sb_view_target(const View *view, float x, float y);
 void sb_view_pressure(View *view, float pressure);
 void sb_set_snap_to_grid(bool on);
 void sb_set_default_font(const char *face, float size);
+void sb_set_markdown_shortcuts(bool on);
 bool sb_view_press(View *view, float x, float y);
 bool sb_view_drag(View *view, float x, float y);
 bool sb_view_release(View *view);

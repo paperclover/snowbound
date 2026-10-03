@@ -71,8 +71,8 @@ enum Appearance {
     }
 }
 
-/// OneNote's Snap To Grid and Default font, kept between launches, which the pages opened
-/// from then on take.
+/// OneNote's Snap To Grid and Default font, and Markdown Shortcuts, kept between launches,
+/// which the pages opened from then on take.
 enum Editing {
     /// OneNote 2010's Default font sizes, in points.
     static let sizes: [Float] = [8, 9, 9.5, 10, 10.5, 11, 11.5, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72]
@@ -82,6 +82,14 @@ enum Editing {
         get { !UserDefaults.standard.bool(forKey: "ignoreGrid") }
         set {
             UserDefaults.standard.set(!newValue, forKey: "ignoreGrid")
+            apply()
+        }
+    }
+
+    static var markdownShortcuts: Bool {
+        get { !UserDefaults.standard.bool(forKey: "ignoreMarkdown") }
+        set {
+            UserDefaults.standard.set(!newValue, forKey: "ignoreMarkdown")
             apply()
         }
     }
@@ -105,6 +113,16 @@ enum Editing {
     static func apply() {
         sb_set_snap_to_grid(snapToGrid)
         sb_set_default_font(face, size)
+        sb_set_markdown_shortcuts(markdownShortcuts)
+    }
+
+    /// Markdown Shortcuts: typed Markdown becomes formatting.
+    static func markdownAction() -> UIAction {
+        let action = UIAction(title: "Markdown Shortcuts", image: UIImage(systemName: "number")) { _ in
+            markdownShortcuts.toggle()
+        }
+        action.state = markdownShortcuts ? .on : .off
+        return action
     }
 
     /// Options' Default font: the face and size new text takes.

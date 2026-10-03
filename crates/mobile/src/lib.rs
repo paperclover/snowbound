@@ -154,7 +154,10 @@ impl Canvas {
         );
         page.touch = true;
         page.host_viewport = true;
-        (page.snap_to_grid, page.editor.default_font) = options().clone();
+        let markdown;
+        (page.snap_to_grid, page.editor.default_font, markdown) = options().clone();
+        page.editor.markdown =
+            markdown.then(|| notebook::sidecar::themes::built_in().swap_remove(0).sheet());
         Ok(Self {
             page,
             space,
@@ -636,12 +639,12 @@ fn pool_engine(engine: TextEngine) {
     }
 }
 
-/// The reader's Snap To Grid and Default font, which every page opened from then on takes,
-/// and new pages' titles the font's face.
-static OPTIONS: LazyLock<Mutex<(bool, canvas::editor::DefaultFont)>> =
-    LazyLock::new(|| Mutex::new((true, canvas::editor::DefaultFont::default())));
+/// The reader's Snap To Grid, Default font and Markdown Shortcuts, which every page opened
+/// from then on takes, and new pages' titles the font's face.
+static OPTIONS: LazyLock<Mutex<(bool, canvas::editor::DefaultFont, bool)>> =
+    LazyLock::new(|| Mutex::new((true, canvas::editor::DefaultFont::default(), true)));
 
-fn options() -> MutexGuard<'static, (bool, canvas::editor::DefaultFont)> {
+fn options() -> MutexGuard<'static, (bool, canvas::editor::DefaultFont, bool)> {
     OPTIONS.lock().unwrap_or_else(|error| error.into_inner())
 }
 
@@ -662,6 +665,12 @@ pub unsafe extern "C" fn sb_set_default_font(face: *const c_char, size: f32) {
         size,
         color: None,
     };
+}
+
+/// Markdown Shortcuts: typed Markdown becomes formatting.
+#[unsafe(no_mangle)]
+pub extern "C" fn sb_set_markdown_shortcuts(on: bool) {
+    options().2 = on;
 }
 
 pub struct View {

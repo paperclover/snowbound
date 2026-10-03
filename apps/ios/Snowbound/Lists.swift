@@ -131,6 +131,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
                     })
                 actions.append(Appearance.menu())
                 actions.append(Editing.fontMenu())
+                actions.append(Editing.markdownAction())
                 provide(actions)
             }
         ])

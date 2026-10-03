@@ -69,6 +69,8 @@ pub enum Id {
     FullPageView,
     /// OneNote's Hide Spelling Errors, which leaves misspelled words unmarked.
     HideSpelling,
+    /// Typed Markdown becomes formatting.
+    MarkdownShortcuts,
     /// The Spelling pane, on the next marked word.
     Spelling,
     PageColor,
@@ -126,6 +128,11 @@ pub enum Id {
 /// one it can't.
 pub fn offered(id: Id) -> bool {
     id != Id::ScreenClipping || cfg!(target_os = "macos")
+}
+
+/// What the editor's Markdown shortcuts take: OneNote 2010's gallery styles when `on`.
+pub fn markdown(on: bool) -> Option<BTreeMap<String, onestore::page::Definition>> {
+    on.then(|| notebook::sidecar::themes::built_in().swap_remove(0).sheet())
 }
 
 /// What a menu or toolbar offers: a command, or one of a list's entries.
@@ -372,6 +379,7 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::PageList, "Page List", NONE, NONE),
     row!(Id::PagesMatchTheme, "Pages Match UI Theme", NONE, NONE),
     row!(Id::HideSpelling, "Hide Spelling Errors", NONE, NONE),
+    row!(Id::MarkdownShortcuts, "Markdown Shortcuts", NONE, NONE),
     row!(
         Id::Spelling,
         "Spelling…",
@@ -1259,6 +1267,10 @@ impl State {
                 enabled: !modal && self.spelling.is_some(),
                 checked: Some(self.hide_spelling),
             },
+            Id::MarkdownShortcuts => Status {
+                enabled: !modal,
+                checked: Some(self.view.editor.markdown.is_some()),
+            },
             Id::Spelling => enabled(text && self.view.spelling.is_some()),
             Id::FormatPainter => Status {
                 enabled: text,
@@ -1625,6 +1637,11 @@ impl State {
             }
             Id::SnapToGrid => {
                 self.view.snap_to_grid = !self.view.snap_to_grid;
+                self.save_settings();
+                return Ok(());
+            }
+            Id::MarkdownShortcuts => {
+                self.view.editor.markdown = markdown(self.view.editor.markdown.is_none());
                 self.save_settings();
                 return Ok(());
             }

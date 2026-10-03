@@ -363,6 +363,7 @@ impl PageView {
         scene: Option<(PageScene, [f32; 2])>,
     ) -> CanvasEditor {
         editor.default_font = std::mem::take(&mut self.editor.default_font);
+        editor.markdown = self.editor.markdown.take();
         let left = std::mem::replace(&mut self.editor, editor);
         self.scene = scene;
         self.drag = None;

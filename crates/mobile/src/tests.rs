@@ -742,15 +742,20 @@ fn tapping_the_date_asks_for_it_and_a_new_date_is_stored() {
 }
 
 #[test]
-fn pages_open_with_the_snap_and_default_font_options_set() {
-    // OneNote's defaults, so pages other tests open meanwhile see no change.
+fn pages_open_with_the_snap_default_font_and_markdown_options_set() {
+    // The defaults, so pages other tests open meanwhile see no change.
     sb_set_snap_to_grid(true);
     unsafe { sb_set_default_font(c"Calibri".as_ptr(), 11.0) };
-    assert_eq!(*options(), (true, canvas::editor::DefaultFont::default()));
+    sb_set_markdown_shortcuts(true);
+    assert_eq!(
+        *options(),
+        (true, canvas::editor::DefaultFont::default(), true)
+    );
     let (_directory, section) = features();
     let canvas = canvas(&section, "Paragraph controls");
     assert!(canvas.page.snap_to_grid);
     assert_eq!(canvas.page.editor.default_font.face, "Calibri");
+    assert!(canvas.page.editor.markdown.is_some());
 }
 
 #[test]

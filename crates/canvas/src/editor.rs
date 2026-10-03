@@ -32,6 +32,7 @@ mod format;
 mod html;
 mod ink;
 mod link;
+mod markdown;
 mod ops;
 pub(crate) mod page;
 mod recording;
@@ -179,6 +180,12 @@ pub struct CanvasEditor {
     /// The paragraph styles the page's theme gives, by stored name: new text takes its `p`,
     /// and Enter a NextStyle the page lacks from here.
     pub styles: BTreeMap<String, Definition>,
+    /// OneNote 2010's gallery styles, which Markdown shortcuts apply where the page's theme
+    /// gives none; none turns the shortcuts off.
+    pub markdown: Option<BTreeMap<String, Definition>>,
+    /// The outline, caret and undo depth a paragraph's Markdown marker left, where Backspace
+    /// takes it back.
+    formatted: Option<(ExGuid, TextPosition, usize)>,
 }
 
 /// Imported page state the editable content does not carry.
@@ -1211,6 +1218,7 @@ impl CanvasEditor {
         fresh.stored = self.stored.take();
         fresh.default_font = std::mem::take(&mut self.default_font);
         fresh.styles = std::mem::take(&mut self.styles);
+        fresh.markdown = self.markdown.take();
         *self = fresh;
         Ok(true)
     }
@@ -1583,6 +1591,8 @@ impl CanvasEditor {
             provisional: BTreeMap::new(),
             default_font: DefaultFont::default(),
             styles: BTreeMap::new(),
+            markdown: None,
+            formatted: None,
         })
     }
 
@@ -3525,13 +3535,13 @@ impl CanvasEditor {
     }
 
     /// Types `text` at the selection; a space ends a typed URL, which becomes a link. A line
-    /// of text joins the typing run before it.
+    /// of text joins the typing run before it, and may complete a Markdown shortcut.
     pub fn insert(&mut self, engine: &mut TextEngine, text: &str) -> Result<(), EditorError> {
         if text.is_empty() || text.contains('\n') {
-            self.insert_text(engine, text)
-        } else {
-            self.typed(|editor| editor.insert_text(engine, text))
+            return self.insert_text(engine, text);
         }
+        self.typed(|editor| editor.insert_text(engine, text))?;
+        self.markdown(engine, text)
     }
 
     /// Insert Symbol: `symbol` at the selection, as an undo step that neither joins the
@@ -3867,6 +3877,12 @@ impl CanvasEditor {
         let [anchor, focus] = selection.positions;
         let mut range = anchor.min(focus)..anchor.max(focus);
         let at_caret = range.is_empty();
+        if backward
+            && at_caret
+            && self.formatted.take() == Some((self.active_outline().id, focus, self.undo.len()))
+        {
+            return self.undo(engine);
+        }
         if at_caret {
             let outline = self.active_outline();
             let paragraph = outline.paragraph_layout(focus.paragraph)?;
@@ -4036,6 +4052,7 @@ impl CanvasEditor {
         if let Some((page, _)) = &self.stored {
             parked.refresh(page.clone(), engine)?;
             parked.default_font = std::mem::take(&mut self.default_font);
+            parked.markdown = self.markdown.take();
             *self = parked;
         }
         Ok(())

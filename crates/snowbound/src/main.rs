@@ -1294,6 +1294,7 @@ impl State {
         };
         state.view.snap_to_grid = !stored.ignore_grid;
         state.view.editor.default_font = stored.default_font;
+        state.view.editor.markdown = commands::markdown(!stored.ignore_markdown);
         // A notebook opened from its server that couldn't sign in asks to, as the Finder does.
         let unsigned = state.notebooks.iter().find(|library| {
             library.notebook.is_err() && library::server_address(&library.location).is_some()
@@ -2859,6 +2860,7 @@ impl State {
             Rule,
             Run(Cmd::HideSpelling),
             Run(Cmd::Spelling),
+            Run(Cmd::MarkdownShortcuts),
         ];
         ui.open(
             "view",

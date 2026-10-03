@@ -24,6 +24,8 @@ pub struct Settings {
     pub light_pages: bool,
     /// Leaves misspelled words unmarked, as OneNote's Hide Spelling Errors.
     pub hide_spelling: bool,
+    /// Types Markdown as it is: Markdown Shortcuts off.
+    pub ignore_markdown: bool,
     /// Where searches look first, as "Set This Scope as Default" chose.
     pub search_scope: crate::search::Scope,
     /// The tag list Customize Tags edits; none keeps OneNote's.
@@ -179,6 +181,7 @@ impl crate::State {
             color_scheme: self.color_scheme,
             light_pages: self.light_pages,
             hide_spelling: self.hide_spelling,
+            ignore_markdown: self.view.editor.markdown.is_none(),
             search_scope: self.search.default,
             tags: (self.tags != canvas::editor::NoteTag::defaults()).then(|| self.tags.clone()),
             manual_updates: !self.updates.automatic(),
@@ -242,6 +245,7 @@ mod tests {
             color_scheme: ColorScheme::Dark,
             light_pages: true,
             hide_spelling: true,
+            ignore_markdown: true,
             search_scope: crate::search::Scope::Notebook,
             tags: Some(vec![canvas::editor::NoteTag {
                 label: "Snow check".into(),

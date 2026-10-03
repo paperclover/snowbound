@@ -542,6 +542,32 @@ fn common<T: PartialEq>(mut values: impl Iterator<Item = Option<T>>) -> Option<T
 
 /// `format` moved from paragraph style `old` to `new`: what the old style gave, or nothing
 /// did, the new one gives.
+/// `text` in paragraph style `definition` from style format `old`: it loses its character
+/// formatting but links, fields and language.
+pub(super) fn styled(text: &Paragraph, old: &Format, definition: &Definition) -> Paragraph {
+    restyle(text, 0..text.text().len(), |format| {
+        // An equation keeps its own formatting; what it took from the old style it takes
+        // from the new.
+        if [format.math, format.embedded_object].contains(&Some(true)) {
+            *format = followed(format, old, &definition.format);
+            return;
+        }
+        *format = Format {
+            hidden: format.hidden,
+            hyperlink: format.hyperlink,
+            hyperlink_label: format.hyperlink_label,
+            math: format.math,
+            embedded_object: format.embedded_object,
+            language: format.language,
+            alignment: format.alignment,
+            rtl: format.rtl,
+            list_spacing: format.list_spacing,
+            math_object: format.math_object.clone(),
+            ..definition.format.clone()
+        };
+    })
+}
+
 fn followed(format: &Format, old: &Format, new: &Format) -> Format {
     let mut format = format.clone();
     macro_rules! follow {
@@ -570,7 +596,7 @@ fn followed(format: &Format, old: &Format, new: &Format) -> Format {
 }
 
 /// Seconds since 1980, as note tags date themselves.
-fn time32() -> Option<u32> {
+pub(super) fn time32() -> Option<u32> {
     let now = web_time::SystemTime::now()
         .duration_since(web_time::UNIX_EPOCH)
         .ok()?
@@ -917,27 +943,7 @@ impl CanvasEditor {
                         node.style = Some(style);
                         let old = &olds[&node.id];
                         let text = &mut node.text_mut().unwrap().text;
-                        *text = restyle(text, 0..text.text().len(), |format| {
-                            // An equation keeps its own formatting; what it took from the
-                            // old style it takes from the new.
-                            if [format.math, format.embedded_object].contains(&Some(true)) {
-                                *format = followed(format, old, &definition.format);
-                                return;
-                            }
-                            *format = Format {
-                                hidden: format.hidden,
-                                hyperlink: format.hyperlink,
-                                hyperlink_label: format.hyperlink_label,
-                                math: format.math,
-                                embedded_object: format.embedded_object,
-                                language: format.language,
-                                alignment: format.alignment,
-                                rtl: format.rtl,
-                                list_spacing: format.list_spacing,
-                                math_object: format.math_object.clone(),
-                                ..definition.format.clone()
-                            };
-                        });
+                        *text = styled(text, old, definition);
                     }
                 }
             }
@@ -1286,7 +1292,7 @@ impl CanvasEditor {
     /// Takes tags of `kind` from `lists`, or with `added`, the definition's identity, its
     /// shape and when, gives the last list one in place of any of its action type; an element
     /// holds one tag of each action type, stored newest first.
-    fn retag<const N: usize>(
+    pub(super) fn retag<const N: usize>(
         &self,
         mut lists: [&mut Vec<Tag>; N],
         kind: &Kind<'static>,
@@ -1328,7 +1334,7 @@ impl CanvasEditor {
 
     /// Checks the check boxes among `tags`, or clears them once all are checked; OneNote keeps
     /// a cleared box's completion time as zero.
-    fn toggle_checks(&self, mut tags: Vec<&mut Tag>) {
+    pub(super) fn toggle_checks(&self, mut tags: Vec<&mut Tag>) {
         let checked = tags
             .iter()
             .filter(|tag| self.check_box(tag).is_some())

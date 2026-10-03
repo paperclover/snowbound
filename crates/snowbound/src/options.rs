@@ -118,6 +118,15 @@ const SECTIONS: &[Section] = &[
                 }],
             },
             Group {
+                heading: "AutoFormat",
+                rows: &[Row {
+                    label: "Markdown shortcuts",
+                    keywords: "markdown autoformat heading bullet numbering list to do quote \
+                               bold italic strikethrough code typing",
+                    control: Control::Check(|options| &mut options.markdown),
+                }],
+            },
+            Group {
                 heading: "Pen",
                 rows: &[Row {
                     label: "Use pen pressure sensitivity",
@@ -227,6 +236,7 @@ pub struct Options {
     color_scheme: ColorScheme,
     pages_match: bool,
     hide_spelling: bool,
+    markdown: bool,
     automatic_updates: bool,
     pen_pressure: bool,
     default_font: DefaultFont,
@@ -323,6 +333,7 @@ impl State {
             color_scheme: self.color_scheme,
             pages_match: !self.light_pages,
             hide_spelling: self.hide_spelling,
+            markdown: self.view.editor.markdown.is_some(),
             automatic_updates: self.updates.automatic(),
             pen_pressure: self.pen_pressure,
             default_font: self.view.editor.default_font.clone(),
@@ -629,6 +640,7 @@ impl State {
             self.color_scheme = options.color_scheme;
             self.light_pages = !options.pages_match;
             self.hide_spelling = options.hide_spelling;
+            self.view.editor.markdown = crate::commands::markdown(options.markdown);
             self.pen_pressure = options.pen_pressure;
             self.view.editor.default_font = options.default_font;
             self.page_tabs_left = options.page_tabs_left;
