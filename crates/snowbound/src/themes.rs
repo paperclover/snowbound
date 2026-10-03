@@ -60,6 +60,14 @@ fn popup(name: &str) -> Id {
 /// Spacing the dialog offers above and below a style, in points.
 const SPACING: [f32; 9] = [0.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0, 18.0];
 
+/// The largest a style's text shows in the Styles gallery, in pixels.
+const GALLERY_LARGEST: f32 = 24.0;
+
+/// The pixel size `preview` shows `style` at: as a page shows it, up to `largest`.
+fn shown_size(style: &ThemeStyle, largest: f32) -> f32 {
+    (style.size * 1.2).clamp(10.0, largest)
+}
+
 /// A line of `text` in `style` as a page in a section coloured `section` shows it, scaled
 /// down to fit a menu row up to `largest` pixels, its colour moved onto the popup's paper so
 /// it reads in either scheme.
@@ -86,7 +94,7 @@ pub(crate) fn preview(
             size: [fill(), fill()],
             text: Some(text),
             font: Some(&style.font),
-            font_size: Some((style.size * 1.2).clamp(10.0, largest)),
+            font_size: Some(shown_size(style, largest)),
             bold: style.bold,
             italic: style.italic,
             color: Some(color),
@@ -739,20 +747,24 @@ pub(crate) fn gallery(
     current: Option<&str>,
 ) -> Option<crate::commands::Id> {
     use crate::commands::Id as Cmd;
-    let groups = [
-        ui::popup::Group {
-            heading: &sheet.name,
-            cells: STYLES.len(),
+    // Each style's row is as tall as its text, without the style's spacing.
+    let row = |height: f32| [240.0, height + 8.0];
+    let groups: Vec<ui::popup::Group> = STYLES
+        .iter()
+        .enumerate()
+        .map(|(at, (name, _))| ui::popup::Group {
+            heading: if at == 0 { &sheet.name } else { "" },
+            cells: 1,
             columns: 1,
-            size: [240.0, 34.0],
-        },
-        ui::popup::Group {
+            size: row(shown_size(&sheet.styles[*name], GALLERY_LARGEST) * 1.25),
+        })
+        .chain([ui::popup::Group {
             heading: "",
             cells: 1,
             columns: 1,
-            size: [240.0, 24.0],
-        },
-    ];
+            size: row(16.0),
+        }])
+        .collect();
     let shown: Vec<usize> = STYLES
         .iter()
         .position(|(name, _)| Some(*name) == current)
@@ -762,7 +774,14 @@ pub(crate) fn gallery(
         .get(index)
     {
         Some((name, label)) => {
-            preview(ui, "preview", label, &sheet.styles[*name], section, 24.0);
+            preview(
+                ui,
+                "preview",
+                label,
+                &sheet.styles[*name],
+                section,
+                GALLERY_LARGEST,
+            );
             if let Some(node) = ui.access(ui.id("preview")) {
                 node.set_label(*label);
             }
