@@ -178,14 +178,37 @@ const SECTIONS: &[Section] = &[
     },
     Section {
         name: "Sync & Storage",
-        groups: &[Group {
-            heading: "Cache file location",
-            rows: &[Row {
-                label: "Path:",
-                keywords: "folder replica data disk",
-                control: Control::Field(cache),
-            }],
-        }],
+        groups: &[
+            Group {
+                heading: "Cache file location",
+                rows: &[Row {
+                    label: "Path:",
+                    keywords: "folder replica data disk",
+                    control: Control::Field(cache),
+                }],
+            },
+            #[cfg(feature = "live")]
+            Group {
+                heading: "Live Share",
+                rows: &[
+                    Row {
+                        label: "Show others where I am in shared notebooks",
+                        keywords: "presence privacy cursor caret avatar collaborate people",
+                        control: Control::Check(|options| &mut options.presence),
+                    },
+                    Row {
+                        label: "Show my account picture with my name",
+                        keywords: "presence privacy photo avatar",
+                        control: Control::Check(|options| &mut options.picture),
+                    },
+                    Row {
+                        label: "Relay:",
+                        keywords: "live share server internet network presence",
+                        control: Control::Field(relay),
+                    },
+                ],
+            },
+        ],
     },
     Section {
         name: "Updates",
@@ -246,6 +269,10 @@ pub struct Options {
     /// Minutes, as `protection::AFTER` lists them.
     lock_minutes: u32,
     lock_on_leave: bool,
+    presence: bool,
+    picture: bool,
+    /// Live Share's relay; empty uses Snowbound's.
+    relay: String,
     pub(crate) keyboard: crate::keys::Keyboard,
 }
 
@@ -342,6 +369,9 @@ impl State {
             lock_idle: self.passwords.lock_after.is_some(),
             lock_minutes: self.passwords.lock_after.unwrap_or(10),
             lock_on_leave: self.passwords.lock_on_leave,
+            presence: self.live_options.presence,
+            picture: self.live_options.picture,
+            relay: self.live_options.relay.clone().unwrap_or_default(),
             keyboard: crate::keys::Keyboard::new(),
         });
         self.ui.open_popup(id());
@@ -650,6 +680,14 @@ impl State {
                 lock_on_leave: options.lock_on_leave,
             };
             self.updates.set_automatic(options.automatic_updates);
+            let relay = options.relay.trim();
+            self.live_options = crate::settings::Live {
+                presence: options.presence,
+                picture: options.picture,
+                relay: (!relay.is_empty()).then(|| relay.to_owned()),
+            };
+            #[cfg(feature = "live")]
+            crate::live::configure(&self.author, &self.live_options);
             self.show_spelling();
             self.follow_color_scheme();
             self.install_keymap(options.keyboard.keymap);
@@ -659,6 +697,30 @@ impl State {
             return;
         }
         self.ui.close_popup(id());
+    }
+}
+
+#[cfg(feature = "live")]
+fn relay(state: &mut State, options: &mut Options) {
+    let ui = &mut state.ui;
+    let theme = ui.theme.clone();
+    let field = id().child("relay");
+    ui::text_field(
+        ui,
+        field,
+        &mut options.relay,
+        crate::live::DEFAULT_RELAY,
+        Spec {
+            size: [fill(), px(row_height(&theme))],
+            fill: Some(theme.base),
+            border: Some(theme.chip),
+            radius: 4.0,
+            pad: [6.0, 0.0],
+            ..Spec::default()
+        },
+    );
+    if let Some(node) = ui.access(field) {
+        node.set_label("Live Share relay");
     }
 }
 

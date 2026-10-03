@@ -19,6 +19,10 @@ pub enum Id {
     NewNotebook,
     OpenNotebook,
     OpenFromServer,
+    /// Open Shared Notebook: a notebook another computer shares by Live Share.
+    OpenShared,
+    /// Live Share on the notebook shown.
+    LiveShare,
     CloseNotebook,
     NewSection,
     NewSectionGroup,
@@ -255,6 +259,8 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::NewNotebook, "New Notebook…", NONE, NONE),
     row!(Id::OpenNotebook, "Open Notebook…", &[cmd('o')], &[cmd('o')]),
     row!(Id::OpenFromServer, "Open Notebook from Server…", NONE, NONE),
+    row!(Id::OpenShared, "Open Shared Notebook…", NONE, NONE),
+    row!(Id::LiveShare, "Live Share…", NONE, NONE),
     row!(Id::CloseNotebook, "Close This Notebook", NONE, NONE),
     row!(Id::NewSection, "New Section", &[cmd('t')], &[cmd('t')]),
     row!(Id::NewSectionGroup, "New Section Group", NONE, NONE),
@@ -1159,6 +1165,16 @@ impl State {
             | Id::Help
             | Id::CheckForUpdates => enabled(!modal),
             Id::CloseNotebook => enabled(!modal && self.notebook().is_some()),
+            Id::OpenShared => enabled(!modal && cfg!(feature = "live")),
+            #[cfg(feature = "live")]
+            Id::LiveShare => enabled(
+                !modal
+                    && self.notebook().is_some_and(|library| {
+                        library.catalog().is_some() && library.joined.is_none()
+                    }),
+            ),
+            #[cfg(not(feature = "live"))]
+            Id::LiveShare => enabled(false),
             Id::PasswordProtect => enabled(!modal && self.shown_section().is_some()),
             Id::SaveAs => enabled(!modal && self.notebook().is_some()),
             Id::RecycleBin => Status {
@@ -1452,6 +1468,19 @@ impl State {
             Id::NewNotebook => Work::NewNotebook,
             Id::OpenNotebook => Work::OpenNotebook,
             Id::OpenFromServer => Work::OpenFromServer(None),
+            #[cfg(feature = "live")]
+            Id::OpenShared => {
+                self.open_shared();
+                return Ok(());
+            }
+            #[cfg(feature = "live")]
+            Id::LiveShare => {
+                let library = Arc::clone(self.notebook().ok_or("No notebook is open")?);
+                self.open_live_share(library);
+                return Ok(());
+            }
+            #[cfg(not(feature = "live"))]
+            Id::OpenShared | Id::LiveShare => return Ok(()),
             Id::CloseNotebook => {
                 Work::CloseNotebook(Arc::clone(self.notebook().ok_or("No notebook is open")?))
             }

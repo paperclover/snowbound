@@ -32,6 +32,42 @@ pub fn button(ui: &mut Ui, part: impl Hash, text: &str) -> Signal {
     ui.leaf(part, spec)
 }
 
+/// A short tag in the accent's colour, centred in a box `height` tall, as BETA marks a
+/// feature still settling beside its name.
+pub fn badge(ui: &mut Ui, part: impl Hash, text: &str, height: f32) {
+    let theme = &ui.theme;
+    let [red, green, blue, _] = theme.accent;
+    let tall = (theme.font_size * 1.15).min(height).round();
+    let spec = Spec {
+        size: [fit(), px(tall)],
+        text: Some(text),
+        font_size: Some((theme.font_size * 0.7).round()),
+        bold: true,
+        color: Some(theme.accent),
+        fill: Some([red, green, blue, 0.16]),
+        radius: 3.0,
+        pad: [4.0, 0.0],
+        center: true,
+        ..Spec::default()
+    };
+    ui.open(
+        part,
+        Spec {
+            size: [crate::children(), px(height)],
+            pad: [0.0, ((height - tall) / 2.0).max(0.0)],
+            ..Spec::default()
+        },
+    );
+    ui.leaf("text", spec);
+    ui.close();
+}
+
+/// The width `badge` takes for `text`.
+pub fn badge_width(ui: &mut Ui, text: &str) -> f32 {
+    let size = (ui.theme.font_size * 0.7).round();
+    ui.texts.label(text, size, ui.frame).size[0] + 8.0
+}
+
 /// A check box before `label`, `checked` or not; a click on either reports for the caller
 /// to toggle.
 pub fn check_box(ui: &mut Ui, part: impl Hash, label: &str, checked: bool) -> Signal {

@@ -68,6 +68,8 @@ mod screenshot;
 mod search;
 mod server;
 mod settings;
+#[cfg(feature = "live")]
+mod share;
 mod sidebar;
 #[cfg_attr(target_os = "linux", path = "spell_linux.rs")]
 #[cfg_attr(target_os = "macos", path = "spell_macos.rs")]
@@ -674,6 +676,9 @@ enum Command {
     /// Asks for a server's address and opens a notebook on it; with a notebook's location,
     /// signs in again to open it.
     OpenFromServer(Option<String>),
+    /// Asks for the code of a notebook another computer shares, and opens it.
+    #[cfg(feature = "live")]
+    OpenShared,
     /// Asks where to keep a new notebook and creates it.
     NewNotebook,
     /// Opens the Snowbound Guide from the user's documents, copying it there first.
@@ -819,7 +824,9 @@ struct State {
     /// What has been read in each notebook, on this computer.
     reads: unread::Reads,
     #[cfg(feature = "live")]
-    peers: Option<live::Peers>,
+    peers: live::Peers,
+    /// Options' Live Share.
+    live_options: settings::Live,
     /// Open Notebook from Server while it is open.
     server: Option<server::Connect>,
     /// Notebooks in iCloud Drive a thread is reading, or following the download of, by
@@ -992,6 +999,14 @@ impl State {
         // Beneath the surface's layer, which is added over it.
         let backdrop = visible && platform::install_backdrop(&window);
         commands::Keymap::from_saved(&stored.keys).install();
+        #[cfg(feature = "live")]
+        live::configure(
+            stored
+                .user_name
+                .as_deref()
+                .unwrap_or(&platform::user_name()),
+            &stored.live,
+        );
         platform::install_menu();
         let access_adapter =
             AccessAdapter::with_event_loop_proxy(event_loop, &window, proxy.clone());
@@ -1212,7 +1227,7 @@ impl State {
             asking: Default::default(),
             reads,
             #[cfg(feature = "live")]
-            peers: None,
+            peers: Default::default(),
             server: None,
             icloud_reading: HashSet::new(),
             folder_rename: None,
@@ -1233,6 +1248,7 @@ impl State {
             locked,
             password: None,
             passwords: stored.passwords,
+            live_options: stored.live,
             drag: None,
             templates: templates::View::Strip,
             media: Default::default(),
@@ -1391,6 +1407,8 @@ impl State {
         self.themes_dialog();
         self.print_dialog();
         self.server_dialog();
+        #[cfg(feature = "live")]
+        self.live_dialogs();
         self.link_dialog()?;
         self.properties_dialog();
         self.symbols_dialog();
@@ -3369,6 +3387,8 @@ impl State {
                 }),
             ),
             Command::OpenFromServer(location) => self.open_server(location.as_deref()),
+            #[cfg(feature = "live")]
+            Command::OpenShared => self.open_shared(),
             Command::NewNotebook => self.new_notebook(),
             Command::OpenGuide => self.open_guide()?,
             #[cfg(target_os = "linux")]

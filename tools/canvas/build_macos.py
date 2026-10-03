@@ -146,7 +146,9 @@ if build:
     'NSPrincipalClass': 'NSApplication',
     'CFBundleIconFile': 'Snowbound',
     'CFBundleIconName': 'Snowbound-Tahoe',
-    'NSLocalNetworkUsageDescription': 'Snowbound connects to file servers on your network to open and sync shared notebooks.',
+    'NSLocalNetworkUsageDescription': 'Snowbound connects to file servers and other Snowbounds on your network to open and sync shared notebooks.',
+    # Live presence and Live Share find other Snowbounds by Bonjour.
+    'NSBonjourServices': ['_snowbound._tcp'],
     'NSMicrophoneUsageDescription':'Snowbound records audio into your notes when you choose Record Audio or Record Video.',
     'NSCameraUsageDescription': 'Snowbound records video into your notes when you choose Record Video.',
     'NSUbiquitousContainers': {CONTAINER: {

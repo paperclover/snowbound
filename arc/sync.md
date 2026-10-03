@@ -312,6 +312,27 @@ compare-and-swap, either side of a race winning, late deliveries, offline spans)
 every device ends on the same file with each typed string once. OneNote 2010 cold-opens a
 merged section with its conflict page as its own (`corpus/icloud-merge`).
 
+## Live Share
+
+Live Share (`notebook::live::share`, beta) opens a notebook one Snowbound holds on others,
+with no service holding the notebook. The host serves its notebook's storage verbs to the peers
+in the share's room; a guest runs the replica, queue and merge it runs on an SMB share against
+them (`Notebook::open_hosted`, `Section::resume_hosted`, `Background::hosted`), so offline
+queueing, rebases and conflict pages behave as on a share, and the host's files are only ever
+written by its own storage, OneNote's locks included. A guest meets the host first in the
+room of a short code (`412-violet-otter`, SPAKE2 on its words and any password) through
+Snowbound's relay or by mDNS, and is welcomed with the share's room and its random secret;
+stopping or restarting a share retires the secret. A guest's commit is checked on the host's
+image before it is committed, and a guest can name nothing outside the notebook. Large reads
+and uploads travel 128 KiB at a time, at most 512 KiB unanswered, so a relay never holds much
+for a slow peer. A host that goes away leaves its guests working offline: the notebook opens
+from its last listing and edits publish when it is back. The relay is
+`crates/relay`.
+
+Live presence, on by default, shows who else has a notebook others reach too (on a server, in
+iCloud Drive, in another computer's folder, or by Live Share): their avatars, page and caret.
+Its room's secret is a random one in `.snowbound/live.json`, which Live Share never serves.
+
 ## Notebook structure
 
 Sections, groups and the notebook's own colour live in the `.onetoc2` files,
@@ -329,7 +350,8 @@ Windows hidden attribute so that OneNote never makes a section group of it. Its 
 plain files, not revision stores: pictures named by their content, and small JSON
 mappings that every writer merges before replacing. The first is tag art: a tag keeps
 OneNote's definition and a fallback symbol on the page, and `tags.json` maps its name and
-symbol to a picture that Snowbound draws in the symbol's place.
+symbol to a picture that Snowbound draws in the symbol's place. `live.json` holds the
+notebook's presence room secret.
 
 ## Recovery and migration
 

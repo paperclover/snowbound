@@ -15,8 +15,8 @@ mod widgets;
 pub use list::{List, Row, Rows, list};
 pub use theme::{Menu, PopupMotion, Section, Shades, Shadow, Theme};
 pub use widgets::{
-    PaintedScroller, Scroller, ScrollerPart, Scrollers, button, check_box, edit_key,
-    edit_modifiers, password_field, scrollbar, text_field,
+    PaintedScroller, Scroller, ScrollerPart, Scrollers, badge, badge_width, button, check_box,
+    edit_key, edit_modifiers, password_field, scrollbar, text_field,
 };
 
 use draw::{

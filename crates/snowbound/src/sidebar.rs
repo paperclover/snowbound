@@ -1258,6 +1258,13 @@ impl crate::State {
                     "Open Notebook from Server…",
                     crate::Command::OpenFromServer(None),
                 ),
+                #[cfg(feature = "live")]
+                (
+                    "shared",
+                    Leading::Icon(art::LINK),
+                    "Open Shared Notebook…",
+                    crate::Command::OpenShared,
+                ),
             ]
             .into_iter()
             .chain(crate::guide::OFFERED.then_some((

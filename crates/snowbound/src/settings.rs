@@ -51,6 +51,29 @@ pub struct Settings {
     /// Pages shown lately, latest first, which the palette lists first and a launch returns to.
     pub recent: Vec<crate::navigation::Place>,
     pub passwords: Passwords,
+    pub live: Live,
+}
+
+/// Options' Live Share.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Live {
+    /// Others with a shared notebook open see who you are, your page and your cursor.
+    pub presence: bool,
+    /// Your account's picture goes with your name.
+    pub picture: bool,
+    /// The relay computers on different networks meet through; none uses Snowbound's.
+    pub relay: Option<String>,
+}
+
+impl Default for Live {
+    fn default() -> Self {
+        Self {
+            presence: true,
+            picture: true,
+            relay: None,
+        }
+    }
 }
 
 /// Options' Passwords, as OneNote 2010's Advanced page keeps them.
@@ -194,6 +217,7 @@ impl crate::State {
             keys: crate::commands::Keymap::current().saved(),
             recent: self.trail.recent.clone(),
             passwords: self.passwords,
+            live: self.live_options.clone(),
         };
         if let Err(error) = settings.save(path) {
             eprintln!("Cannot save the settings in {}: {error}", path.display());
@@ -277,6 +301,11 @@ mod tests {
             passwords: Passwords {
                 lock_after: None,
                 lock_on_leave: true,
+            },
+            live: Live {
+                presence: false,
+                picture: false,
+                relay: Some("wss://relay.example.net".into()),
             },
         };
         settings.save(&path).unwrap();

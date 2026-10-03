@@ -265,6 +265,8 @@ struct Facts<'a> {
     changes_listed: bool,
     /// Whether the open section's file can be shown in the file manager.
     local: bool,
+    /// The computer sharing this notebook by Live Share stopped sharing it.
+    stopped: bool,
 }
 
 /// What the reader picked in the popup.
@@ -457,6 +459,9 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
     let conflict;
     // A problem's advice stays while working offline, so turning it on moves nothing.
     let advice = match state {
+        SyncState::NotConnected if facts.stopped => Some(format!(
+            "The person sharing this notebook stopped sharing it. Your changes stay on {THIS}."
+        )),
         SyncState::NotConnected => Some(match sync.queued {
             0 => format!("Can’t reach {host}. Sync continues when it’s back."),
             _ => format!("Can’t reach {host}. {waiting} will sync when it’s back."),
@@ -1044,6 +1049,13 @@ impl State {
             color: library.color(),
             location: &library.location,
             place: library.place(),
+            #[cfg(feature = "live")]
+            stopped: library
+                .joined
+                .as_ref()
+                .is_some_and(|joined| joined.guest.stopped()),
+            #[cfg(not(feature = "live"))]
+            stopped: false,
             notice: library.notice.as_deref(),
             sections: sections(&library, session),
             conflicts: session
@@ -1160,6 +1172,7 @@ mod tests {
             update: &IDLE,
             changes_listed: false,
             local: true,
+            stopped: false,
         }
     }
 

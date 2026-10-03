@@ -38,11 +38,14 @@ pub fn on_background(notify: impl Fn() + Send + Sync + 'static) {
     let _ = NOTIFY.set(Box::new(notify));
 }
 
-fn notify_background() {
+pub(crate) fn notify_background() {
     if let Some(notify) = NOTIFY.get() {
         notify();
     }
 }
+
+/// What the location of a notebook another computer shares by Live Share starts with.
+pub const SHARED: &str = "live://";
 
 /// How long an SMB request may take before the share counts as unreachable.
 const TIMEOUT: Duration = Duration::from_secs(10);
@@ -325,6 +328,9 @@ pub struct Library {
     themes: Mutex<Option<(Instant, Arc<Themes>)>>,
     /// The keys of its password-protected sections unlocked this run, kept as it is read again.
     keys: Arc<Keys>,
+    /// The share a notebook another computer shares by Live Share is reached through.
+    #[cfg(feature = "live")]
+    pub joined: Option<Arc<crate::live::Joined>>,
 }
 
 /// Keys of password-protected sections, by file identity, with when each section was last
@@ -348,6 +354,8 @@ impl Library {
             kept: Mutex::new(crate::prefetch::Recent::new(KEPT)),
             themes: Default::default(),
             keys: Default::default(),
+            #[cfg(feature = "live")]
+            joined: None,
         }
     }
 
@@ -356,6 +364,9 @@ impl Library {
     /// account the system keeps for the mount, as OneNote's own client coordinates with
     /// OneNote; without that account it opens through the mount.
     pub fn notebook(location: &str, cache: &Path) -> Self {
+        if location.starts_with(SHARED) {
+            return Self::joined(location, cache);
+        }
         if let Some(mount) = server_address(location) {
             let login = match mount.user {
                 Some(_) => crate::platform::smb_login(&mount),
@@ -401,6 +412,47 @@ impl Library {
             notebook: notebook.map(Some).map_err(|error| error.to_string()),
             notice,
             ..Self::new(location, name, cache)
+        }
+    }
+
+    /// The notebook another computer shares at `location` by Live Share, as its last listing
+    /// has it until that computer answers.
+    #[cfg(feature = "live")]
+    fn joined(location: &str, cache: &Path) -> Self {
+        let mut library = Self::new(location, String::new(), cache);
+        match crate::live::Joined::open(location, cache) {
+            Ok((joined, notebook)) => {
+                let background = Background::hosted(Arc::clone(&joined.guest), notify_background)
+                    .inspect_err(|error| eprintln!("Background sync did not start: {error}"))
+                    .ok()
+                    .map(|background| {
+                        background.set_offline(offline());
+                        Arc::new(background)
+                    });
+                let mut notebook = notebook;
+                if let Some(background) = &background {
+                    background.watch(notebook.replicas());
+                    joined.follow(background);
+                }
+                library.name = display_name(cache, location).unwrap_or_else(|| joined.name.clone());
+                library.tag_art = Mutex::new(Arc::new(read_tag_art(&notebook)));
+                library.notebook = Ok(Some(notebook));
+                library.background = background;
+                library.joined = Some(Arc::new(joined));
+            }
+            Err((name, reason)) => {
+                library.name = display_name(cache, location).unwrap_or(name);
+                library.notebook = Err(reason);
+            }
+        }
+        library
+    }
+
+    #[cfg(not(feature = "live"))]
+    fn joined(location: &str, cache: &Path) -> Self {
+        Self {
+            notebook: Err("This version of Snowbound can’t open shared notebooks.".into()),
+            ..Self::new(location, "Shared notebook".into(), cache)
         }
     }
 
@@ -643,6 +695,13 @@ impl Library {
 
     /// This notebook read again, the way it was opened, for changing its structure.
     pub fn reopen(&self) -> Result<Notebook, Box<dyn Error>> {
+        #[cfg(feature = "live")]
+        if let Some(joined) = &self.joined {
+            return Ok(Notebook::open_hosted(
+                Arc::clone(&joined.guest),
+                &self.cache,
+            )?);
+        }
         Ok(match &self.server {
             #[cfg(not(target_arch = "wasm32"))]
             Some(server) => {
@@ -678,6 +737,8 @@ impl Library {
             watch,
             tag_art: Mutex::new(self.tag_art()),
             keys: Arc::clone(&self.keys),
+            #[cfg(feature = "live")]
+            joined: self.joined.clone(),
             ..Self::new(&self.location, name, &self.cache)
         }
     }
@@ -745,6 +806,18 @@ impl Library {
                 return Ok(kept);
             }
             let opened = match (&self.notebook, &self.server) {
+                #[cfg(feature = "live")]
+                (Ok(Some(notebook)), _) if let Some(joined) = &self.joined => {
+                    let cache = notebook.replica_path(path)?;
+                    notebook::fs::create_dir_all(cache.parent().unwrap_or(&self.cache))?;
+                    notebook::Replica::open_or_create(&cache, key.as_ref(), || {
+                        notebook.read_section(path)
+                    })
+                    .and_then(|replica| {
+                        let guest = Arc::clone(&joined.guest);
+                        Section::resume_hosted(path.to_owned(), replica, guest, notifier())
+                    })
+                }
                 #[cfg(target_arch = "wasm32")]
                 (Ok(Some(_)), Some(_)) => unreachable!("The browser opens no notebook on a server"),
                 #[cfg(not(target_arch = "wasm32"))]
@@ -854,8 +927,7 @@ impl Library {
     /// The notebook's folder or section file on this computer; none for a notebook opened
     /// straight from its server.
     pub fn folder(&self) -> Option<&Path> {
-        server_address(&self.location)
-            .is_none()
+        (server_address(&self.location).is_none() && !self.location.starts_with(SHARED))
             .then(|| Path::new(&self.location))
     }
 
@@ -872,6 +944,10 @@ impl Library {
     /// Where the notebook lives, as its reader knows the place: the server and share, iCloud
     /// Drive, a drive or this computer, then each folder down to the notebook's, left out.
     pub fn place(&self) -> Vec<String> {
+        #[cfg(feature = "live")]
+        if let Some(joined) = &self.joined {
+            return vec![format!("{}’s computer", joined.host)];
+        }
         let mut place: Vec<String> = match self
             .server
             .as_ref()

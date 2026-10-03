@@ -56,6 +56,7 @@ const MENUS: &[Item] = &[
             C(Id::NewNotebook),
             C(Id::OpenNotebook),
             C(Id::OpenFromServer),
+            C(Id::OpenShared),
             C(Id::CloseNotebook),
             S,
             C(Id::NewSection),
@@ -66,6 +67,7 @@ const MENUS: &[Item] = &[
             C(Id::PageVersions),
             C(Id::CopyPageLink),
             C(Id::ShowNotebook),
+            C(Id::LiveShare),
             S,
             C(Id::PasswordProtect),
             C(Id::LockAll),
@@ -299,6 +301,11 @@ fn menu(
     };
     for item in items {
         match item {
+            // Live Share is still settling; AppKit's menus take no badge before macOS 14.
+            Item::Command(id @ (Id::LiveShare | Id::OpenShared)) => {
+                let title = format!("{} (Beta)", commands::command(*id).title);
+                choose(&Choice::Command(*id), &title, None);
+            }
             Item::Command(id) => {
                 choose(
                     &Choice::Command(*id),

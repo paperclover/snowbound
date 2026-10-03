@@ -77,6 +77,8 @@ pub struct Item<'a> {
     pub heading: bool,
     /// Repeats an item listed further on, so shows only while unfiltered.
     pub repeated: bool,
+    /// A tag after the text, as `badge` draws one.
+    pub badge: Option<&'a str>,
 }
 
 impl Item<'_> {
@@ -107,20 +109,31 @@ pub fn menu(
         return None;
     }
     let style = ui.theme.menu();
+    let badges: Vec<f32> = (items.iter())
+        .map(|item| {
+            item.badge
+                .map_or(0.0, |badge| crate::badge_width(ui, badge) + ICON_GAP)
+        })
+        .collect();
     let mut measure = |text| ui.texts.label(text, style.font_size, ui.frame).size[0];
-    let [text, shortcut] = items.iter().fold([0.0_f32; 2], |[text, shortcut], item| {
-        [
-            text.max(
-                measure(item.text)
-                    + if item.highlight.is_some() {
-                        2.0 * SAMPLE_PAD
-                    } else {
-                        0.0
-                    },
-            ),
-            shortcut.max(measure(item.trailing())),
-        ]
-    });
+    let [text, shortcut] =
+        items
+            .iter()
+            .zip(&badges)
+            .fold([0.0_f32; 2], |[text, shortcut], (item, badge)| {
+                [
+                    text.max(
+                        measure(item.text)
+                            + badge
+                            + if item.highlight.is_some() {
+                                2.0 * SAMPLE_PAD
+                            } else {
+                                0.0
+                            },
+                    ),
+                    shortcut.max(measure(item.trailing())),
+                ]
+            });
     let width =
         text + if shortcut > 0.0 {
             3.0 * ICON_GAP + shortcut
@@ -575,6 +588,9 @@ fn menu_row(ui: &mut Ui, style: &Menu, matches: &Matches, owner: Role, row: Row)
             _ => Role::MenuItem,
         });
         node.set_label(item.text);
+        if let Some(badge) = item.badge {
+            node.set_description(badge);
+        }
         if let Some(checked) = item.checked {
             node.set_toggled(checked.into());
         }
@@ -678,6 +694,25 @@ fn menu_row(ui: &mut Ui, style: &Menu, matches: &Matches, owner: Role, row: Row)
                     ..text
                 },
             );
+            ui.leaf(
+                "rest",
+                Spec {
+                    size: [fill(), fill()],
+                    ..Spec::default()
+                },
+            );
+        }
+        None if item.badge.is_some() => {
+            ui.leaf(
+                "text",
+                Spec {
+                    size: [fit(), fill()],
+                    ..text
+                },
+            );
+            if let Some(badge) = item.badge {
+                crate::badge(ui, "badge", badge, style.row);
+            }
             ui.leaf(
                 "rest",
                 Spec {

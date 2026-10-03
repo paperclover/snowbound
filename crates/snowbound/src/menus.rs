@@ -122,6 +122,9 @@ pub enum Action {
     Properties,
     /// Opens Password Protection on a section.
     Password,
+    /// Opens Live Share on a notebook.
+    #[cfg(feature = "live")]
+    LiveShare,
 }
 
 /// OneNote 2010's section and notebook colours, COLORREF, with their names in its Section
@@ -272,11 +275,16 @@ impl State {
         // An action, its label, whether it is disabled, and whether a rule starts its group.
         let item = |action: Action, text, disabled, separated| {
             let submenu = matches!(action, Action::Move | Action::Copy | Action::Colors);
+            #[cfg(feature = "live")]
+            let badge = (action == Action::LiveShare).then_some(crate::share::BETA);
+            #[cfg(not(feature = "live"))]
+            let badge = None;
             let item = Item {
                 text,
                 disabled,
                 separated,
                 submenu,
+                badge,
                 ..Item::default()
             };
             (action, item)
@@ -402,6 +410,13 @@ impl State {
                         false,
                     ),
                     item(Action::CopyLink, "Copy Link to Notebook", false, true),
+                    #[cfg(feature = "live")]
+                    item(
+                        Action::LiveShare,
+                        commands::command(commands::Id::LiveShare).title,
+                        library.catalog().is_none() || library.joined.is_some(),
+                        false,
+                    ),
                     item(Action::NewSection, "New Section", false, true),
                     item(Action::NewGroup, "New Section Group", false, false),
                     item(
@@ -724,6 +739,11 @@ impl State {
                 None
             }
             (Target::Notebook(library), Action::Close) => Some(Command::CloseNotebook(library)),
+            #[cfg(feature = "live")]
+            (Target::Notebook(library), Action::LiveShare) => {
+                self.open_live_share(library);
+                None
+            }
             (Target::Notebook(library), Action::Rename | Action::Properties) => {
                 self.open_properties(library);
                 None
