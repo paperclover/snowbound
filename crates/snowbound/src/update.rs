@@ -755,7 +755,7 @@ impl State {
                 "Snowbound is up to date",
                 &format!("You have {}.", describe_running()),
             ),
-            Status::Failed(reason) => platform::alert("Unable to check for updates", reason),
+            Status::Failed(reason) => platform::alert("Couldn't check for updates", reason),
             Status::Idle | Status::Downloading(_) => {}
         }
     }

@@ -817,9 +817,10 @@ impl State {
                 None
             }
             (Target::Section { library, path }, Action::Delete) => {
+                let name = crate::library::entry_name(&path).to_owned();
                 platform::confirm(
                     "Are you sure you want to move this section to this notebook's Recycle Bin?",
-                    &path.clone(),
+                    &name,
                     "Cancel",
                     "Delete",
                     self.reply(|state, ()| {
@@ -831,13 +832,10 @@ impl State {
                 None
             }
             (Target::Group { library, path }, Action::Delete) => {
+                let name = crate::library::entry_name(&path).to_owned();
                 platform::confirm(
                     "Are you sure you want to move the sections in this section group to this notebook's Recycle Bin?",
-                    path.rsplit('/')
-                        .next()
-                        .unwrap_or_default()
-                        .to_owned()
-                        .as_str(),
+                    &name,
                     "Cancel",
                     "Delete",
                     self.reply(|state, ()| {
