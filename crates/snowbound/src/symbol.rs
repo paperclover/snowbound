@@ -82,12 +82,14 @@ pub fn gallery(ui: &mut Ui, id: Id, anchor: Anchor, symbols: &[char]) -> Option<
     let groups = [
         ui::popup::Group {
             heading: "",
+            ruled: false,
             cells: symbols.len(),
             columns: 5,
             size: [SIZE; 2],
         },
         ui::popup::Group {
             heading: "",
+            ruled: true,
             cells: 1,
             columns: 1,
             size: [5.0 * SIZE, 28.0],

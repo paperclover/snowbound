@@ -1,8 +1,8 @@
 //! Style themes in the app (`resources/styles.md`): the page wears its own theme, else its
 //! section's, else its notebook's, as its paragraph style objects; the Styles gallery
-//! applies a style in the page's theme, and its Customize… opens the Themes dialog, which
-//! edits a notebook's own themes with a live preview and gives one to the page, the section
-//! or the notebook.
+//! applies a style in the page's theme, and its Customize Font Styles opens the dialog of
+//! that name, which edits a notebook's own themes with a live preview and gives one to the
+//! page, the section or the notebook.
 
 use crate::{Library, State, filetime};
 use accesskit::Role;
@@ -255,12 +255,13 @@ impl State {
                 ..Spec::default()
             },
         );
+        let named = crate::commands::command(crate::commands::Id::Themes).title;
         if let Some(node) = ui.access(id()) {
-            node.set_label("Themes");
+            node.set_label(named);
         }
         let title = match &dialog.targets[..] {
-            [(scope, _)] => format!("Theme for {}", scope.name()),
-            _ => "Themes".to_owned(),
+            [(scope, _)] => format!("{named} for {}", scope.name()),
+            _ => named.to_owned(),
         };
         ui.leaf(
             "title",
@@ -770,12 +771,14 @@ pub(crate) fn gallery(
         .enumerate()
         .map(|(at, (name, _))| ui::popup::Group {
             heading: if at == 0 { &sheet.name } else { "" },
+            ruled: false,
             cells: 1,
             columns: 1,
             size: row(shown_size(&sheet.styles[*name], GALLERY_LARGEST) * 1.25),
         })
         .chain([ui::popup::Group {
             heading: "",
+            ruled: true,
             cells: 1,
             columns: 1,
             size: row(16.0),
@@ -807,7 +810,7 @@ pub(crate) fn gallery(
                 "customize",
                 Spec {
                     size: [fill(), fill()],
-                    text: Some("Customize"),
+                    text: Some(crate::commands::command(Cmd::Themes).title),
                     ..Spec::default()
                 },
             );

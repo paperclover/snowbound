@@ -2911,6 +2911,7 @@ fn galleries_choose_across_their_groups_by_keys_and_clicks() {
     let gallery = Id::ROOT.child("gallery");
     let groups = [("Recent", 2), ("Library", 5)].map(|(heading, cells)| popup::Group {
         heading,
+        ruled: false,
         cells,
         columns: 3,
         size: [30.0, 30.0],

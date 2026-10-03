@@ -5184,6 +5184,7 @@ fn list_gallery(
     let groups = [(headings[0], recent.len()), (headings[1], count + 1)].map(|(heading, cells)| {
         ui::popup::Group {
             heading,
+            ruled: false,
             cells,
             columns: 5,
             size,
@@ -5228,6 +5229,7 @@ fn pen_gallery(
     const CELL: [f32; 2] = [40.0, 24.0];
     let groups = [ui::popup::Group {
         heading: "Pens",
+        ruled: false,
         cells: pens.len(),
         columns: 5,
         size: CELL,
@@ -5666,7 +5668,7 @@ fn artwork(id: commands::Id) -> Option<&'static [&'static str]> {
         Cmd::Style(8) => art::QUOTE,
         Cmd::Style(9) => art::CODE,
         Cmd::Style(_) => art::NORMAL,
-        Cmd::Themes => art::CUSTOMIZE_THEME,
+        Cmd::Themes => art::STYLES,
         Cmd::OpenShared => art::OPEN_SHARED,
         Cmd::LiveShare => art::LIVE_SHARE,
         Cmd::MarkdownShortcuts => art::MARKDOWN,

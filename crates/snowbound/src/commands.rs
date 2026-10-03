@@ -596,7 +596,7 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::Style(8), "Quote", NONE, NONE),
     row!(Id::Style(9), "Code", NONE, NONE),
     row!(Id::Style(10), "Normal", NONE, NONE),
-    row!(Id::Themes, "Customize Theme", NONE, NONE),
+    row!(Id::Themes, "Customize Font Styles", NONE, NONE),
     row!(Id::CustomizeTags, "Customize Tags", NONE, NONE),
     row!(
         Id::RemoveTags,

@@ -89,18 +89,21 @@ pub fn menu(
     let groups = [
         ui::popup::Group {
             heading: "Page Color",
+            ruled: false,
             cells: 2 + PAGE_COLORS.len(),
             columns: COLUMNS,
             size: SWATCH,
         },
         ui::popup::Group {
             heading: "Background",
+            ruled: false,
             cells: 2 + ART.len(),
             columns: 3,
             size: [TILE[0] + 8.0, TILE[1] + 8.0],
         },
         ui::popup::Group {
             heading: "Rule Lines",
+            ruled: false,
             cells: 1 + RULE_LINES.len(),
             columns: COLUMNS,
             size: [RULES; 2],

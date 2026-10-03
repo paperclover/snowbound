@@ -151,7 +151,7 @@ impl Action {
             Action::NewGroup => art::NEW_SECTION_GROUP,
             Action::Reveal => art::FOLDER,
             Action::Close => art::CLOSE_NOTEBOOK,
-            Action::Theme => art::THEME,
+            Action::Theme => art::STYLES,
             Action::Colors => art::SECTION_COLOR,
             Action::Sync => art::SYNC_NOW,
             Action::NewNotebook => art::NEW_NOTEBOOK,
@@ -334,6 +334,11 @@ impl State {
             (action, item)
         };
         let nowhere = || self.destinations(target).is_empty();
+        // Last on a page, section or notebook, under a rule.
+        let styles = || {
+            let title = commands::command(commands::Id::Themes).title;
+            item(Action::Theme, title, false, true)
+        };
         match target {
             // OneNote's Move or Copy takes a page out of the bin; nothing else changes it.
             Target::Page { path, .. } if crate::recycle::binned(path) => vec![
@@ -360,11 +365,11 @@ impl State {
                     item(Action::NewPage, "New Page", false, true),
                     // OneNote offers this beside New Page, which is a plain + here.
                     item(Action::NewSubpage, "New Subpage", false, false),
-                    item(Action::Theme, "Theme", false, true),
                 ];
                 // Levels and versions are known once the section is open.
                 let Some(session) = self.session.as_ref().filter(|_| self.open(library, path))
                 else {
+                    actions.push(styles());
                     return actions;
                 };
                 let pages = &session.pages;
@@ -393,6 +398,7 @@ impl State {
                         session.page_versions(*space).is_empty(),
                         true,
                     ),
+                    styles(),
                 ]);
                 actions
             }
@@ -423,7 +429,7 @@ impl State {
                             section_file(library, path).is_none(),
                             false,
                         ),
-                        item(Action::Theme, "Theme", false, false),
+                        styles(),
                     ]);
                 }
                 actions
@@ -493,12 +499,11 @@ impl State {
                         library.folder().is_none(),
                         true,
                     ),
-                    item(Action::Theme, "Theme", false, false),
                     item(
                         Action::RecycleBin,
                         "Notebook Recycle Bin",
                         library.catalog().is_none(),
-                        true,
+                        false,
                     ),
                     item(
                         Action::Properties,
@@ -506,6 +511,7 @@ impl State {
                         library.catalog().is_none(),
                         false,
                     ),
+                    styles(),
                 ]
             }
             Target::Closed(_) | Target::Server(_) => {

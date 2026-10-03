@@ -1038,6 +1038,8 @@ pub fn table_picker(ui: &mut Ui, id: Id, anchor: Anchor, size: [usize; 2]) -> Op
 #[derive(Clone, Copy, Debug)]
 pub struct Group<'a> {
     pub heading: &'a str,
+    /// Starts under a rule, as a gallery's command after its choices.
+    pub ruled: bool,
     pub cells: usize,
     pub columns: usize,
     pub size: [f32; 2],
@@ -1096,7 +1098,29 @@ pub fn gallery(
         width + 2.0 * ui.theme.menu().pad,
     );
     let mut index = 0;
+    let style = theme.menu();
     for (number, group) in groups.iter().enumerate() {
+        if group.ruled {
+            ui.open(
+                ("rule", number),
+                Spec {
+                    size: [fill(), px(style.rule_band)],
+                    ..Spec::default()
+                },
+            );
+            ui.leaf(
+                "line",
+                Spec {
+                    flags: Flags::FLOAT,
+                    size: [fill(), px(1.0)],
+                    position: [0.0, (style.rule_band - 1.0) / 2.0],
+                    inset: [style.rule_inset, 0.0, style.rule_inset, 0.0],
+                    fill: Some(style.rule),
+                    ..Spec::default()
+                },
+            );
+            ui.close();
+        }
         if !group.heading.is_empty() {
             ui.leaf(
                 ("heading", number),
