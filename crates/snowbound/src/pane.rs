@@ -735,9 +735,9 @@ impl State {
             descending = sort == Sort::Date;
         }
         let arrow = if descending {
-            ui::shell::CHEVRON
+            art::SORT_DESCENDING
         } else {
-            art::CHEVRON_UP
+            art::SORT_ASCENDING
         };
         if ui::shell::tool_button(&mut self.ui, "direction", arrow, theme.text, None).clicked {
             descending = !descending;
