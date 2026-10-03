@@ -796,14 +796,15 @@ impl Library {
     ) -> Result<Section, Box<dyn Error>> {
         // The background may hold the replica for a step, which takes a network round trip,
         // or be making it as an offline copy.
-        self.open_by(path, notify, Instant::now() + TIMEOUT * 3)
+        self.open_by(path, Box::new(notify), Instant::now() + TIMEOUT * 3)
     }
 
-    /// `open`, waiting until `deadline` for whatever holds the section's replica.
+    /// `open`, waiting until `deadline` for whatever holds the section's replica. `notify` is
+    /// boxed to compile this once rather than once per caller's closure.
     fn open_by(
         &self,
         path: &str,
-        notify: impl Fn() + Send + 'static,
+        notify: Box<dyn Fn() + Send>,
         deadline: Instant,
     ) -> Result<Section, Box<dyn Error>> {
         let notify = Arc::new(Mutex::new(notify));
@@ -901,7 +902,7 @@ impl Library {
         path: &str,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Arc<notebook::Replica>, Box<dyn Error>> {
-        let section = self.open_by(path, notify, Instant::now())?;
+        let section = self.open_by(path, Box::new(notify), Instant::now())?;
         let replica = Arc::clone(section.replica());
         self.keep(path, section);
         Ok(replica)
