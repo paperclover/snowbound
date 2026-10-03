@@ -344,13 +344,16 @@ fn a_flooding_guest_is_hung_up_on() {
         },
     )
     .unwrap();
+    // The line to the host, while Mallory's stream to it is open.
     let served = |live: &Live| {
-        live.peers()
+        let host = live
+            .peers()
             .into_iter()
-            .find(|peer| peer.hello.serves == Some(welcome.share))
+            .find(|peer| peer.hello.serves == Some(welcome.share))?;
+        live.line(&host.hello.peer)
     };
     until("Mallory never met the host", || served(&mallory).is_some());
-    let line = mallory.line(&served(&mallory).unwrap().hello.peer).unwrap();
+    let line = served(&mallory).unwrap();
     const SENT: u64 = 5000;
     for id in 0..SENT {
         let request = Request {

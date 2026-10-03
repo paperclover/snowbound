@@ -2,7 +2,7 @@
 //! limits on everything a stranger can make it hold. A thread reads each connection and
 //! another writes it, from a queue capped in bytes.
 
-use crate::{Notice, SLOT, Verdict, ws};
+use crate::{BROADCAST, GROUP, Notice, SLOT, Verdict, ws};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     io::{BufReader, Write},
@@ -10,7 +10,7 @@ use std::{
     ops::RangeInclusive,
     sync::{
         Arc, Condvar, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -50,13 +50,13 @@ impl Default for Config {
             max_connections: 256,
             max_connections_per_address: 16,
             max_rooms: 128,
-            max_room_peers: 16,
+            max_room_peers: 64,
             max_message: 256 << 10,
             queue: 1 << 20,
             idle: Duration::from_secs(600),
             room_bytes_per_second: 4 << 20,
             joins_per_minute: 30,
-            room_joins_per_minute: 30,
+            room_joins_per_minute: 120,
             failures_per_minute: 10,
             burn_after: 5,
             pending: Duration::from_secs(20),
@@ -84,6 +84,7 @@ pub fn serve(listener: TcpListener, config: Config) -> std::io::Result<()> {
         config,
         state: Mutex::default(),
         connections: AtomicUsize::new(0),
+        relayed: Default::default(),
         started: Instant::now(),
     });
     let sweeping = Arc::clone(&relay);
@@ -120,6 +121,8 @@ struct Relay {
     state: Mutex<State>,
     /// Connections open, joined or not.
     connections: AtomicUsize,
+    /// Bytes of peers' messages taken in, and given out.
+    relayed: [AtomicU64; 2],
     started: Instant,
 }
 
@@ -398,11 +401,15 @@ impl Relay {
     fn health(&self) -> String {
         let state = self.state.lock().unwrap();
         let peers: usize = state.rooms.values().map(|room| room.members.len()).sum();
+        let [taken, given] = &self.relayed;
         format!(
-            "{{\"rooms\":{},\"peers\":{peers},\"connections\":{},\"seconds\":{}}}\n",
+            "{{\"rooms\":{},\"peers\":{peers},\"connections\":{},\"seconds\":{},\
+             \"bytes_in\":{},\"bytes_out\":{}}}\n",
             state.rooms.len(),
             self.connections.load(Ordering::Acquire),
-            self.started.elapsed().as_secs()
+            self.started.elapsed().as_secs(),
+            taken.load(Ordering::Relaxed),
+            given.load(Ordering::Relaxed),
         )
     }
 
@@ -543,33 +550,72 @@ impl Relay {
     /// Acts on a message from `slot`: false once it is gone or broke the protocol.
     fn heard(&self, tag: &str, slot: u32, outbox: &Outbox, message: ws::Message) -> bool {
         match message {
-            ws::Message::Binary(mut data) => {
-                if data.len() < SLOT {
+            ws::Message::Binary(data) => {
+                let Some((to, rest)) = data.split_first_chunk::<SLOT>() else {
                     return false;
-                }
-                let rate = self.config.room_bytes_per_second as f64;
-                let wait = match self.state.lock().unwrap().rooms.get_mut(tag) {
-                    Some(room) => room.bytes.spend(data.len() as f64, rate, Instant::now()),
-                    None => return false,
                 };
-                // Waiting here slows the sender alone, as its socket fills.
-                thread::sleep(wait);
-                let to = u32::from_be_bytes(data[..SLOT].try_into().expect("a slot"));
+                let to = u32::from_be_bytes(*to);
+                // The slots a group message names, then what it carries.
+                let (named, payload) = match to {
+                    BROADCAST => (None, rest),
+                    to if to & GROUP != 0 => {
+                        let Some((named, payload)) =
+                            rest.split_at_checked((to & !GROUP) as usize * SLOT)
+                        else {
+                            return false;
+                        };
+                        let named = named.chunks_exact(SLOT);
+                        (
+                            Some(named.map(|slot| u32::from_be_bytes(slot.try_into().unwrap()))),
+                            payload,
+                        )
+                    }
+                    _ => (None, rest),
+                };
                 let state = self.state.lock().unwrap();
                 let Some(room) = state.rooms.get(tag) else {
                     return false;
                 };
-                let (Some(from), Some(target)) = (room.members.get(&slot), room.members.get(&to))
-                else {
-                    return room.members.contains_key(&slot);
+                let Some(from) = room.members.get(&slot) else {
+                    return false;
                 };
                 // One waiting for the code's owner talks to the owner alone.
-                if (from.pending.is_none() || room.owner == Some(to))
-                    && (target.pending.is_none() || room.owner == Some(slot))
-                {
-                    data[..SLOT].copy_from_slice(&slot.to_be_bytes());
-                    target.outbox.push(ws::frame(ws::BINARY, &data, None));
+                let allowed = |to: u32| {
+                    let target = room.members.get(&to)?;
+                    (to != slot
+                        && (from.pending.is_none() || room.owner == Some(to))
+                        && (target.pending.is_none() || room.owner == Some(slot)))
+                    .then_some(&target.outbox)
+                };
+                let (source, targets): (u32, Vec<&Arc<Outbox>>) = match (to, named) {
+                    (BROADCAST, _) => (
+                        slot | GROUP,
+                        room.members.keys().filter_map(|to| allowed(*to)).collect(),
+                    ),
+                    (_, Some(named)) => (slot | GROUP, named.filter_map(allowed).collect()),
+                    (to, None) => (slot, allowed(to).into_iter().collect()),
+                };
+                let message = ws::frame(
+                    ws::BINARY,
+                    &[&source.to_be_bytes()[..], payload].concat(),
+                    None,
+                );
+                let targets: Vec<Arc<Outbox>> = targets.into_iter().cloned().collect();
+                drop(state);
+                // Waiting here slows the sender alone, as its socket fills.
+                let given = (SLOT + payload.len()) * targets.len();
+                let rate = self.config.room_bytes_per_second as f64;
+                let wait = match self.state.lock().unwrap().rooms.get_mut(tag) {
+                    Some(room) => room.bytes.spend(given as f64, rate, Instant::now()),
+                    None => return false,
+                };
+                thread::sleep(wait);
+                for target in targets {
+                    target.push(message.clone());
                 }
+                let [taken, out] = &self.relayed;
+                taken.fetch_add(data.len() as u64, Ordering::Relaxed);
+                out.fetch_add(given as u64, Ordering::Relaxed);
                 true
             }
             ws::Message::Text(text) => {
@@ -1043,6 +1089,7 @@ mod tests {
             },
             state: Mutex::default(),
             connections: AtomicUsize::new(0),
+            relayed: Default::default(),
             started: Instant::now(),
         };
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

@@ -8,19 +8,20 @@
 //! the next, so a relay never holds much for a slow peer.
 
 use super::{
-    Event, Hello, Line, Live, Peer, Presence, Reach, Relayed, Room,
+    Event, Hello, Line, Live, Peer, Presence, Reach, Relayed, Room, Sender,
     wire::{
         self, Delta, Failure, Reply, Request, Touched, Welcome, WireEntry, WireStamp, Written, kind,
     },
 };
 use crate::{Error, Result, background::Reports, discover, session::Storage};
 use onestore::{CommitError, CommitState, RevisionIndex, Stamp, Store, Transaction};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, HashMap},
     io,
     path::PathBuf,
     sync::{
-        Arc, Condvar, Mutex,
+        Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -42,9 +43,15 @@ const SNAPSHOT_AGE: Duration = Duration::from_secs(120);
 /// Sections whose image a host keeps to check guests' commits on and tell them what changed,
 /// and a guest keeps to take those changes on without reading.
 const IMAGES: usize = 4;
+/// Earlier images of those a host keeps besides, to tell a guest that missed a change what
+/// it was, and the most bytes they hold.
+const VERSIONS: usize = 16;
+const VERSIONS_BYTES: usize = 64 << 20;
 /// How long a report of a change settles in a guest's background: its host reports each
 /// commit once, at once.
 pub const SETTLE: Duration = Duration::from_millis(20);
+/// The longest a relay may ask a guest joining to wait before it is told so.
+const PATIENT: Duration = Duration::from_secs(10);
 /// What a host says leaving as it stops sharing.
 const STOPPED: &str = "stopped";
 /// What a host says hanging up on a guest that asks too much too fast.
@@ -172,7 +179,11 @@ pub fn join(
         match live.relayed() {
             Relayed::Refused(404, _) if settled => return Err(Refusal::NoOne),
             Relayed::Refused(410, _) => return Err(Refusal::Expired),
-            Relayed::Refused(429, wait) => return Err(Refusal::TooMany(wait)),
+            // A short wait, as a crowd joining at once meets, passes as the relay is asked
+            // again.
+            Relayed::Refused(429, wait) if wait.is_none_or(|wait| wait > PATIENT) => {
+                return Err(Refusal::TooMany(wait));
+            }
             Relayed::Refused(503, _) if settled => return Err(Refusal::Busy),
             Relayed::Unreachable(trouble) if waited > Duration::from_secs(10) => {
                 return Err(Refusal::Unreachable(trouble));
@@ -224,6 +235,7 @@ impl Host {
             puts: Mutex::default(),
             guests: Mutex::default(),
             host: Mutex::default(),
+            room: OnceLock::new(),
         });
         let serving = Hello {
             serves: Some(sharing.share),
@@ -247,6 +259,7 @@ impl Host {
                 _ => {}
             },
         )?;
+        let _ = served.room.set(room.sender());
         let host = Self {
             notebook: notebook.to_owned(),
             reach,
@@ -382,15 +395,19 @@ struct Served {
     guests: Mutex<BTreeMap<[u8; 16], Admitted>>,
     /// Hears the paths guests changed, as the host's own notebook should.
     host: Mutex<Option<crate::session::Listener>>,
+    /// The share's room, to tell guests what changed.
+    room: OnceLock<Sender>,
 }
 
-/// A guest as its host serves it: the line to it, its requests waiting for its workers, and
-/// how many more it may start now.
+/// A guest as its host serves it: the line to it, its requests waiting for its workers, how
+/// many more it may start now, and the sections it read lately, newest first, as it keeps
+/// their images.
 struct Admitted {
     line: Line,
     queue: mpsc::SyncSender<(u16, Vec<u8>)>,
     starts: f64,
     counted: Instant,
+    held: Vec<String>,
 }
 
 /// A section's path, stamp and image.
@@ -439,6 +456,7 @@ impl Served {
             queue,
             starts: BURST,
             counted: Instant::now(),
+            held: Vec::new(),
         };
         self.guests.lock().unwrap().insert(peer, guest);
     }
@@ -486,14 +504,24 @@ impl Served {
         }
     }
 
-    /// Tells every guest the files at `paths` changed.
+    /// Tells every guest the files at `paths` changed, and what they are now.
     fn tell(&self, paths: &[String]) {
         let touched = Touched {
             paths: paths.to_vec(),
+            stamps: (paths.iter())
+                .map(|path| self.storage.stamp(path).ok().map(|stamp| digest(&stamp)))
+                .collect(),
         };
-        for guest in self.guests.lock().unwrap().values() {
-            let _ = guest.line.send(kind::TOUCHED, &touched);
+        if let Some(room) = self.room.get() {
+            room.send(kind::TOUCHED, &touched, None);
         }
+    }
+
+    /// Notes that `guest` holds the section at `path`, as it now keeps its image.
+    fn holds(guest: &mut Admitted, path: &str) {
+        guest.held.retain(|held| held != path);
+        guest.held.insert(0, path.to_owned());
+        guest.held.truncate(IMAGES);
     }
 
     fn handle(&self, peer: &[u8; 16], kind: u16, body: &[u8]) -> Reply {
@@ -574,7 +602,7 @@ impl Served {
             }
             kind::COMMIT => {
                 let transaction = Transaction::from_bytes(&self.carried(peer, &request)?)?;
-                self.commit(path, &transaction)?;
+                self.commit(peer, path, &transaction)?;
                 self.changed(&[path.to_owned()]);
                 done
             }
@@ -648,6 +676,15 @@ impl Served {
         let offset = request.offset.unwrap_or_default() as usize;
         let mut snapshots = self.snapshots.lock().unwrap();
         snapshots.retain(|_, (_, read)| read.elapsed() < SNAPSHOT_AGE);
+        if let (kind::READ, None, Some(base)) = (kind, request.handle, &request.stamp)
+            && let Ok(base) = Stamp::try_from(base)
+            && let Some(changes) = self.changes(&request.path, &base)?
+        {
+            if let Some(guest) = self.guests.lock().unwrap().get_mut(peer) {
+                Self::holds(guest, &request.path);
+            }
+            return Ok(changes);
+        }
         let (image, handle) = match request.handle {
             Some(handle) => {
                 let (image, read) = snapshots
@@ -658,6 +695,11 @@ impl Served {
             }
             None => {
                 drop(snapshots);
+                if kind == kind::READ
+                    && let Some(guest) = self.guests.lock().unwrap().get_mut(peer)
+                {
+                    Self::holds(guest, &request.path);
+                }
                 let limit = (request.limit.unwrap_or(LIMIT as u64) as usize).min(LIMIT);
                 let image = match kind {
                     kind::READ => self.image(&request.path)?,
@@ -692,6 +734,32 @@ impl Served {
         })
     }
 
+    /// What changed in the section at `path` since the image with stamp `base`, where that
+    /// image is kept and the changes are much smaller than the section.
+    fn changes(&self, path: &str, base: &Stamp) -> Result<Option<Reply>> {
+        let before = self
+            .images
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|(held, at, image)| (held == path && at == base).then(|| Arc::clone(image)));
+        let Some(before) = before else {
+            return Ok(None);
+        };
+        let after = self.image(path)?;
+        let writes = match delta(&before, &after) {
+            Some(writes) => writes,
+            None if before == after => Vec::new(),
+            None => return Ok(None),
+        };
+        Ok(Some(Reply {
+            writes: Some(writes),
+            length: Some(after.len() as u64),
+            stamp: Some((&Stamp::of(&after)?).into()),
+            ..Reply::default()
+        }))
+    }
+
     /// The section or TOC at `path` as it stands: the image kept for it while its stamp holds.
     fn image(&self, path: &str) -> Result<Arc<Vec<u8>>> {
         let stamp = self.storage.stamp(path)?;
@@ -711,18 +779,31 @@ impl Served {
         Ok(image)
     }
 
+    /// Keeps `image` as the section at `path` now, with the newest of each of `IMAGES`
+    /// sections and earlier images up to `VERSIONS` and `VERSIONS_BYTES`.
     fn keep(&self, path: &str, image: Arc<Vec<u8>>) {
         let Ok(stamp) = Stamp::of(&image) else {
             return;
         };
         let mut images = self.images.lock().unwrap();
-        images.retain(|(held, ..)| held != path);
+        images.retain(|(held, at, _)| held != path || *at != stamp);
         images.insert(0, (path.to_owned(), stamp, image));
-        images.truncate(IMAGES);
+        let (mut newest, mut versions, mut bytes) = (Vec::new(), 0, 0);
+        images.retain(|(held, _, image)| {
+            if !newest.contains(held) {
+                newest.push(held.clone());
+                return newest.len() <= IMAGES;
+            }
+            versions += 1;
+            bytes += image.len();
+            newest.iter().take(IMAGES).any(|kept| kept == held)
+                && versions <= VERSIONS
+                && bytes <= VERSIONS_BYTES
+        });
     }
 
-    /// Commits a guest's transaction once the section it makes parses.
-    fn commit(&self, path: &str, transaction: &Transaction) -> Result<()> {
+    /// Commits `guest`'s transaction once the section it makes parses.
+    fn commit(&self, guest: &[u8; 16], path: &str, transaction: &Transaction) -> Result<()> {
         let not_committed = |error: io::Error| {
             Error::Remote(CommitError {
                 state: CommitState::NotCommitted,
@@ -751,14 +832,15 @@ impl Served {
             )));
         }
         self.storage.commit(path, transaction)?;
-        self.tell_delta(path, &image, &next);
+        self.tell_delta(path, &image, &next, Some(guest));
         self.keep(path, Arc::new(next));
         Ok(())
     }
 
-    /// Tells every guest what a commit changed in the section at `path`, from `before` to
-    /// `after`, where that is small enough to send.
-    fn tell_delta(&self, path: &str, before: &[u8], after: &[u8]) {
+    /// Tells the guests holding the section at `path` what a commit changed in it, from
+    /// `before` to `after`, where that is small enough to send: all but the guest whose
+    /// commit it was, which has it already.
+    fn tell_delta(&self, path: &str, before: &[u8], after: &[u8], committed: Option<&[u8; 16]>) {
         let (Ok(base), Some(writes)) = (Stamp::of(before), delta(before, after)) else {
             return;
         };
@@ -768,8 +850,18 @@ impl Served {
             length: after.len() as u64,
             writes,
         };
-        for guest in self.guests.lock().unwrap().values() {
-            let _ = guest.line.send(kind::DELTA, &delta);
+        let mut guests = self.guests.lock().unwrap();
+        let holding: Vec<[u8; 16]> = guests
+            .iter_mut()
+            .filter(|(id, guest)| Some(*id) != committed && guest.held.iter().any(|h| h == path))
+            .map(|(id, guest)| {
+                Self::holds(guest, path);
+                *id
+            })
+            .collect();
+        drop(guests);
+        if let (Some(room), false) = (self.room.get(), holding.is_empty()) {
+            room.send(kind::DELTA, &delta, Some(&holding));
         }
     }
 
@@ -789,10 +881,19 @@ impl Served {
             return;
         }
         if let Ok(after) = self.storage.read(path) {
-            self.tell_delta(path, &before, &after);
+            self.tell_delta(path, &before, &after, None);
             self.keep(path, Arc::new(after));
         }
     }
+}
+
+/// A stamp as `Touched` names it.
+fn digest(stamp: &Stamp) -> u64 {
+    let hash = Sha256::new()
+        .chain_update(stamp.header)
+        .chain_update(stamp.length.to_le_bytes())
+        .finalize();
+    u64::from_le_bytes(hash[..8].try_into().expect("eight bytes"))
 }
 
 /// The writes that make `after` of `before`, a commit's appended bytes, patches and header,
@@ -977,6 +1078,9 @@ struct Inner {
     asked: (Mutex<usize>, Condvar),
     /// The sections read lately, kept as the host's deltas change them, newest first.
     images: Mutex<Vec<(String, Arc<Vec<u8>>)>>,
+    /// The stamps of sections whose image held is the host's now, as its last report of
+    /// them said.
+    current: Mutex<HashMap<String, Stamp>>,
 }
 
 impl Guest {
@@ -999,6 +1103,7 @@ impl Guest {
             stopped: AtomicBool::new(false),
             asked: Default::default(),
             images: Mutex::default(),
+            current: Mutex::default(),
         });
         let heard = Arc::clone(&inner);
         let live = Live::start(me, &Room::Notebook(secret), reach, relay, move |event| {
@@ -1123,17 +1228,32 @@ impl Guest {
         Ok(())
     }
 
-    /// Reads the file at `path` a chunk at a time, as `kind` reads it.
+    /// Reads the file at `path` a chunk at a time, as `kind` reads it; a section held, as
+    /// the changes to it.
     fn read(&self, kind: u16, path: &str, limit: usize) -> io::Result<Vec<u8>> {
+        let held = (kind == kind::READ)
+            .then(|| self.inner.image(path))
+            .flatten();
         let first = self.ask(
             kind,
             Request {
                 path: path.to_owned(),
                 offset: Some(0),
                 limit: Some(limit as u64),
+                stamp: (held.as_deref())
+                    .and_then(|image| Stamp::of(image).ok())
+                    .map(|stamp| (&stamp).into()),
                 ..Request::default()
             },
         )?;
+        if let (Some(writes), Some(held)) = (&first.writes, held) {
+            let stamp: Option<Stamp> = first.stamp.as_ref().and_then(|s| s.try_into().ok());
+            let image = written(&held, first.length.unwrap_or_default(), writes)
+                .filter(|image| stamp.is_some() && Stamp::of(image).ok() == stamp)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Changes that miss"))?;
+            self.inner.hold(path, Arc::new(image.clone()));
+            return Ok(image);
+        }
         let length = first.length.unwrap_or_default() as usize;
         if length > limit {
             return Err(io::ErrorKind::FileTooLarge.into());
@@ -1166,9 +1286,8 @@ impl Guest {
 
     /// The image of the section at `path` with stamp `stamp`, where this guest holds it.
     fn held(&self, path: &str, stamp: &Stamp) -> Option<Vec<u8>> {
-        let images = self.inner.images.lock().unwrap();
-        let (_, image) = images.iter().find(|(held, _)| held == path)?;
-        (Stamp::of(image).ok().as_ref() == Some(stamp)).then(|| image.to_vec())
+        let image = self.inner.image(path)?;
+        (Stamp::of(&image).ok().as_ref() == Some(stamp)).then(|| image.to_vec())
     }
 
     pub(crate) fn entries(&self, folder: &str) -> io::Result<Vec<discover::Entry>> {
@@ -1187,7 +1306,12 @@ impl Guest {
             .collect())
     }
 
+    /// The stamp of the file at `path`: the host's last report of it where this guest holds
+    /// that image, else the host's answer.
     fn stamp(&self, path: &str) -> io::Result<Stamp> {
+        if let Some(stamp) = self.inner.current.lock().unwrap().get(path) {
+            return Ok(stamp.clone());
+        }
         let reply = self.ask(
             kind::STAMP,
             Request {
@@ -1243,6 +1367,13 @@ impl Guest {
 }
 
 impl Inner {
+    fn image(&self, path: &str) -> Option<Arc<Vec<u8>>> {
+        let images = self.images.lock().unwrap();
+        images
+            .iter()
+            .find_map(|(held, image)| (held == path).then(|| Arc::clone(image)))
+    }
+
     fn hold(&self, path: &str, image: Arc<Vec<u8>>) {
         let mut images = self.images.lock().unwrap();
         images.retain(|(held, _)| held != path);
@@ -1252,12 +1383,7 @@ impl Inner {
 
     /// Takes on a delta to an image held.
     fn apply(&self, delta: &Delta) {
-        let held = self
-            .images
-            .lock()
-            .unwrap()
-            .iter()
-            .find_map(|(path, image)| (*path == delta.path).then(|| Arc::clone(image)));
+        let held = self.image(&delta.path);
         let base: Option<Stamp> = (&delta.base).try_into().ok();
         if let Some(image) = held
             && Stamp::of(&image).ok() == base
@@ -1267,19 +1393,26 @@ impl Inner {
         }
     }
 
-    /// Takes on this guest's own commit to an image held.
+    /// Takes on this guest's own commit to an image held; the host's report, not this, says
+    /// whether the image is the host's, as another's commit may have followed.
     fn published(&self, path: &str, transaction: &Transaction) {
-        let held = self
-            .images
-            .lock()
-            .unwrap()
-            .iter()
-            .find_map(|(held, image)| (held == path).then(|| Arc::clone(image)));
-        if let Some(image) = held {
+        if let Some(image) = self.image(path) {
             let mut next = (*image).clone();
             if transaction.apply(&mut next).is_ok() {
                 self.hold(path, Arc::new(next));
             }
+        }
+    }
+
+    /// Takes the host's report of what the files at `paths` are now.
+    fn touched(&self, touched: &Touched) {
+        let mut current = self.current.lock().unwrap();
+        for (at, path) in touched.paths.iter().enumerate() {
+            let stamp = self.image(path).and_then(|image| Stamp::of(&image).ok());
+            match stamp.filter(|stamp| touched.stamps.get(at) == Some(&Some(digest(stamp)))) {
+                Some(stamp) => current.insert(path.clone(), stamp),
+                None => current.remove(path),
+            };
         }
     }
 
@@ -1291,6 +1424,7 @@ impl Inner {
             }
             Event::Left(hello) if serves(hello) => {
                 *self.host.lock().unwrap() = None;
+                self.current.lock().unwrap().clear();
                 // Each request waiting hears its answer was lost.
                 self.pending.lock().unwrap().clear();
                 if let Some(reports) = self.watch.lock().unwrap().take() {
@@ -1313,10 +1447,11 @@ impl Inner {
                     }
                 }
                 kind::TOUCHED if serves(from) => {
-                    if let Ok(touched) = minicbor::decode::<Touched>(body)
-                        && let Some(reports) = &*self.watch.lock().unwrap()
-                    {
-                        reports.touched(&touched.paths);
+                    if let Ok(touched) = minicbor::decode::<Touched>(body) {
+                        self.touched(&touched);
+                        if let Some(reports) = &*self.watch.lock().unwrap() {
+                            reports.touched(&touched.paths);
+                        }
                     }
                 }
                 kind::BYE
@@ -1367,7 +1502,11 @@ impl crate::Remote for HostedRemote {
     }
 
     fn publish(&mut self, transaction: &Transaction) -> std::result::Result<(), CommitError> {
-        self.guest.commit(&self.path, transaction)?;
+        if let Err(error) = self.guest.commit(&self.path, transaction) {
+            // The host's image moved on, and its report may not have come yet.
+            self.guest.inner.current.lock().unwrap().remove(&self.path);
+            return Err(error);
+        }
         self.guest.inner.published(&self.path, transaction);
         Ok(())
     }

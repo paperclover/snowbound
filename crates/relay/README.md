@@ -2,9 +2,11 @@
 
 The relay Live Share meets through when two Snowbounds aren't on one network. Peers join a
 room named by a tag (a hash of the notebook's secret, or a code's number), and the relay
-passes their messages between them. Every message after the opening is sealed end to end
-and numbered inside the seal, so the relay can't read, alter, drop or reorder one unseen;
-it learns who talks to whom, when, and how much. `src/lib.rs` describes the protocol.
+passes their messages between them, or copies one to everyone in the room (presence, a
+host's news of its files) so a sender with thirty peers sends it once. Every message after
+the opening is sealed end to end and numbered inside the seal, so the relay can't read,
+alter, drop or reorder one unseen; it learns who talks to whom, when, and how much.
+`src/lib.rs` describes the protocol.
 
 One static Linux executable with no configuration file and nothing on disk. It speaks plain
 HTTP and WebSocket; a proxy in front of it terminates TLS.
@@ -28,7 +30,7 @@ sudo install -m 755 /tmp/snowbound-relay /usr/local/bin/snowbound-relay
 sudo install -m 644 /tmp/snowbound-relay.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now snowbound-relay
-curl -s http://127.0.0.1:23592/health     # {"rooms":0,"peers":0,"connections":1,"seconds":3}
+curl -s http://127.0.0.1:23592/health     # {"rooms":0,"peers":0,"connections":1,"seconds":3,"bytes_in":0,"bytes_out":0}
 ```
 
 Then point a name at the server and put a TLS proxy in front. Caddy fetches its own
@@ -115,7 +117,9 @@ snowbound.paperclover.net {
 
 ## Options
 
-`snowbound-relay --help` lists every option and its default. Each can also be set in the
+`snowbound-relay --help` lists every option and its default. A room holds 64 peers and
+admits 120 a minute, enough for a class joining at once; its bytes per second count what
+the relay gives out, so a copy to thirty peers costs thirty times its size. Each can also be set in the
 unit's environment as `SNOWBOUND_RELAY_<OPTION>` (`SNOWBOUND_RELAY_MAX_ROOMS=64`).
 
 Memory stays under about `max-connections × (max-message + queue)` plus two small thread

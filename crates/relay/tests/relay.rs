@@ -185,6 +185,42 @@ fn peers_in_a_room_pass_messages() {
     assert_eq!(ada.text(), "left 2");
 }
 
+/// A group message goes once to the relay, which copies it to everyone else in the room or
+/// to the slots it names, marked as the group's; the relay counts what it passed on.
+#[test]
+fn group_messages_are_copied() {
+    let relay = Relay::start(&[]);
+    let mut peers: Vec<Peer> = (1..=3)
+        .map(|_| relay.join("/v1/room/0123abcd").unwrap())
+        .collect();
+    assert_eq!(peers[0].text(), "welcome 1");
+    assert_eq!(peers[0].text(), "joined 2");
+    assert_eq!(peers[0].text(), "joined 3");
+    assert_eq!(peers[1].text(), "welcome 2 1");
+    assert_eq!(peers[1].text(), "joined 3");
+    assert_eq!(peers[2].text(), "welcome 3 1 2");
+    let from = |slot: u32, bytes: &[u8]| {
+        Message::Binary([&(slot | relay::GROUP).to_be_bytes()[..], bytes].concat())
+    };
+    peers[0].send_to(relay::BROADCAST, b"everyone");
+    assert_eq!(peers[1].hear(), from(1, b"everyone"));
+    assert_eq!(peers[2].hear(), from(1, b"everyone"));
+    let named = [&3u32.to_be_bytes()[..], b"just you"].concat();
+    peers[1].send_to(relay::GROUP | 1, &named);
+    assert_eq!(peers[2].hear(), from(2, b"just you"));
+    peers[0].send_to(2, b"stream");
+    assert_eq!(
+        peers[1].hear(),
+        Message::Binary([&1u32.to_be_bytes()[..], b"stream"].concat())
+    );
+    let health = relay.get("/health");
+    let given = 2 * (4 + 8) + (4 + 8) + (4 + 6);
+    assert!(
+        health.contains(&format!("\"bytes_out\":{given}")),
+        "{health}"
+    );
+}
+
 /// One joining a code's room hears only its owner until the owner says it met it; then the
 /// others in the room, and they it.
 #[test]

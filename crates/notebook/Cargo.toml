@@ -64,6 +64,10 @@ name = "live_latency"
 required-features = ["live"]
 
 [[example]]
+name = "live_crowd"
+required-features = ["live"]
+
+[[example]]
 name = "smb_offline_client"
 required-features = ["smb"]
 

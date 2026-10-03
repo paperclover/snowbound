@@ -7,7 +7,13 @@
 //! the relay never knows; peers seal them end to end. Text messages are [`Notice`]s from the
 //! relay and [`Verdict`]s to it.
 //!
-//! Of each pair of peers the one with the higher slot opens the stream between them.
+//! A group message is sent once and copied by the relay: to `BROADCAST`, every other peer
+//! in the room the sender may reach; to `GROUP | n` followed by `n` slots, those peers.
+//! Received, its slot is the sender's marked with `GROUP`. Peers seal group messages under a
+//! key the room's secret gives them all.
+//!
+//! Of each pair of peers in a code's room the one with the higher slot opens the stream
+//! between them.
 //! A peer joining a code's room waits, hearing only the room's owner, until the owner says
 //! its opening `met`; a peer that `failed`, left first, or stayed silent too long counts a
 //! wrong code against its address and the code. See `resources/live-share.md`.
@@ -21,6 +27,9 @@ use std::{fmt, str::FromStr};
 
 /// The bytes before a binary message's payload: the slot it goes to or came from.
 pub const SLOT: usize = 4;
+/// Marks a group message's slot: see the crate's documentation.
+pub const GROUP: u32 = 1 << 31;
+pub const BROADCAST: u32 = u32::MAX;
 
 /// What the relay tells a peer.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -8,6 +8,7 @@
 //! from scratch.
 
 pub use ::relay::code;
+mod group;
 pub mod proxy;
 mod relay;
 pub mod share;
@@ -38,6 +39,8 @@ const SERVICE: &str = "_snowbound._tcp.local.";
 const PING: Duration = Duration::from_secs(15);
 const GONE: Duration = Duration::from_secs(45);
 const OPENING: Duration = Duration::from_secs(5);
+/// The most often presence goes to a peer.
+const PRESENCE_EVERY: Duration = Duration::from_millis(100);
 /// The longest wait before meeting again.
 const PATIENCE: Duration = Duration::from_secs(30);
 /// Wrong tries of a code met off any relay before it admits no one new, as a relay burns one.
@@ -137,16 +140,15 @@ pub struct Peer {
 pub enum Event<'a> {
     /// The peers, their presence, the code or the relay's answer changed.
     Changed,
-    /// A peer was met, with the line to it.
+    /// A stream to a peer opened, with the line to it.
     Met(&'a Arc<Hello>, &'a Line),
-    /// A peer's connection ended.
+    /// A peer's stream ended.
     Left(&'a Arc<Hello>),
-    /// A frame of a kind presence doesn't read itself, with the line to answer on.
+    /// A frame of a kind presence doesn't read itself, on a stream or to the group.
     Frame {
         from: &'a Arc<Hello>,
         kind: u16,
         body: &'a [u8],
-        line: &'a Line,
     },
 }
 
@@ -198,6 +200,48 @@ struct State {
     /// The Live Share version of the last peer met that speaks another.
     outdated: Option<u16>,
     daemon: Option<ServiceDaemon>,
+}
+
+impl State {
+    /// The relay's group, in a notebook's room while the relay is reached.
+    fn group(&self) -> Option<&relay::Group> {
+        self.relay.as_ref()?.group.as_ref()
+    }
+}
+
+/// Presence sent at most every `PRESENCE_EVERY`, and only the newest.
+#[derive(Default)]
+struct Paced {
+    due: Option<Instant>,
+    last: Option<Instant>,
+    sent: Option<u64>,
+}
+
+impl Paced {
+    /// How long to wait for news: until presence is due, else `idle`.
+    fn wait(&self, idle: Duration) -> Duration {
+        self.due
+            .map_or(idle, |due| due.saturating_duration_since(Instant::now()))
+    }
+
+    /// Hears that presence changed.
+    fn changed(&mut self) {
+        let last = self.last;
+        self.due
+            .get_or_insert_with(|| last.map_or_else(Instant::now, |at| at + PRESENCE_EVERY));
+    }
+
+    /// The presence to send now, where it is due and new.
+    fn due(&mut self, state: &Mutex<State>) -> Option<Presence> {
+        self.due.filter(|due| *due <= Instant::now())?;
+        self.due = None;
+        let state = state.lock().unwrap();
+        if self.sent == Some(state.generation) {
+            return None;
+        }
+        (self.sent, self.last) = (Some(state.generation), Some(Instant::now()));
+        Some(state.presence.clone())
+    }
 }
 
 struct Link {
@@ -401,7 +445,8 @@ impl Live {
         thread::spawn(move || shared.dial(address));
     }
 
-    /// Says where this end is now; peers hear only the newest of quick changes.
+    /// Says where this end is now; peers hear only the newest of quick changes, at most every
+    /// tenth of a second.
     pub fn set_presence(&self, presence: Presence) {
         let mut state = self.shared.state.lock().unwrap();
         if state.presence == presence {
@@ -410,14 +455,23 @@ impl Live {
         state.presence = presence;
         state.generation += 1;
         for link in state.peers.values() {
-            let _ = link.line.0.send(Out::Presence);
+            if self.shared.carries_presence(&*link.pipe) {
+                let _ = link.line.0.send(Out::Presence);
+            }
+        }
+        if let Some(group) = state.group() {
+            group.send(relay::Out::Presence);
         }
     }
 
-    /// The peers connected now, by id.
+    /// The peers in the room now, by id.
     pub fn peers(&self) -> Vec<Peer> {
-        let state = self.shared.state.lock().unwrap();
-        state.peers.values().map(|link| link.peer.clone()).collect()
+        self.shared.peers()
+    }
+
+    /// A way to send to this room's peers that doesn't keep it open.
+    pub fn sender(&self) -> Sender {
+        Sender(Arc::downgrade(&self.shared))
     }
 
     /// The line to `peer`, while it is connected.
@@ -442,6 +496,45 @@ impl Live {
     }
 }
 
+/// Sends to a room's peers while the room is open.
+#[derive(Clone)]
+pub struct Sender(std::sync::Weak<Shared>);
+
+impl Sender {
+    /// Sends message `kind` holding `body` to the peers `to` names, or to everyone: once to
+    /// the room's group through the relay, and to each peer met directly.
+    pub fn send(&self, kind: u16, body: &impl Encode<()>, to: Option<&[[u8; 16]]>) {
+        let (Some(shared), Ok(body)) = (self.0.upgrade(), minicbor::to_vec(body)) else {
+            return;
+        };
+        let state = shared.state.lock().unwrap();
+        let group = state.group();
+        let named = |id: &[u8; 16]| to.is_none_or(|to| to.contains(id));
+        let mut slots = Vec::new();
+        for (id, link) in state.peers.iter().filter(|(id, _)| named(id)) {
+            match group {
+                Some(group) if !link.pipe.direct() => slots.extend(group.slot(id)),
+                _ => {
+                    let _ = link.line.0.send(Out::Frame(kind, body.clone()));
+                }
+            }
+        }
+        let Some(group) = group else {
+            return;
+        };
+        match to {
+            None => group.send(relay::Out::Frame(kind, body, None)),
+            Some(to) => {
+                let unlinked = to.iter().filter(|id| !state.peers.contains_key(*id));
+                slots.extend(unlinked.filter_map(|id| group.slot(id)));
+                if !slots.is_empty() {
+                    group.send(relay::Out::Frame(kind, body, Some(slots)));
+                }
+            }
+        }
+    }
+}
+
 impl Drop for Live {
     fn drop(&mut self) {
         self.shared.stopped.store(true, Ordering::Release);
@@ -461,6 +554,38 @@ impl Drop for Live {
 }
 
 impl Shared {
+    /// The peers in the room: those met directly, and the rest as the relay's group or a
+    /// stream through the relay last heard of them.
+    fn peers(&self) -> Vec<Peer> {
+        let state = self.state.lock().unwrap();
+        let mut peers = BTreeMap::new();
+        if let Some(group) = state.group() {
+            for member in group.members.lock().unwrap().values() {
+                if let Some(peer) = &member.peer {
+                    peers.insert(peer.hello.peer, peer.clone());
+                }
+            }
+        }
+        for (id, link) in &state.peers {
+            if link.pipe.direct() || !peers.contains_key(id) {
+                peers.insert(*id, link.peer.clone());
+            }
+        }
+        peers.into_values().collect()
+    }
+
+    /// Whether peer `id` is met directly, which is where it says everything.
+    fn direct(&self, id: &[u8; 16]) -> bool {
+        let state = self.state.lock().unwrap();
+        state.peers.get(id).is_some_and(|link| link.pipe.direct())
+    }
+
+    /// Whether presence goes on `pipe`: not on a stream through the relay in a notebook's
+    /// room, whose group carries it.
+    fn carries_presence(&self, pipe: &dyn Pipe) -> bool {
+        pipe.direct() || matches!(self.room, Room::Code { .. })
+    }
+
     /// The room's tag as it stands: a code's, once numbered.
     fn tag(&self) -> Option<String> {
         match &self.room {
@@ -592,7 +717,9 @@ impl Shared {
                 pipe.shutdown();
                 return false;
             }
-            let _ = line.0.send(Out::Presence);
+            if self.carries_presence(&*pipe) {
+                let _ = line.0.send(Out::Presence);
+            }
             state.peers.insert(
                 peer,
                 Link {
@@ -632,7 +759,6 @@ impl Shared {
                         from: &hello,
                         kind,
                         body: &body,
-                        line: &line,
                     });
                     // The peer hangs up after its bye.
                     if kind == kind::BYE {
@@ -660,22 +786,16 @@ impl Shared {
         true
     }
 
-    /// Sends the newest presence whenever woken, frames as they come, and a ping when quiet.
+    /// Sends the newest presence when woken, at most every `PRESENCE_EVERY`, frames as they
+    /// come, and a ping when quiet.
     fn write(&self, pipe: &dyn Pipe, mut send: Sealer, outgoing: mpsc::Receiver<Out>) {
         let mut stream = pipe;
-        let mut sent = None;
+        let mut paced = Paced::default();
         loop {
-            let result = match outgoing.recv_timeout(PING) {
+            let result = match outgoing.recv_timeout(paced.wait(PING)) {
                 Ok(Out::Presence) => {
-                    let presence = {
-                        let state = self.state.lock().unwrap();
-                        if sent == Some(state.generation) {
-                            continue;
-                        }
-                        sent = Some(state.generation);
-                        state.presence.clone()
-                    };
-                    send.send(&mut stream, kind::PRESENCE, &presence)
+                    paced.changed();
+                    Ok(())
                 }
                 Ok(Out::Frame(kind, body)) => send.send_encoded(&mut stream, kind, &body),
                 Ok(Out::Bye(body)) => {
@@ -683,9 +803,16 @@ impl Shared {
                     pipe.shutdown();
                     return;
                 }
-                Err(mpsc::RecvTimeoutError::Timeout) => send.send(&mut stream, kind::PING, &()),
+                Err(mpsc::RecvTimeoutError::Timeout) if paced.due.is_none() => {
+                    send.send(&mut stream, kind::PING, &())
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => Ok(()),
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             };
+            let result = result.and_then(|()| match paced.due(&self.state) {
+                Some(presence) => send.send(&mut stream, kind::PRESENCE, &presence),
+                None => Ok(()),
+            });
             if result.is_err() {
                 pipe.shutdown();
                 return;

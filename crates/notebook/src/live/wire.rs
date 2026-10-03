@@ -37,6 +37,8 @@ pub mod kind {
     /// Keeps a quiet connection open; it says nothing else.
     pub const PING: u16 = 2;
     pub const BYE: u16 = 3;
+    /// A `Hello` in answer to one heard in a notebook's room's group.
+    pub const HELLO_BACK: u16 = 4;
     pub const PRESENCE: u16 = 16;
     /// A host's files changed: `Touched`.
     pub const TOUCHED: u16 = 18;
@@ -71,6 +73,7 @@ pub const KNOWN: &[u16] = &[
     kind::HELLO,
     kind::PING,
     kind::BYE,
+    kind::HELLO_BACK,
     kind::PRESENCE,
     kind::TOUCHED,
     kind::DELTA,
@@ -225,6 +228,10 @@ pub struct Welcome {
 pub struct Touched {
     #[n(0)]
     pub paths: Vec<String>,
+    /// Each path's stamp now, as `share::digest` hashes it, where it has one: a guest holding
+    /// that image knows the stamp without asking.
+    #[n(1)]
+    pub stamps: Vec<Option<u64>>,
 }
 
 /// What a commit changed in a section a host serves: from the image with stamp `base`, the
@@ -271,7 +278,8 @@ pub struct Request {
     pub limit: Option<u64>,
     #[cbor(n(5), with = "minicbor::bytes")]
     pub bytes: Option<Vec<u8>>,
-    /// A confirmation's or supersession's base.
+    /// A confirmation's or supersession's base; for a section's read, the image the guest
+    /// holds, which the reply may give the changes to.
     #[n(6)]
     pub stamp: Option<WireStamp>,
     #[cbor(n(7), with = "minicbor::bytes")]
@@ -306,6 +314,9 @@ pub struct Reply {
     /// The snapshot a read's later chunks come from.
     #[n(7)]
     pub handle: Option<u64>,
+    /// A read's changes to the image with the request's stamp, in place of its bytes.
+    #[n(8)]
+    pub writes: Option<Vec<Written>>,
 }
 
 /// Why a request failed: an `io::ErrorKind` as `error_kind` numbers it, and for a commit,

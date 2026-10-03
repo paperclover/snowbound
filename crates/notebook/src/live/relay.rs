@@ -1,15 +1,20 @@
-//! Meeting peers through a relay (`crates/relay`): one WebSocket to the room, carrying a
-//! stream to each peer in it, each opened with SPAKE2 and sealed end to end as on a LAN, so
-//! the relay sees only who talks to whom, when, and how much. A stream that breaks makes this
-//! end join the room again, which ends every stream it had there; peers then meet afresh.
+//! Meeting peers through a relay (`crates/relay`): one WebSocket to the room, carrying
+//! streams to peers in it, each opened with SPAKE2 and sealed end to end as on a LAN, so the
+//! relay sees only who talks to whom, when, and how much. In a code's room every two peers
+//! have a stream. In a notebook's room only a host and each guest do; everything else goes
+//! to the room's group (`group`), sent once and copied by the relay. A stream or group frame
+//! that breaks makes this end join the room again, which ends every stream it had there;
+//! peers then meet afresh.
 
 use super::{
-    Event, OPENING, PATIENCE, Pipe, Relayed as Answer, Shared, Side, code_parts,
+    Event, Hello, OPENING, PATIENCE, Paced, Peer, Pipe, Presence, Relayed as Answer, Room, Shared,
+    Side, code_parts, group,
     transport::{self, Address, Failure, parse},
+    wire::kind,
 };
-use ::relay::{Notice, SLOT, Verdict, ws};
+use ::relay::{BROADCAST, GROUP, Notice, SLOT, Verdict, ws};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     io::{self, BufReader, Read, Write},
     sync::{Arc, Mutex, atomic::Ordering, mpsc},
     thread,
@@ -67,7 +72,7 @@ fn keep(shared: &Arc<Shared>, address: &Address, port: u16) {
                 None => format!("{}/v1/claim", address.path),
             },
         };
-        match connect(address, &path, owner) {
+        match connect(shared, address, &path, owner) {
             Ok((socket, reader)) => {
                 shared.state.lock().unwrap().relay = Some(Arc::clone(&socket));
                 answered(shared, Answer::Joined);
@@ -99,14 +104,25 @@ fn keep(shared: &Arc<Shared>, address: &Address, port: u16) {
 }
 
 /// Opens the relay's `path` at `address`: the connection, and what reads its messages.
-fn connect(address: &Address, path: &str, owner: bool) -> Result<(Arc<Socket>, Reader), Failure> {
+fn connect(
+    shared: &Shared,
+    address: &Address,
+    path: &str,
+    owner: bool,
+) -> Result<(Arc<Socket>, Reader), Failure> {
     let connection = transport::connect(address, path)?;
     let reader = ws::Reader::new(BufReader::new(connection.reader), MOST, false);
+    let group = matches!(shared.room, Room::Notebook(_)).then(|| Group {
+        keys: group::Keys::new(&shared.secret),
+        members: Mutex::default(),
+        out: Mutex::default(),
+    });
     let socket = Arc::new(Socket {
         send: Mutex::new(connection.writer),
         close: connection.close,
         owner,
         links: Mutex::default(),
+        group,
     });
     Ok((socket, reader))
 }
@@ -118,6 +134,42 @@ pub(super) struct Socket {
     /// Whether this end claimed the room for its code, and so tells the relay who knew it.
     owner: bool,
     links: Mutex<Links>,
+    /// A notebook's room's group.
+    pub(super) group: Option<Group>,
+}
+
+/// A notebook's room's group: its key, the peers heard in it, and the way to this end's
+/// thread sending to it.
+pub(super) struct Group {
+    keys: group::Keys,
+    /// The peers heard in the group, by slot.
+    pub(super) members: Mutex<HashMap<u32, group::Member>>,
+    /// To the thread sending this end's group frames, while connected.
+    out: Mutex<Option<mpsc::Sender<Out>>>,
+}
+
+/// What this end sends the group next.
+pub(super) enum Out {
+    /// The newest presence, to everyone.
+    Presence,
+    /// A message kind and its encoded body, to everyone or to the peers in these slots.
+    Frame(u16, Vec<u8>, Option<Vec<u32>>),
+}
+
+impl Group {
+    pub(super) fn send(&self, out: Out) {
+        if let Some(sender) = &*self.out.lock().unwrap() {
+            let _ = sender.send(out);
+        }
+    }
+
+    /// The slot of the member that is peer `id`.
+    pub(super) fn slot(&self, id: &[u8; 16]) -> Option<u32> {
+        let members = self.members.lock().unwrap();
+        members
+            .iter()
+            .find_map(|(slot, member)| (member.hello()?.peer == *id).then_some(*slot))
+    }
 }
 
 /// The streams a socket carries, by the slot of the peer at the other end.
@@ -169,6 +221,13 @@ fn session(
             }
         }
     });
+    if let Some(group) = &socket.group {
+        let (out, outgoing) = mpsc::channel();
+        *group.out.lock().unwrap() = Some(out);
+        let (shared, socket) = (Arc::clone(shared), Arc::clone(socket));
+        thread::spawn(move || speak(&shared, &socket, outgoing));
+    }
+    let notebook = socket.group.is_some();
     while let Ok(message) = reader.read() {
         match message {
             ws::Message::Text(text) => match text.parse() {
@@ -191,12 +250,22 @@ fn session(
                 }
                 Ok(Notice::Welcome { you, members }) => {
                     socket.links.lock().unwrap().me = you;
-                    for slot in members {
+                    for slot in members.into_iter().filter(|_| !notebook) {
                         meet(shared, socket, tag.as_deref(), slot, None);
                     }
                 }
-                Ok(Notice::Joined(slot)) => meet(shared, socket, tag.as_deref(), slot, None),
-                Ok(Notice::Left(slot)) => socket.forget(slot),
+                Ok(Notice::Joined(slot)) if !notebook => {
+                    meet(shared, socket, tag.as_deref(), slot, None);
+                }
+                Ok(Notice::Joined(_)) => {}
+                Ok(Notice::Left(slot)) => {
+                    socket.forget(slot);
+                    let left = (socket.group.as_ref())
+                        .and_then(|group| group.members.lock().unwrap().remove(&slot));
+                    if left.is_some() {
+                        (shared.events)(Event::Changed);
+                    }
+                }
                 Ok(Notice::Burned) => {
                     // Coming back, ask for another number.
                     *nameplate = None;
@@ -205,12 +274,17 @@ fn session(
                 }
                 Err(()) => {}
             },
-            ws::Message::Binary(data) => {
-                if let Some((slot, bytes)) = data.split_first_chunk::<SLOT>() {
+            ws::Message::Binary(data) => match data.split_first_chunk::<SLOT>() {
+                Some((slot, frame)) if u32::from_be_bytes(*slot) & GROUP != 0 => {
+                    let slot = u32::from_be_bytes(*slot) & !GROUP;
+                    heard(shared, socket, tag.as_deref(), slot, frame);
+                }
+                Some((slot, bytes)) => {
                     let slot = u32::from_be_bytes(*slot);
                     meet(shared, socket, tag.as_deref(), slot, Some(bytes.to_vec()));
                 }
-            }
+                None => {}
+            },
             ws::Message::Ping(payload) => {
                 let _ = socket.send(ws::PONG, &payload);
             }
@@ -219,11 +293,155 @@ fn session(
         }
     }
     socket.links.lock().unwrap().inboxes.clear();
+    if let Some(group) = &socket.group {
+        *group.out.lock().unwrap() = None;
+        group.members.lock().unwrap().clear();
+        (shared.events)(Event::Changed);
+    }
 }
 
-/// Hands `bytes` from the peer in `slot` to its stream, or opens one: this end opens a stream
-/// to a peer with a lower slot when told of it, and answers one with a higher slot when its
-/// first bytes come.
+/// Sends this end's group frames: its hello, asking everyone for theirs, then its presence
+/// at most every `PRESENCE_EVERY`, and frames as they come.
+fn speak(shared: &Shared, socket: &Socket, outgoing: mpsc::Receiver<Out>) {
+    let Some(group) = &socket.group else {
+        return;
+    };
+    let Ok(mut sealer) = group::Sealer::new(&group.keys) else {
+        return;
+    };
+    let mut send = |kind: u16, body: &[u8], to: Option<&[u32]>| -> io::Result<()> {
+        let sealed = sealer.seal(kind, body, to.is_none())?;
+        let mut message = match to {
+            None => BROADCAST.to_be_bytes().to_vec(),
+            Some(slots) => {
+                let mut message = (GROUP | slots.len() as u32).to_be_bytes().to_vec();
+                slots
+                    .iter()
+                    .for_each(|slot| message.extend(slot.to_be_bytes()));
+                message
+            }
+        };
+        message.extend(sealed);
+        socket.send(ws::BINARY, &message)
+    };
+    let hello = minicbor::to_vec(&shared.me).unwrap_or_default();
+    if send(kind::HELLO, &hello, None).is_err() {
+        return;
+    }
+    let mut paced = Paced::default();
+    paced.changed();
+    loop {
+        let next = match paced.due {
+            Some(_) => outgoing.recv_timeout(paced.wait(Duration::ZERO)),
+            None => outgoing
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        };
+        let result = match next {
+            Ok(Out::Presence) => {
+                paced.changed();
+                Ok(())
+            }
+            Ok(Out::Frame(kind, body, to)) => send(kind, &body, to.as_deref()),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(()),
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        };
+        let result = result.and_then(|()| match paced.due(&shared.state) {
+            Some(presence) => send(
+                kind::PRESENCE,
+                &minicbor::to_vec(&presence).unwrap_or_default(),
+                None,
+            ),
+            None => Ok(()),
+        });
+        if result.is_err() {
+            return;
+        }
+    }
+}
+
+/// Takes in a group frame from the peer in `slot`: its hello, answered with this end's and
+/// meeting it where it serves; its presence; or what else it says.
+fn heard(shared: &Arc<Shared>, socket: &Arc<Socket>, tag: Option<&str>, slot: u32, frame: &[u8]) {
+    let Some(group) = &socket.group else {
+        return;
+    };
+    let opened = {
+        let mut members = group.members.lock().unwrap();
+        let member = match members.entry(slot) {
+            Entry::Occupied(member) => Ok(member.into_mut()),
+            Entry::Vacant(vacant) => {
+                group::Member::new(&group.keys, frame).map(|m| vacant.insert(m))
+            }
+        };
+        member.and_then(|member| {
+            let (kind, body) = member.open(frame)?;
+            Ok((kind, body, member.hello().cloned()))
+        })
+    };
+    let (kind, body, hello) = match opened {
+        Ok(opened) => opened,
+        Err(error) => {
+            eprintln!("Live: the relay broke the room's frames ({error}); meeting again");
+            socket.hang_up();
+            return;
+        }
+    };
+    match kind {
+        kind::HELLO | kind::HELLO_BACK => {
+            let Ok(hello) = minicbor::decode::<Hello>(&body) else {
+                return;
+            };
+            if hello.peer == shared.me.peer {
+                return;
+            }
+            let serves = hello.serves.is_some() && shared.me.serves.is_none();
+            if let Some(member) = group.members.lock().unwrap().get_mut(&slot) {
+                member.peer = Some(Peer {
+                    hello: Arc::new(hello),
+                    presence: None,
+                });
+            }
+            if kind == kind::HELLO {
+                let presence = minicbor::to_vec(&shared.state.lock().unwrap().presence);
+                let presence = presence.unwrap_or_default();
+                let me = minicbor::to_vec(&shared.me).unwrap_or_default();
+                group.send(Out::Frame(kind::HELLO_BACK, me, Some(vec![slot])));
+                group.send(Out::Frame(kind::PRESENCE, presence, Some(vec![slot])));
+            }
+            if serves {
+                meet(shared, socket, tag, slot, None);
+            }
+            (shared.events)(Event::Changed);
+        }
+        kind::PRESENCE => {
+            let Ok(presence) = minicbor::decode::<Presence>(&body) else {
+                return;
+            };
+            let mut members = group.members.lock().unwrap();
+            if let Some(peer) = members.get_mut(&slot).and_then(|m| m.peer.as_mut()) {
+                peer.presence = Some(presence);
+                drop(members);
+                (shared.events)(Event::Changed);
+            }
+        }
+        // A peer met directly says the rest there.
+        kind if kind < 256 => {
+            if let Some(hello) = hello.filter(|hello| !shared.direct(&hello.peer)) {
+                (shared.events)(Event::Frame {
+                    from: &hello,
+                    kind,
+                    body: &body,
+                });
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Hands `bytes` from the peer in `slot` to its stream, or opens one. In a code's room this
+/// end opens a stream to a peer with a lower slot when told of it, and answers one with a
+/// higher slot when its first bytes come; in a notebook's room a guest opens one to its host.
 fn meet(
     shared: &Arc<Shared>,
     socket: &Arc<Socket>,
@@ -238,9 +456,12 @@ fn meet(
         }
         return;
     }
+    let notebook = socket.group.is_some();
     let side = match bytes {
-        None if slot < links.me => Side::Initiator,
-        Some(_) if slot > links.me => Side::Responder,
+        None if notebook || slot < links.me => Side::Initiator,
+        Some(_) if (notebook && shared.me.serves.is_some()) || (!notebook && slot > links.me) => {
+            Side::Responder
+        }
         _ => return,
     };
     let Some(tag) = tag.filter(|_| !links.ended.contains(&slot)) else {

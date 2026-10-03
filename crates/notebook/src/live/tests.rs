@@ -359,22 +359,25 @@ enum Tamper {
 }
 
 /// A relay in the middle of Grace's connection that passes on what the real one at
-/// `upstream` says, except the message to her numbered `at` among those from peers, which it
+/// `upstream` says, except the first message to her from a peer once `armed`, which it
 /// tampers with. Her next connection waits for `release`.
 struct Malicious {
     url: String,
+    armed: Arc<std::sync::atomic::AtomicBool>,
     tampered: mpsc::Receiver<()>,
     rejoined: mpsc::Receiver<()>,
     release: mpsc::Sender<()>,
 }
 
-fn malicious(upstream: SocketAddr, tamper: Tamper, at: usize) -> Malicious {
+fn malicious(upstream: SocketAddr, tamper: Tamper) -> Malicious {
     use ::relay::ws::{self, Message};
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let (tampered, told) = mpsc::channel();
     let (rejoined, heard) = mpsc::channel();
     let (release, released) = mpsc::channel();
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let arming = Arc::clone(&armed);
     thread::spawn(move || {
         for (index, client) in listener.incoming().enumerate() {
             let mut client = client.unwrap();
@@ -389,19 +392,19 @@ fn malicious(upstream: SocketAddr, tamper: Tamper, at: usize) -> Malicious {
                 let _ = io::copy(&mut up, &mut to_server);
                 let _ = to_server.shutdown(Shutdown::Both);
             });
-            let tampered = tampered.clone();
+            let (tampered, armed) = (tampered.clone(), Arc::clone(&arming));
             thread::spawn(move || {
                 let mut reading = io::BufReader::new(server);
                 let head = ws::head(&mut reading).unwrap();
                 client.write_all(head.as_bytes()).unwrap();
                 let mut messages = ws::Reader::new(reading, 1 << 20, false);
-                let (mut count, mut held) = (0, None);
+                let mut held = None;
                 while let Ok(message) = messages.read() {
                     let frames: Vec<Vec<u8>> = match message {
                         Message::Binary(mut data) => {
-                            count += 1;
                             let mut out = vec![];
-                            if index == 0 && count - 1 == at {
+                            if index == 0 && armed.swap(false, std::sync::atomic::Ordering::AcqRel)
+                            {
                                 match tamper {
                                     Tamper::Drop => {}
                                     Tamper::Repeat => out = vec![data.clone(), data],
@@ -411,7 +414,8 @@ fn malicious(upstream: SocketAddr, tamper: Tamper, at: usize) -> Malicious {
                                         out = vec![data];
                                     }
                                     Tamper::Inject => {
-                                        // A slot, length and number, then made-up bytes.
+                                        // A slot and part of the sender's id, then
+                                        // made-up bytes.
                                         let mut forged = data.clone();
                                         forged[16..].fill(7);
                                         out = vec![forged, data];
@@ -441,6 +445,7 @@ fn malicious(upstream: SocketAddr, tamper: Tamper, at: usize) -> Malicious {
     });
     Malicious {
         url,
+        armed,
         tampered: told,
         rejoined: heard,
         release,
@@ -460,9 +465,9 @@ fn recording(name: &str, room: &Room, relay: &str) -> (Live, Arc<Mutex<Vec<Optio
         let Some(shared) = watched.get().and_then(std::sync::Weak::upgrade) else {
             return;
         };
-        let entry = match shared.state.lock().unwrap().peers.values().next() {
+        let entry = match shared.peers().first() {
             None => Some(None),
-            Some(link) => link.peer.presence.clone().map(Some),
+            Some(peer) => peer.presence.clone().map(Some),
         };
         recorded.lock().unwrap().extend(entry);
     })
@@ -487,14 +492,17 @@ fn a_malicious_relay_is_caught() {
         let (url, address) = relay(Default::default());
         let ada = Live::start(hello("Ada"), &room, None, Some(&url), |_| {}).unwrap();
         ada.set_presence(caret(1));
-        // Ada's opening, hello and first presence reach Grace; the next is tampered with.
-        let relay = malicious(address, tamper, 3);
+        let relay = malicious(address, tamper);
         let (grace, heard) = recording("Grace", &room, &relay.url);
         until(&grace, |peers| {
             peers
                 .first()
                 .is_some_and(|peer| peer.presence == Some(caret(1)))
         });
+        // Ada's next presence goes to everyone, so its loss is caught too.
+        relay
+            .armed
+            .store(true, std::sync::atomic::Ordering::Release);
         ada.set_presence(caret(2));
         relay
             .tampered
