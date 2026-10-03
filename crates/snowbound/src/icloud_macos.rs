@@ -90,9 +90,10 @@ pub fn folder() -> Option<PathBuf> {
 
 /// Looks for the app's own folder in iCloud Drive on a thread of its own, as asking the
 /// iCloud daemon can take a while, then calls `changed`, and again whenever a folder at its
-/// top comes or goes, as another device adds or removes a notebook.
+/// top comes or goes, as another device adds or removes a notebook. A replay settles only
+/// once it has looked.
 pub fn look_up(changed: impl Fn() + Send + Sync + 'static) {
-    std::thread::spawn(move || {
+    crate::spawn(move || {
         let changed = std::sync::Arc::new(changed);
         let found = container().map(|root| {
             let report = std::sync::Arc::clone(&changed);

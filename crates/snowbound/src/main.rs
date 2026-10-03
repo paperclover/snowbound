@@ -378,6 +378,9 @@ enum Replay {
     Settle(Option<PathBuf>, std::sync::mpsc::Sender<()>),
     /// A frame during a wait, as a visible window's display would ask for.
     Tick,
+    /// What the window sent itself when it found nothing on its way, at that instant: once it
+    /// arrives, so has every event sent before.
+    Mark(Instant),
     Appearance(winit::window::Theme),
     /// Resizes the window's content, in points.
     Resize([f32; 2]),
@@ -915,10 +918,13 @@ struct State {
     zoom_typed: Option<String>,
     /// Where a replay asked the next frame to be written.
     snapshot: Option<PathBuf>,
-    /// A replay waiting for nothing to be on its way, and where it wants the accessibility
-    /// tree written then.
-    /// Whether the last frame found the window quiet too, which the tree waits for.
-    replay_settle: Option<(Option<PathBuf>, std::sync::mpsc::Sender<()>, bool)>,
+    /// A replay waiting for nothing to be on its way, where it wants the accessibility tree
+    /// written then, and the mark sent since the window was last found busy.
+    replay_settle: Option<(
+        Option<PathBuf>,
+        std::sync::mpsc::Sender<()>,
+        Option<Instant>,
+    )>,
     /// `SNOWBOUND_FRAMES`: a directory every frame drawn is also written to, named by
     /// milliseconds since the window opened.
     frames: Option<(PathBuf, Instant)>,
@@ -5841,7 +5847,8 @@ fn spawn(work: impl FnOnce() + Send + 'static) {
     RUNNING.fetch_add(1, Ordering::Relaxed);
     let work = move || {
         work();
-        RUNNING.fetch_sub(1, Ordering::Relaxed);
+        // Whatever `work` sent is in the queue before the count shows it done.
+        RUNNING.fetch_sub(1, Ordering::Release);
     };
     #[cfg(not(target_arch = "wasm32"))]
     std::thread::spawn(work);
@@ -5919,6 +5926,10 @@ impl State {
             }
             UserEvent::Redraw => self.window.request_redraw(),
             UserEvent::Replay(replay) => {
+                let mark = match replay {
+                    Replay::Mark(at) => Some(at),
+                    _ => None,
+                };
                 match replay {
                     Replay::Input(event) => self.input(event),
                     Replay::Pinch(factor) => {
@@ -5928,9 +5939,9 @@ impl State {
                     }
                     Replay::Snapshot(path) => self.snapshot = Some(path),
                     Replay::Settle(path, settled) => {
-                        self.replay_settle = Some((path, settled, false));
+                        self.replay_settle = Some((path, settled, None));
                     }
-                    Replay::Tick | Replay::Quit => {}
+                    Replay::Tick | Replay::Mark(_) | Replay::Quit => {}
                     Replay::Appearance(appearance) => {
                         self.window.set_theme(Some(appearance));
                         self.set_appearance(appearance);
@@ -5945,21 +5956,29 @@ impl State {
                 if let Err(error) = self.frame() {
                     eprintln!("{error}");
                 }
-                // Quiet on two frames apart, what a thread sent as it ended has been taken.
+                // Quiet still when the mark sent on finding it quiet arrives, what a thread sent
+                // as it ended has been taken, however many frames wait in the queue before it.
                 let quiet = self.settled()
                     && self.opening.is_none()
-                    && RUNNING.load(Ordering::Relaxed) == 0
+                    && RUNNING.load(Ordering::Acquire) == 0
                     && self.search.pending.load(Ordering::Relaxed) == 0;
-                if let Some((path, settled, was)) = self.replay_settle.take() {
-                    if !(quiet && was) {
-                        self.replay_settle = Some((path, settled, quiet));
-                    } else {
-                        if let Some(path) = path
-                            && let Err(error) = self.write_accessibility(&path)
-                        {
-                            eprintln!("{error}");
+                if let Some((path, settled, sent)) = self.replay_settle.take() {
+                    match (quiet, sent) {
+                        (true, Some(sent)) if mark == Some(sent) => {
+                            if let Some(path) = path
+                                && let Err(error) = self.write_accessibility(&path)
+                            {
+                                eprintln!("{error}");
+                            }
+                            let _ = settled.send(());
                         }
-                        let _ = settled.send(());
+                        (true, None) => {
+                            let now = Instant::now();
+                            let _ = self.proxy.send_event(UserEvent::Replay(Replay::Mark(now)));
+                            self.replay_settle = Some((path, settled, Some(now)));
+                        }
+                        (true, sent) => self.replay_settle = Some((path, settled, sent)),
+                        (false, _) => self.replay_settle = Some((path, settled, None)),
                     }
                 }
             }
