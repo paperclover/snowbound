@@ -376,10 +376,38 @@ impl State {
             }
             (Some(action), _) => {
                 self.menu = None;
-                self.act_on(target, action);
+                match target {
+                    // From its tab, as a double click there renames it.
+                    Target::Section { library, path }
+                        if action == Action::Rename && self.on_tab(&library, &path, point) =>
+                    {
+                        self.rename(crate::rename::Target::Entry {
+                            library,
+                            path,
+                            in_tab: true,
+                        });
+                    }
+                    target => self.act_on(target, action),
+                }
             }
             (None, _) => {}
         }
+    }
+
+    /// Whether `point`, where a context menu opened, is on the tab of section `path`.
+    fn on_tab(&self, library: &Arc<Library>, path: &str, point: [f32; 2]) -> bool {
+        let shown = self.session.as_ref().is_some_and(|session| {
+            Arc::ptr_eq(&session.library, library)
+                && session.tabs.iter().any(|tab| tab.path == path)
+        });
+        let [x, y] = point;
+        shown
+            && self
+                .ui
+                .rect(crate::sections())
+                .is_some_and(|[left, top, right, bottom]| {
+                    x >= left && x < right && y >= top && y < bottom
+                })
     }
 
     /// What can be done to `target`, in its context menu's order, as each shows there.

@@ -564,23 +564,26 @@ fn a_version_copied_into_its_section_is_listed_and_found() {
     assert!(!search_results(&found).is_empty(), "{found}");
 }
 
-/// Rename on a section tab's menu opens the shut sidebar on a field that takes what is
-/// typed over the old name at once.
+/// Rename on a section tab's menu opens the field on the tab, as a double click there does,
+/// which takes what is typed over the old name at once; the shut sidebar stays shut.
 #[test]
-fn renaming_a_section_from_its_tab_types_into_the_sidebar_at_once() {
-    let scratch = Scratch::new("rename-shut-sidebar");
+fn renaming_a_section_from_its_tab_types_into_the_tab_at_once() {
+    let scratch = Scratch::new("rename-tab");
     let notebook =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
     let mut steps = vec!["move 110 53", "press right", "release right", "settle"];
     steps.extend(["key Down", "key Enter", "settle"]);
     steps.extend(["type Renamed", "accessibility typed"]);
-    let [typed] = replay(&scratch, Some(&notebook), &steps)
+    steps.extend(["key Enter", "settle", "accessibility renamed"]);
+    let [typed, renamed] = replay(&scratch, Some(&notebook), &steps)
         .try_into()
         .unwrap();
     assert!(
         typed.contains(r#"TextInput "Name" = "Renamed" [focused]"#),
         "{typed}"
     );
+    assert!(notebooks(&typed).is_empty(), "the sidebar opened:\n{typed}");
+    assert!(renamed.contains(r#"Tab "Renamed""#), "{renamed}");
 }
 
 /// Finding on the page leaves the query room beside the match count: a press just past
