@@ -768,9 +768,8 @@ pub(crate) fn gallery(
     let row = |height: f32| [240.0, height + 8.0];
     let groups: Vec<ui::popup::Group> = STYLES
         .iter()
-        .enumerate()
-        .map(|(at, (name, _))| ui::popup::Group {
-            heading: if at == 0 { &sheet.name } else { "" },
+        .map(|(name, _)| ui::popup::Group {
+            heading: "",
             ruled: false,
             cells: 1,
             columns: 1,
