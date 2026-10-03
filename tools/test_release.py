@@ -36,15 +36,25 @@ class ReleaseTest(unittest.TestCase):
                     '* pinch zoom.\n\nAssisted-by: claude-opus-5.5\n'),
             [('feature', 'macOS ships an icon so Tahoe shows it'), ('feature', 'Pinch zoom')])
 
-    def test_changes_start_after_the_first_build_and_carry_their_commits_versions(self):
-        first = release['FIRST']
-        commits = {first: ([], utc('2026-09-30T10:00:00'), 'fix: published first'),
-                   'b': ([first], utc('2026-09-30T11:00:00'), 'feat: pinch zoom'),
+    def test_changes_start_after_the_build_before_and_carry_their_commits_versions(self):
+        commits = {'a': ([], utc('2026-09-30T10:00:00'), 'fix: published first'),
+                   'b': (['a'], utc('2026-09-30T11:00:00'), 'feat: pinch zoom'),
                    'c': (['b'], utc('2026-09-30T12:00:00'), 'fix: two\n\n- one\n- two\n')}
-        self.assertEqual(release['changes'](commits, 'c'), [
+        self.assertEqual(release['changes'](commits, 'c', 'a'), [
             {'version': '2026-09-30-r2', 'kind': 'feature', 'title': 'Pinch zoom'},
             {'version': '2026-09-30-r3', 'kind': 'fix', 'title': 'One'},
             {'version': '2026-09-30-r3', 'kind': 'fix', 'title': 'Two'}])
+        self.assertEqual(release['changes'](commits, 'c', 'b'), [
+            {'version': '2026-09-30-r3', 'kind': 'fix', 'title': 'One'},
+            {'version': '2026-09-30-r3', 'kind': 'fix', 'title': 'Two'}])
+
+    def test_builds_are_the_published_folders_oldest_first(self):
+        with tempfile.TemporaryDirectory() as published:
+            for entry in ['2026-10-02.r34', '2026-09-30.r2', '2026-10-02.r7', '.2026-10-03.r1.partial', 'latest']:
+                (Path(published) / entry).mkdir()
+            (Path(published) / 'latest.json').touch()
+            self.assertEqual(release['builds'](Path(published)),
+                             [('2026-09-30', 2), ('2026-10-02', 7), ('2026-10-02', 34)])
 
     def test_latest_only_moves_forward(self):
         latest = {'macos-aarch64': '2026-09-29-r9', 'linux-x86_64': '2026-09-30-r1'}

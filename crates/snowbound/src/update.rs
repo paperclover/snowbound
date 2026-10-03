@@ -1,7 +1,8 @@
 //! Snowbound updating itself. Every published build keeps its own folder under `BASE`, with a
-//! `build.json` the release key signs; `latest.json` names each platform's newest build. A
-//! thread checks on launch and daily, downloads a newer build for this platform, verifies
-//! it, and unpacks it beside the install. Restart to Update swaps it in once the app quits.
+//! `build.json` the release key signs; `latest.json` names each platform's newest build, and
+//! `history.json` every build. A thread checks on launch and daily, downloads a newer build
+//! for this platform, verifies it, and unpacks it beside the install. Restart to Update
+//! swaps it in once the app quits.
 //! `tools/RELEASE.md` describes the publishing side. In the browser an update is a reload,
 //! so nothing is fetched or installed there.
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -12,7 +13,7 @@ use crate::{EventLoopProxy, State, UserEvent, platform};
 #[cfg(not(target_arch = "wasm32"))]
 use ring::signature::{ED25519, UnparsedPublicKey};
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 #[cfg(not(target_os = "linux"))]
 use std::env::current_exe as executable;
 use std::ffi::OsString;
@@ -35,6 +36,9 @@ const KEY: &str = include_str!("../../../minisign.pub");
 pub const FINISH: &str = "--finish-update";
 
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// How many builds' changes a check reads at most, the newest's included.
+const CHAIN: usize = 20;
 
 /// This build's version as `tools/release.py` stamped it; development builds have none.
 fn running() -> Option<Version> {
@@ -130,10 +134,19 @@ pub fn describe_running() -> String {
 struct Build {
     version: String,
     archives: HashMap<String, Archive>,
-    /// Every change since the first published build, oldest first; builds before these
-    /// were listed have none.
+    /// The changes since the build published before it, oldest first. Builds published before
+    /// `history.json` list every change since the first published build, and earlier ones none.
     #[serde(default)]
     changes: Vec<Change>,
+}
+
+/// What an update brings, features first.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Changes {
+    pub list: Vec<Change>,
+    /// Some builds' changes went unread: past `CHAIN`, unverified, or with no `history.json`
+    /// to name them.
+    pub more: bool,
 }
 
 /// One feature, bug fix or other change a build brings, as `tools/release.py` lists them.
@@ -165,29 +178,39 @@ impl Kind {
     }
 }
 
-/// What `changes` amount to, as "3 features, 5 bug fixes, and 2 other changes"; none when
-/// there are none.
-pub fn summary(changes: &[Change]) -> Option<String> {
-    let parts: Vec<String> = [
+/// What `changes` amount to, as "3 features, 5 bug fixes, and 2 other changes", or "1 bug
+/// fix and more" where some went unread; none when there are none.
+pub fn summary(changes: &Changes) -> Option<String> {
+    if changes.list.is_empty() {
+        return None;
+    }
+    let mut parts: Vec<String> = [
         (Kind::Feature, "feature", "features"),
         (Kind::Fix, "bug fix", "bug fixes"),
         (Kind::Other, "other change", "other changes"),
     ]
     .into_iter()
     .filter_map(|(kind, one, many)| {
-        match changes.iter().filter(|change| change.kind == kind).count() {
+        match changes
+            .list
+            .iter()
+            .filter(|change| change.kind == kind)
+            .count()
+        {
             0 => None,
             1 => Some(format!("1 {one}")),
             count => Some(format!("{count} {many}")),
         }
     })
     .collect();
-    match parts.as_slice() {
-        [] => None,
-        [one] => Some(one.clone()),
-        [first, second] => Some(format!("{first} and {second}")),
-        [rest @ .., last] => Some(format!("{}, and {last}", rest.join(", "))),
+    if changes.more {
+        parts.push("more".to_owned());
     }
+    Some(match parts.as_slice() {
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] if !rest.is_empty() => format!("{}, and {last}", rest.join(", ")),
+        _ => parts.concat(),
+    })
 }
 
 /// What the signed `build.json` says of an archive. The `signature` it also gives, the release
@@ -255,36 +278,69 @@ fn newer(
         .then_some(version))
 }
 
-/// `platform`'s archive in the build `build.json` describes, once its signature holds and
-/// it describes `version`, and its changes since `running`, features first.
-fn archive(
+/// The build `build.json` describes, once its signature holds and it describes `version`.
+fn verified(
     key: &[u8],
     build: &[u8],
     signature: &[u8],
     version: &Version,
-    platform: &str,
-    running: Option<&Version>,
-) -> Result<(Archive, Vec<Change>), String> {
+) -> Result<Build, String> {
     verify(key, build, &String::from_utf8_lossy(signature))?;
-    let mut build: Build =
+    let build: Build =
         serde_json::from_slice(build).map_err(|error| format!("build.json: {error}"))?;
     if Version::parse(&build.version).as_ref() != Some(version) {
         return Err(format!("build.json describes {}", build.version));
     }
-    let archive = build
-        .archives
-        .remove(platform)
-        .ok_or_else(|| format!("{} has no {platform} archive", version.name()))?;
-    let mut changes: Vec<Change> = build
-        .changes
-        .into_iter()
-        .filter(|change| {
-            Version::parse(&change.version)
-                .is_some_and(|made| running.is_none_or(|running| made > *running))
-        })
+    Ok(build)
+}
+
+/// What updating from `running` to `newest`, whose verified `build` is given, brings: the
+/// changes of each build `history` names between them, read in parallel, and `build`'s.
+/// Skipped releases count whatever platforms they built. A commit's changes count from the
+/// newest build listing them, as builds published before `history.json` list every change
+/// since the first. `history` comes unsigned and only says which builds to read.
+fn changes(
+    newest: &Version,
+    build: Build,
+    history: Option<BTreeSet<Version>>,
+    running: Option<&Version>,
+    read: &(dyn Fn(&Version) -> Result<Build, &'static str> + Sync),
+) -> Changes {
+    let mut more = history.is_none();
+    let mut known = history.unwrap_or_default();
+    known.insert(newest.clone());
+    let mut older: Vec<&Version> = known
+        .range(..newest)
+        .rev()
+        .take_while(|version| running.is_none_or(|running| *version > running))
         .collect();
-    changes.sort_by_key(|change| change.kind);
-    Ok((archive, changes))
+    more |= older.len() >= CHAIN;
+    older.truncate(CHAIN - 1);
+    let builds: Vec<Option<Build>> = std::thread::scope(|scope| {
+        let threads: Vec<_> = (older.iter())
+            .map(|&version| scope.spawn(move || read(version).ok()))
+            .collect();
+        (threads.into_iter())
+            .map(|thread| thread.join().unwrap())
+            .collect()
+    });
+    more |= builds.iter().any(Option::is_none);
+    let mut listed = HashSet::new();
+    let mut lists = Vec::new();
+    for build in std::iter::once(build).chain(builds.into_iter().flatten()) {
+        let own: Vec<Change> = (build.changes.into_iter())
+            .filter(|change| {
+                !listed.contains(&change.version)
+                    && Version::parse(&change.version)
+                        .is_some_and(|made| running.is_none_or(|running| made > *running))
+            })
+            .collect();
+        listed.extend(own.iter().map(|change| change.version.clone()));
+        lists.push(own);
+    }
+    let mut list: Vec<Change> = lists.into_iter().rev().flatten().collect();
+    list.sort_by_key(|change| change.kind);
+    Changes { list, more }
 }
 
 fn check_archive(archive: &Archive, bytes: &[u8]) -> Result<(), String> {
@@ -404,9 +460,9 @@ pub enum Status {
     Downloading(Version),
     /// Verified and unpacked beside the install, waiting for Restart to Update, with what it
     /// changes.
-    Ready(Version, PathBuf, Vec<Change>),
+    Ready(Version, PathBuf, Changes),
     /// Newer than this build, which can't install it itself: its folder has the download.
-    Available(Version, Vec<Change>),
+    Available(Version, Changes),
     Failed(&'static str),
 }
 
@@ -416,7 +472,7 @@ const UNVERIFIED: &str =
     "The update didn’t match Snowbound’s release signature, so it wasn’t installed.";
 
 /// Fetches a path under `BASE`, refusing a body over the limit in bytes.
-type Fetch<'a> = dyn Fn(&str, u64) -> Result<Vec<u8>, String> + 'a;
+type Fetch<'a> = dyn Fn(&str, u64) -> Result<Vec<u8>, String> + Sync + 'a;
 
 /// Looks for a build newer than `running` and stages it beside `install` if there is one.
 fn check(
@@ -446,10 +502,28 @@ fn check(
         else {
             return Ok(Status::UpToDate);
         };
-        let build = fetch(&format!("{}build.json", version.folder()), 1 << 20)?;
-        let signature = fetch(&format!("{}build.json.sig", version.folder()), 1 << 10)?;
-        let (archive, changes) =
-            archive(key, &build, &signature, &version, &platform, since).map_err(unverified)?;
+        let read = |version: &Version| {
+            let build = fetch(&format!("{}build.json", version.folder()), 1 << 20)?;
+            let signature = fetch(&format!("{}build.json.sig", version.folder()), 1 << 10)?;
+            verified(key, &build, &signature, version).map_err(unverified)
+        };
+        let mut build = read(&version)?;
+        let archive = build
+            .archives
+            .remove(&platform)
+            .ok_or_else(|| unverified(format!("{} has no {platform} archive", version.name())))?;
+        let history = fetch("history.json", 1 << 20).ok().and_then(|bytes| {
+            let names = serde_json::from_slice::<Vec<String>>(&bytes);
+            let names = names.map_err(|error| eprintln!("history.json: {error}"));
+            Some(
+                names
+                    .ok()?
+                    .iter()
+                    .filter_map(|name| Version::parse(name))
+                    .collect(),
+            )
+        });
+        let changes = changes(&version, build, history, since, &read);
         let Some(folder) = install.and_then(staging) else {
             return Ok(Status::Available(version, changes));
         };
@@ -689,22 +763,24 @@ impl State {
 
 /// `lead`, then what `changes` amount to and the first dozen of their titles under their
 /// kinds, as a dialog's detail.
-fn described(lead: String, changes: &[Change]) -> String {
+fn described(lead: String, changes: &Changes) -> String {
     const LISTED: usize = 12;
     let Some(summary) = summary(changes) else {
         return lead;
     };
     let mut detail = format!("{lead} It brings {summary}.\n");
     let mut kind = None;
-    for change in changes.iter().take(LISTED) {
+    for change in changes.list.iter().take(LISTED) {
         if kind != Some(change.kind) {
             kind = Some(change.kind);
             detail += &format!("\n{}\n", change.kind.heading());
         }
         detail += &format!("• {}\n", change.title);
     }
-    if changes.len() > LISTED {
-        detail += &format!("and {} more\n", changes.len() - LISTED);
+    if changes.more {
+        detail += "and more\n";
+    } else if changes.list.len() > LISTED {
+        detail += &format!("and {} more\n", changes.list.len() - LISTED);
     }
     detail.trim_end().to_owned()
 }
@@ -862,8 +938,9 @@ mod tests {
         assert!(newer(b"<html>", "macos-aarch64", None).is_err());
     }
 
-    /// What each build `publish` describes lists: r9 and r10 published, r7 and r8 skipped.
-    fn changes() -> serde_json::Value {
+    /// What a build published before `history.json` lists, every change since the first
+    /// published build: r9 and r10 published, r7 and r8 skipped.
+    fn every_change() -> serde_json::Value {
         serde_json::json!([
             {"version": "2026-09-29-r7", "kind": "fix", "title": "Old fix"},
             {"version": "2026-09-29-r8", "kind": "fix", "title": "Pasted pictures keep their size"},
@@ -874,10 +951,11 @@ mod tests {
         ])
     }
 
-    /// A build.json for `archive`'s bytes under `platform`, with its signature.
+    /// A build.json listing `changes` and `archive`'s bytes under `platform`, with its signature.
     fn publish(
         pair: &Ed25519KeyPair,
         name: &str,
+        changes: serde_json::Value,
         platform: &str,
         file: &str,
         bytes: &[u8],
@@ -886,7 +964,7 @@ mod tests {
         let build = serde_json::to_vec_pretty(&serde_json::json!({
             "version": name,
             "commit": "0123456789abcdef",
-            "changes": changes(),
+            "changes": changes,
             "archives": {platform: {
                 "file": file,
                 "size": bytes.len(),
@@ -905,39 +983,26 @@ mod tests {
         let key = pair.public_key().as_ref();
         let tenth = version("2026-09-29-r10");
         let bytes = b"an archive".to_vec();
-        let (build, signature) =
-            publish(&pair, "2026-09-29-r10", "linux-x86_64", "a.tar.gz", &bytes);
-        let (found, _) = archive(key, &build, &signature, &tenth, "linux-x86_64", None).unwrap();
+        let (build, signature) = publish(
+            &pair,
+            "2026-09-29-r10",
+            every_change(),
+            "linux-x86_64",
+            "a.tar.gz",
+            &bytes,
+        );
+        let found =
+            verified(key, &build, &signature, &tenth).unwrap().archives["linux-x86_64"].clone();
         check_archive(&found, &bytes).unwrap();
 
         let mut tampered = build.clone();
         let at = tampered.iter().position(|&byte| byte == b'a').unwrap();
         tampered[at] = b'b';
-        assert!(archive(key, &tampered, &signature, &tenth, "linux-x86_64", None).is_err());
-        assert!(
-            archive(
-                generate().public_key().as_ref(),
-                &build,
-                &signature,
-                &tenth,
-                "linux-x86_64",
-                None
-            )
-            .is_err()
-        );
-        assert!(archive(key, &build, b"zz", &tenth, "linux-x86_64", None).is_err());
-        assert!(
-            archive(
-                key,
-                &build,
-                &signature,
-                &version("2026-09-29-r11"),
-                "linux-x86_64",
-                None
-            )
-            .is_err()
-        );
-        assert!(archive(key, &build, &signature, &tenth, "macos-aarch64", None).is_err());
+        assert!(verified(key, &tampered, &signature, &tenth).is_err());
+        let other = generate();
+        assert!(verified(other.public_key().as_ref(), &build, &signature, &tenth).is_err());
+        assert!(verified(key, &build, b"zz", &tenth).is_err());
+        assert!(verified(key, &build, &signature, &version("2026-09-29-r11")).is_err());
 
         assert!(
             check_archive(&found, b"an archivf")
@@ -964,83 +1029,263 @@ mod tests {
         let fix = || change(Kind::Fix, "A fix");
         let feature = || change(Kind::Feature, "A feature");
         let other = || change(Kind::Other, "Another change");
-        assert_eq!(summary(&[]), None);
-        assert_eq!(summary(&[fix()]).unwrap(), "1 bug fix");
-        assert_eq!(summary(&[other(), other()]).unwrap(), "2 other changes");
+        let all = |list: Vec<Change>| Changes { list, more: false };
+        let some = |list: Vec<Change>| Changes { list, more: true };
+        assert_eq!(summary(&all(vec![])), None);
+        assert_eq!(summary(&some(vec![])), None);
+        assert_eq!(summary(&all(vec![fix()])).unwrap(), "1 bug fix");
+        assert_eq!(summary(&some(vec![fix()])).unwrap(), "1 bug fix and more");
         assert_eq!(
-            summary(&[fix(), feature(), fix()]).unwrap(),
+            summary(&all(vec![other(), other()])).unwrap(),
+            "2 other changes"
+        );
+        assert_eq!(
+            summary(&all(vec![fix(), feature(), fix()])).unwrap(),
             "1 feature and 2 bug fixes"
         );
-        let mut all = vec![feature(), feature(), feature(), other(), other()];
-        all.extend(std::iter::repeat_with(fix).take(5));
         assert_eq!(
-            summary(&all).unwrap(),
+            summary(&some(vec![fix(), feature(), fix()])).unwrap(),
+            "1 feature, 2 bug fixes, and more"
+        );
+        let mut many = vec![feature(), feature(), feature(), other(), other()];
+        many.extend(std::iter::repeat_with(fix).take(5));
+        assert_eq!(
+            summary(&all(many)).unwrap(),
             "3 features, 5 bug fixes, and 2 other changes"
         );
         assert_eq!(
-            described("Ready.".to_owned(), &[feature(), fix(), fix()]),
+            described("Ready.".to_owned(), &all(vec![feature(), fix(), fix()])),
             "Ready. It brings 1 feature and 2 bug fixes.\n\nFeatures\n• A feature\n\nBug fixes\n• A fix\n• A fix"
         );
-        assert_eq!(described("Ready.".to_owned(), &[]), "Ready.");
+        assert_eq!(
+            described("Ready.".to_owned(), &some(vec![fix()])),
+            "Ready. It brings 1 bug fix and more.\n\nBug fixes\n• A fix\nand more"
+        );
+        assert_eq!(described("Ready.".to_owned(), &all(vec![])), "Ready.");
     }
 
-    /// A build lists what every build since the first brought; a check sums those newer than
-    /// the running build, skipped releases included, features first, and an unknown kind is
-    /// another change.
+    /// A published folder by path: `builds` oldest first, each with its `changes`, only the
+    /// newest built for this platform, and `history.json` naming them all.
+    fn shelf(
+        pair: &Ed25519KeyPair,
+        builds: &[(&str, serde_json::Value)],
+    ) -> HashMap<String, Vec<u8>> {
+        let mut files = HashMap::new();
+        let names: Vec<&str> = builds.iter().map(|(name, _)| *name).collect();
+        for (name, changes) in builds {
+            let platform = if Some(name) == names.last() {
+                platform()
+            } else {
+                "beos-x86".to_owned()
+            };
+            let (build, signature) = publish(pair, name, changes.clone(), &platform, "a", b"a");
+            let folder = version(name).folder();
+            files.insert(format!("{folder}build.json"), build);
+            files.insert(format!("{folder}build.json.sig"), signature);
+        }
+        let latest = serde_json::json!({ platform(): names.last() });
+        files.insert("latest.json".into(), serde_json::to_vec(&latest).unwrap());
+        files.insert("history.json".into(), serde_json::to_vec(&names).unwrap());
+        files
+    }
+
+    /// One fix per (version, title).
+    fn fixes(made: &[(&str, &str)]) -> serde_json::Value {
+        (made.iter())
+            .map(
+                |(made, title)| serde_json::json!({"version": made, "kind": "fix", "title": title}),
+            )
+            .collect()
+    }
+
+    /// What a check from `running` against `files` finds the update brings.
+    fn listed(files: &HashMap<String, Vec<u8>>, key: &[u8], running: &str) -> Changes {
+        let fetch = |path: &str, _| files.get(path).cloned().ok_or_else(|| "404".to_owned());
+        let status = check(&fetch, key, Some(&version(running)), None, &|_| {});
+        let Status::Available(_, changes) = status else {
+            panic!("{status:?}");
+        };
+        changes
+    }
+
+    fn titles(changes: &Changes) -> Vec<&str> {
+        changes
+            .list
+            .iter()
+            .map(|change| change.title.as_str())
+            .collect()
+    }
+
+    /// An update sums the builds `history.json` names after the running one, whichever
+    /// platforms they built, a commit's changes counting once from the newest build listing
+    /// them; features first.
     #[test]
-    fn changes_sum_across_skipped_releases() {
+    fn changes_sum_the_builds_since_the_running_one() {
         let pair = generate();
         let key = pair.public_key().as_ref();
-        let tenth = version("2026-09-29-r10");
-        let (build, signature) = publish(&pair, "2026-09-29-r10", "linux-x86_64", "a", b"a");
-        let since = |running: Option<&str>| {
-            let running = running.map(version);
-            let (_, changes) = archive(
-                key,
-                &build,
-                &signature,
-                &tenth,
-                "linux-x86_64",
-                running.as_ref(),
-            )
-            .unwrap();
-            changes
-                .into_iter()
-                .map(|change| (change.kind, change.title))
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            since(Some("2026-09-29-r9")),
-            [(Kind::Feature, "Styles and themes".to_owned())]
+        let files = shelf(
+            &pair,
+            &[
+                // Published before builds listed changes.
+                ("2026-09-29-r7", serde_json::json!([])),
+                (
+                    "2026-09-29-r8",
+                    serde_json::json!([
+                        {"version": "2026-09-29-r6", "kind": "fix", "title": "Old fix"},
+                        {"version": "2026-09-29-r7", "kind": "fix", "title": "Seventh"},
+                        {"version": "2026-09-29-r8", "kind": "feature", "title": "Pinch zoom"},
+                        {"version": "2026-09-29-r8", "kind": "release", "title": "Stable download names"},
+                    ]),
+                ),
+                (
+                    "2026-09-29-r9",
+                    fixes(&[("2026-09-29-r9", "Pasted pictures keep their size")]),
+                ),
+                (
+                    "2026-09-29-r10",
+                    serde_json::json!([
+                        {"version": "2026-09-29-r10", "kind": "feature", "title": "Styles and themes"},
+                    ]),
+                ),
+            ],
         );
+        let all = listed(&files, key, "2026-09-29-r6");
         assert_eq!(
-            since(Some("2026-09-29-r7")),
+            titles(&all),
             [
-                (Kind::Feature, "Pinch zoom".to_owned()),
-                (Kind::Feature, "Styles and themes".to_owned()),
-                (Kind::Fix, "Pasted pictures keep their size".to_owned()),
-                (Kind::Other, "Stable download names".to_owned()),
+                "Pinch zoom",
+                "Styles and themes",
+                "Seventh",
+                "Pasted pictures keep their size",
+                "Stable download names",
             ]
         );
-        assert_eq!(since(Some("2026-09-29-r10")), []);
-        assert_eq!(since(None).len(), 5);
+        assert!(!all.more);
+        assert_eq!(
+            summary(&all).unwrap(),
+            "2 features, 2 bug fixes, and 1 other change"
+        );
+        assert_eq!(
+            titles(&listed(&files, key, "2026-09-29-r8")),
+            ["Styles and themes", "Pasted pictures keep their size"]
+        );
+        assert_eq!(
+            titles(&listed(&files, key, "2026-09-29-r9")),
+            ["Styles and themes"]
+        );
 
-        // Builds published before changes were listed still read, as builds listing them do
-        // for clients that predate them.
-        let old = serde_json::json!({"version": "2026-09-29-r10", "archives": {"linux-x86_64": {
-            "file": "a", "size": 1, "sha256": "", "signature": "",
-        }}});
-        let old = serde_json::to_vec(&old).unwrap();
-        let signature = hex(pair.sign(&old).as_ref()).into_bytes();
-        let (_, changes) = archive(key, &old, &signature, &tenth, "linux-x86_64", None).unwrap();
-        assert_eq!(changes, []);
-        #[derive(Deserialize)]
-        #[allow(dead_code)]
-        struct Earlier {
-            version: String,
-            archives: HashMap<String, Archive>,
-        }
-        assert!(serde_json::from_slice::<Earlier>(&build).is_ok());
+        // Builds published before history.json list every change since the first.
+        let (build, signature) = publish(
+            &pair,
+            "2026-09-29-r10",
+            every_change(),
+            &platform(),
+            "a",
+            b"a",
+        );
+        let latest = serde_json::json!({ platform(): "2026-09-29-r10" });
+        let old = HashMap::from([
+            (
+                "latest.json".to_owned(),
+                serde_json::to_vec(&latest).unwrap(),
+            ),
+            ("2026-09-29.r10/build.json".to_owned(), build),
+            ("2026-09-29.r10/build.json.sig".to_owned(), signature),
+        ]);
+        let found = listed(&old, key, "2026-09-29-r7");
+        assert_eq!(
+            titles(&found),
+            [
+                "Pinch zoom",
+                "Styles and themes",
+                "Pasted pictures keep their size",
+                "Stable download names",
+            ]
+        );
+        assert!(found.more);
+    }
+
+    /// Past `CHAIN` builds, a check stops reading and says there is more.
+    #[test]
+    fn changes_stop_after_a_chain_of_builds() {
+        let pair = generate();
+        let names: Vec<String> = (1..=25)
+            .map(|revision| format!("2026-09-01-r{revision}"))
+            .collect();
+        let builds: Vec<_> = (names.iter())
+            .map(|name| (name.as_str(), fixes(&[(name, name)])))
+            .collect();
+        let files = shelf(&pair, &builds);
+        let key = pair.public_key().as_ref();
+        let capped = listed(&files, key, "2026-08-31-r1");
+        assert_eq!(titles(&capped), names[25 - CHAIN..]);
+        assert!(capped.more);
+        assert_eq!(
+            summary(&capped).unwrap(),
+            format!("{CHAIN} bug fixes and more")
+        );
+        let whole = listed(&files, key, "2026-09-01-r5");
+        assert_eq!(titles(&whole), names[5..]);
+        assert!(!whole.more);
+    }
+
+    /// A build in the middle that is missing or doesn't verify is skipped: the others still
+    /// count, and the check says there is more. So is one `history.json` makes up, and
+    /// without `history.json` only the newest build counts.
+    #[test]
+    fn unverified_or_missing_builds_are_skipped() {
+        let pair = generate();
+        let key = pair.public_key().as_ref();
+        let mut files = shelf(
+            &pair,
+            &[
+                ("2026-09-29-r8", fixes(&[("2026-09-29-r8", "Eighth")])),
+                ("2026-09-29-r9", fixes(&[("2026-09-29-r9", "Ninth")])),
+                ("2026-09-29-r10", fixes(&[("2026-09-29-r10", "Tenth")])),
+            ],
+        );
+        let found = |files: &HashMap<String, Vec<u8>>, running| {
+            let changes = listed(files, key, running);
+            (titles(&changes).join(", "), changes.more)
+        };
+        assert_eq!(
+            found(&files, "2026-09-29-r7"),
+            ("Eighth, Ninth, Tenth".into(), false)
+        );
+
+        let forged = fixes(&[("2026-09-29-r9", "Forged")]);
+        let (build, signature) =
+            publish(&generate(), "2026-09-29-r9", forged, "beos-x86", "a", b"a");
+        let mut unverified = files.clone();
+        unverified.insert("2026-09-29.r9/build.json".into(), build);
+        unverified.insert("2026-09-29.r9/build.json.sig".into(), signature);
+        assert_eq!(
+            found(&unverified, "2026-09-29-r7"),
+            ("Eighth, Tenth".into(), true)
+        );
+
+        let mut missing = files.clone();
+        missing.remove("2026-09-29.r9/build.json.sig");
+        assert_eq!(
+            found(&missing, "2026-09-29-r7"),
+            ("Eighth, Tenth".into(), true)
+        );
+
+        let made_up = [
+            "2026-09-29-r7",
+            "2026-09-29-r8",
+            "2026-09-29-r9",
+            "soon",
+            "2026-09-29-r10",
+        ];
+        files.insert("history.json".into(), serde_json::to_vec(&made_up).unwrap());
+        assert_eq!(
+            found(&files, "2026-09-29-r6"),
+            ("Eighth, Ninth, Tenth".into(), true)
+        );
+
+        files.remove("history.json");
+        assert_eq!(found(&files, "2026-09-29-r7"), ("Tenth".into(), true));
     }
 
     /// An archive as `tools/release.py` packs this platform's, holding `marker`.
@@ -1086,9 +1331,16 @@ mod tests {
         let build = published.join("2026-09-29.r10");
         std::fs::create_dir_all(&build).unwrap();
         let bytes = pack(&folder, "new");
-        let (manifest, signature) =
-            publish(&pair, "2026-09-29-r10", &platform, "app.archive", &bytes);
+        let (manifest, signature) = publish(
+            &pair,
+            "2026-09-29-r10",
+            every_change(),
+            &platform,
+            "app.archive",
+            &bytes,
+        );
         std::fs::write(build.join("app.archive"), &bytes).unwrap();
+        std::fs::write(published.join("history.json"), br#"["2026-09-29-r10"]"#).unwrap();
         std::fs::write(build.join("build.json"), manifest).unwrap();
         std::fs::write(build.join("build.json.sig"), signature).unwrap();
         std::fs::write(
@@ -1190,8 +1442,14 @@ mod tests {
         let platform = platform();
         let pair = generate();
         let bytes = pack(&folder, "new");
-        let (manifest, signature) =
-            publish(&pair, "2026-09-29-r10", &platform, "app.archive", &bytes);
+        let (manifest, signature) = publish(
+            &pair,
+            "2026-09-29-r10",
+            every_change(),
+            &platform,
+            "app.archive",
+            &bytes,
+        );
         let mut served = bytes.clone();
         let last = served.len() - 1;
         served[last] ^= 1;
@@ -1240,9 +1498,10 @@ mod tests {
             Some(&install),
             &|_| {},
         );
-        let Status::Ready(found, staged, _) = status else {
+        let Status::Ready(found, staged, changes) = status else {
             panic!("{status:?}");
         };
+        assert!(summary(&changes).is_some());
         apply(&staged, &install).unwrap();
         // 10.6's builds are unsigned.
         if cfg!(target_os = "macos") && cfg!(feature = "wgpu") {
@@ -1252,7 +1511,8 @@ mod tests {
                 .status();
             assert!(verified.unwrap().success());
         }
-        eprintln!("Installed {found} into {}", install.display());
+        let installed = format!("Installed {found} into {}.", install.display());
+        eprintln!("{}", described(installed, &changes));
         std::fs::remove_dir_all(&folder).unwrap();
     }
 }

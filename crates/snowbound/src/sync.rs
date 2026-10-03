@@ -282,7 +282,7 @@ struct Picked {
 
 /// What a newer build changes: `summary`, which unfolds the titles under their kinds when
 /// `listed`. Returns whether the summary was clicked.
-fn changes_list(ui: &mut Ui, summary: &str, changes: &[update::Change], listed: bool) -> bool {
+fn changes_list(ui: &mut Ui, summary: &str, changes: &update::Changes, listed: bool) -> bool {
     let theme = ui.theme.clone();
     let line = theme.font_size * 1.6;
     let toggle = ui.open(
@@ -350,7 +350,7 @@ fn changes_list(ui: &mut Ui, summary: &str, changes: &[update::Change], listed: 
             },
         );
         let mut kind = None;
-        for (index, change) in changes.iter().enumerate() {
+        for (index, change) in changes.list.iter().enumerate() {
             if kind != Some(change.kind) {
                 kind = Some(change.kind);
                 ui.leaf(
@@ -392,6 +392,18 @@ fn changes_list(ui: &mut Ui, summary: &str, changes: &[update::Change], listed: 
                 },
             );
             ui.close();
+        }
+        if changes.more {
+            ui.leaf(
+                "more",
+                Spec {
+                    size: [fill(), px(line)],
+                    text: Some("and more"),
+                    color: Some(theme.text_dim),
+                    role: Some(accesskit::Role::ListItem),
+                    ..Spec::default()
+                },
+            );
         }
         ui.close();
         ui.close();
@@ -1418,20 +1430,20 @@ mod tests {
                 ..facts(sections(|_| status(true, 0, None)))
             }),
             ("update", || Facts {
-                update: ready(),
+                update: ready(false),
                 ..facts(sections(|_| status(true, 0, None)))
             }),
             ("update-listed", || Facts {
-                update: ready(),
+                update: ready(true),
                 changes_listed: true,
                 ..facts(sections(|_| status(true, 0, None)))
             }),
         ]
     }
 
-    /// A staged build that brings a little of each kind.
-    fn ready() -> &'static update::Status {
-        let changes = serde_json::from_value(serde_json::json!([
+    /// A staged build that brings a little of each kind, and `more` unread.
+    fn ready(more: bool) -> &'static update::Status {
+        let list = serde_json::from_value(serde_json::json!([
             {"version": "2026-10-01-r3", "kind": "feature", "title": "Styles and themes"},
             {"version": "2026-10-01-r3", "kind": "feature", "title": "Settings redesign with search"},
             {"version": "2026-10-01-r3", "kind": "feature", "title": "Undo across pages"},
@@ -1443,7 +1455,7 @@ mod tests {
         Box::leak(Box::new(update::Status::Ready(
             update::Version::parse("2026-10-01-r5").unwrap(),
             std::path::PathBuf::new(),
-            changes,
+            update::Changes { list, more },
         )))
     }
 

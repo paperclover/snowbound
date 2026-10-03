@@ -19,6 +19,7 @@ development builds, which never update themselves.
 
 ```text
 latest.json                    {"macos-aarch64": "2026-09-29-r10", "macos-x86_64": ..., "macos-10.6": ..., "linux-x86_64": ..., ...}
+history.json                   ["2026-09-28-r3", ..., "2026-09-29-r10"]: every build folder, oldest first
 2026-09-29.r10/
   build.json                   version, commit, changes, and per platform: file, size, sha256, signature
   build.json.sig               ed25519 signature of build.json, hex
@@ -41,21 +42,36 @@ latest/                        each platform's newest archive, the version dropp
 ```
 
 A build folder is written once, under a hidden `.2026-09-29.r10.partial` name renamed into
-place, and never changed or deleted. `latest.json` is replaced last, through a
-rename, and only moves a platform forward. It carries no signature: the trust is
-in the immutable `build.json`, whose version the app checks against the one it
-was pointed to, and a forged pointer can only name another signed build, which
-the app ignores unless it is newer than itself.
+place, and never changed or deleted. `history.json` and then `latest.json` are
+replaced last, each through a rename, and `latest.json` only moves a platform
+forward. Neither carries a signature: the trust is in the immutable
+`build.json`, whose version the app checks against the one it was pointed to,
+and a forged pointer can only name another signed build, which the app ignores
+unless it is newer than itself. `latest.json` stays a map of platform to
+version, which is all apps before `history.json` read.
 
 ## What a build changes
 
 `build.json`'s `changes` lists, oldest first, every change the commits on
-`main` after the first published build (`FIRST` in `release.py`) up to this one
+`main` after the build published before it, of any platform, up to this one
 bring: `{"version": "2026-09-30-r12", "kind": "feature", "title": "Pinch zoom"}`,
-where `version` is the version of the commit that made it. An updating app sums
-the entries newer than itself, so releases it skipped count too, and says "3
-features, 5 bug fixes, and 2 other changes" with the titles beneath. The list
-is in `build.json` because that is signed; `latest.json` stays a bare pointer.
+where `version` is the version of the commit that made it. Builds published
+before `history.json` list every change since the first published build
+(`FIRST` in `release.py`, where a release still starts if the share holds no
+build). The list is in `build.json` because that is signed.
+
+An updating app reads the `build.json` of each build `history.json` names after
+its own, up to the newest for its platform, in parallel, and sums their
+changes, so releases it skipped count too, whichever platforms they built. A
+commit's entries count once, from the newest build listing them, so builds
+listing every change since the first don't count one twice. It says "3
+features, 5 bug fixes, and 2 other changes" with the titles beneath. It reads
+at most 20 builds, the newest included; past them, or where a build's
+`build.json` is missing or its signature doesn't hold (it is skipped), or with
+no `history.json`, it says "3 features, 5 bug fixes, and more" and ends the
+list with "and more". `history.json` only says which folders to read: a build
+it names counts only once its `build.json` verifies, and a forged one can only
+hide changes from the list.
 
 A commit counts by its conventional prefix: `feat` is a feature, `fix` a bug
 fix, anything else (`docs`, `chore`, no prefix) another change. It counts once,
@@ -64,9 +80,10 @@ bulleted list (`- ` or `* ` at the start of a line, wrapped lines indented),
 which counts each item instead, all of the prefix's kind. So a fix is best its
 own small `fix:` commit, and a batch commit should bullet what it brings.
 
-Entries run about 190 bytes, so `build.json` stays under the 1 MiB that apps,
-old ones included, read it within until some 5,000 entries; apps ignore fields
-they don't know, and builds without `changes` read as listing none.
+Apps ignore fields and files they don't know, and builds without `changes`
+read as listing none. Apps before `history.json` sum the entries in the newest
+build's `build.json` newer than themselves, so they list only that build's
+changes.
 
 ## Signing
 
@@ -154,8 +171,8 @@ builds each platform with
 `platform/windows/cargo.sh`, then checks
 the working copy didn't change meanwhile. It zips the apps with `ditto`, hashes and signs everything, and
 publishes as above. Run again for the same commit, it only brings
-`latest.json` up to date; a different commit that derives the same version is
-refused. The 10.6 build needs the SDK and nightly toolchain
+`history.json` and `latest.json` up to date; a different commit that derives
+the same version is refused. The 10.6 build needs the SDK and nightly toolchain
 `platform/snow-leopard/cargo.sh` names; the Linux builds need `zig`, as the
 cross linker against glibc 2.17; the Windows builds need llvm-mingw, which
 `platform/windows/toolchain.sh` fetches, and nightly with `rust-src` for
@@ -215,7 +232,8 @@ frames from the symbol table.
 published build, it checks shortly after launch and then daily, skipping while
 Work Offline is on; Check for Updates… (the app menu on macOS, the command
 palette elsewhere) checks at once and reports what it found. A check reads
-`latest.json`, then the named build's `build.json` and signature, and
+`latest.json`, then the named build's `build.json` and signature, then
+`history.json` and the `build.json` of each build since its own, and
 downloads the archive for this platform, verifying its size and SHA-256
 against the signed `build.json` before unpacking it. An Intel build that Rosetta runs takes `macos-aarch64`'s, even at
 its own version. It stages the update beside the install, so the swap is a rename:

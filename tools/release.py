@@ -32,7 +32,7 @@ WINDOWS = {'x86_64': 'x86_64-win7-windows-gnu', 'aarch64': 'aarch64-pc-windows-g
 IDENTITY = 'BA308AA3591299E053E8824CEF1651F686F8908E'
 # The App Store Connect API key that notarizes it: {"key": P8 PATH, "key_id": ID, "issuer": ID}.
 NOTARY = Path('~/.config/snowbound/notary.json').expanduser()
-# The first published build's commit: no client runs anything older, so changes start after it.
+# The first published build's commit, where changes start when no build was published before.
 FIRST = '354f001dec3d731a4d1a6fac0a25d9e28550d781'
 KINDS = {'feat': 'feature', 'fix': 'fix'}
 
@@ -63,6 +63,12 @@ def newest(latest, archives, version):
     newer than what it names."""
     return {**latest, **{platform: name(version) for platform in archives
                          if platform not in latest or parse(latest[platform]) < version}}
+
+
+def builds(published):
+    """The versions of the builds `published` holds, oldest first."""
+    return sorted(parse(entry.name.replace('.r', '-r')) for entry in published.iterdir()
+                  if re.fullmatch(r'\d{4}-\d{2}-\d{2}\.r\d+', entry.name))
 
 
 def jj(*args):
@@ -130,11 +136,11 @@ def entries(description):
             for title in titles if title]
 
 
-def changes(commits, commit):
-    """Every entry the commits after FIRST up to `commit` bring, oldest first, each with the version
-    of the commit that brought it."""
+def changes(commits, commit, since):
+    """Every entry the commits after `since` up to `commit` bring, oldest first, each with the
+    version of the commit that brought it."""
     versions = {each: version_of(commits, each)
-                for each in ancestors(commits, commit) - ancestors(commits, FIRST)}
+                for each in ancestors(commits, commit) - ancestors(commits, since)}
     return [{'version': name(versions[each]), 'kind': kind, 'title': title}
             for each in sorted(versions, key=versions.get) for kind, title in entries(commits[each][2])]
 
@@ -300,11 +306,14 @@ def main():
                 with zipfile.ZipFile(symbols[-1], 'w', zipfile.ZIP_DEFLATED) as archive:
                     archive.write(debug, debug.name)
         signatures = sign(files.values())
+        # A dry run's changes too start after the newest build the share holds.
+        before = [each for each in builds(PUBLISHED) if each < version] if PUBLISHED.is_dir() else []
+        since = json.loads((PUBLISHED / folder(before[-1]) / 'build.json').read_text())['commit'] if before else FIRST
         build = {
             'version': name(version),
             'commit': commit,
             'published': datetime.now(ZONE).isoformat(timespec='seconds'),
-            'changes': changes(commits, commit),
+            'changes': changes(commits, commit, since),
             'archives': {platform: {
                 'file': file.name,
                 'size': file.stat().st_size,
@@ -327,6 +336,10 @@ def main():
         shutil.rmtree(stage)
         print(f'Published {target}')
 
+    history_file = published / 'history.json'
+    partial = history_file.with_name('.history.json.partial')
+    partial.write_text(json.dumps([name(each) for each in builds(published)], indent=2) + '\n')
+    os.replace(partial, history_file)
     latest_file = published / 'latest.json'
     latest = json.loads(latest_file.read_text()) if latest_file.exists() else {}
     build = json.loads((target / 'build.json').read_text())
