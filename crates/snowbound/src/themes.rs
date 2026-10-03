@@ -203,11 +203,11 @@ impl State {
         section: Option<u32>,
     ) {
         let mut all = library.themes().all();
-        // A retired built-in worn here is listed while it is.
+        // A retired built-in worn here is listed with the others while it is.
         if let Some(wearing) = &wearing
             && !all.contains(wearing)
         {
-            all.push(wearing.clone());
+            all.insert(built_in().len(), wearing.clone());
         }
         let selected = wearing
             .and_then(|wearing| all.iter().position(|theme| theme.id == wearing.id))
@@ -296,6 +296,26 @@ impl State {
             },
         );
         for (index, listed) in dialog.themes.iter().enumerate() {
+            let own = !stored::is_built_in(&listed.id);
+            if own && (index == 0 || stored::is_built_in(&dialog.themes[index - 1].id)) {
+                ui.open(
+                    "rule",
+                    Spec {
+                        size: [fill(), px(7.0)],
+                        pad: [4.0, 3.0],
+                        ..Spec::default()
+                    },
+                );
+                ui.leaf(
+                    "line",
+                    Spec {
+                        size: [fill(), fill()],
+                        fill: Some(theme.chip),
+                        ..Spec::default()
+                    },
+                );
+                ui.close();
+            }
             let shown = index == dialog.selected;
             let item = ui.open(
                 ("theme", index),
@@ -357,17 +377,7 @@ impl State {
                 ..Spec::default()
             },
         );
-        if built {
-            ui.leaf(
-                "locked",
-                Spec {
-                    size: [fill(), px(row * 1.5)],
-                    text: Some("Changing a built-in theme edits a copy."),
-                    color: Some(theme.text_dim),
-                    ..Spec::default()
-                },
-            );
-        } else {
+        if !built {
             let edited = &mut dialog.themes[dialog.selected];
             let before = edited.name.clone();
             ui::text_field(
