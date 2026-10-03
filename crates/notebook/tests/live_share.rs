@@ -506,3 +506,28 @@ fn a_flooding_guest_is_hung_up_on() {
         std::fs::read(folder.join("Garden.one")).unwrap()
     );
 }
+
+/// Stopping a share lets every guest go, saying so, and leaves its code and secret for no one:
+/// the code no longer opens anything, and sharing again makes new ones.
+#[test]
+fn stopping_lets_every_guest_go_and_retires_the_code() {
+    let directory = tempfile::tempdir().unwrap();
+    let folder = notebook(directory.path());
+    let url = relay(Default::default());
+    let sharing = Sharing::new("").unwrap();
+    let host = host(&folder, &directory.path().join("host"), &sharing, &url);
+    let code = code(&host);
+    let (guest, _notebook) = guest("Grace", &code, &url, &directory.path().join("grace"));
+    host.stop();
+    until("the guest never heard the host stop", || {
+        guest.stopped() && guest.host().is_none()
+    });
+    assert!(host.code().is_none() && host.guests().is_empty());
+    assert!(matches!(
+        share::join(hello("Alan"), &code, "", None, Some(&url)).unwrap_err(),
+        Refusal::NoOne | Refusal::TimedOut
+    ));
+    let again = Sharing::new("").unwrap();
+    assert!(again.secret != sharing.secret && again.share != sharing.share);
+    assert_ne!(again.code, sharing.code);
+}

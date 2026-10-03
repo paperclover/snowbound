@@ -33,6 +33,16 @@ impl Drop for Scratch {
 /// returns the trees each
 /// `accessibility` step named by the trailing word wrote.
 fn replay(scratch: &Scratch, notebook: Option<&Path>, steps: &[&str]) -> Vec<String> {
+    replay_with(scratch, notebook, steps, &[])
+}
+
+/// `replay` with these variables set for the app.
+fn replay_with(
+    scratch: &Scratch,
+    notebook: Option<&Path>,
+    steps: &[&str],
+    variables: &[(&str, &str)],
+) -> Vec<String> {
     let dir = &scratch.0;
     if let Some(source) = notebook {
         for entry in std::fs::read_dir(source).unwrap() {
@@ -59,6 +69,7 @@ fn replay(scratch: &Scratch, notebook: Option<&Path>, steps: &[&str]) -> Vec<Str
         command.env("SNOWBOUND_ICLOUD_FOLDER", dir.join("icloud"));
     }
     command
+        .envs(variables.iter().copied())
         .env("HOME", dir.join("home"))
         .env("SNOWBOUND_REPLAY", dir.join("script"))
         .arg("--notebook")
@@ -500,4 +511,41 @@ fn a_replay_opens_only_the_notebooks_and_icloud_folder_it_is_given() {
     let mut listed = notebooks(&tree);
     listed.sort_unstable();
     assert_eq!(listed, ["Cloudy", "notebook"], "{tree}");
+}
+
+/// Stop Sharing ends the share: Live Share offers Start Sharing again, and nothing is kept to
+/// share the notebook again on the next launch.
+#[cfg(feature = "live")]
+#[test]
+fn stop_sharing_ends_the_share() {
+    let scratch = Scratch::new("stop-sharing");
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
+    let mut steps = vec!["modifiers command shift", "key p", "modifiers", "settle"];
+    steps.extend(["type Live Share", "settle", "key Enter", "settle"]);
+    steps.extend(["key Enter", "wait 1500", "accessibility shared"]);
+    // Copy, then Stop Sharing.
+    steps.extend([
+        "key Tab",
+        "key Tab",
+        "key Enter",
+        "wait 1500",
+        "accessibility stopped",
+    ]);
+    // Off every network, so that the test reaches no one.
+    let variables = [("SNOWBOUND_LIVE", "off"), ("SNOWBOUND_LIVE_RELAY", "off")];
+    let [shared, stopped] = replay_with(&scratch, Some(&notebook), &steps, &variables)
+        .try_into()
+        .unwrap();
+    assert!(
+        shared.contains("Stop Sharing") && shared.contains("No one has joined yet."),
+        "{shared}"
+    );
+    assert!(
+        stopped.contains("Start Sharing") && !stopped.contains("Stop Sharing"),
+        "{stopped}"
+    );
+    let kept = scratch.0.join("cache/live/hosting.json");
+    let kept = std::fs::read_to_string(kept).unwrap_or_default();
+    assert!(!kept.contains("code"), "still kept: {kept}");
 }

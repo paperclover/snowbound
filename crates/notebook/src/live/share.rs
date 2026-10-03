@@ -215,8 +215,9 @@ pub struct Host {
     reach: Option<Reach>,
     relay: Option<String>,
     sharing: Mutex<Sharing>,
-    room: Live,
-    pairing: Mutex<Live>,
+    /// The share's room and the code's, until it stops.
+    room: Mutex<Option<Live>>,
+    pairing: Mutex<Option<Live>>,
     served: Arc<Served>,
     events: Arc<dyn Fn() + Send + Sync>,
 }
@@ -269,20 +270,21 @@ impl Host {
             notebook: notebook.to_owned(),
             reach,
             relay: relay.map(str::to_owned),
-            pairing: Mutex::new(pair(&me, &sharing, notebook, reach, relay, &events)?),
+            pairing: Mutex::new(Some(pair(&me, &sharing, notebook, reach, relay, &events)?)),
             me,
             sharing: Mutex::new(sharing),
-            room,
+            room: Mutex::new(Some(room)),
             served,
             events,
         };
         Ok(host)
     }
 
-    /// The code guests type, once it has its number. A code with too many wrong tries is
-    /// replaced by one with new words.
+    /// The code guests type, once it has its number, and none once stopped. A code with too
+    /// many wrong tries is replaced by one with new words.
     pub fn code(&self) -> Option<String> {
         let mut pairing = self.pairing.lock().unwrap();
+        let pairing = pairing.as_mut()?;
         if pairing.burned() {
             let mut sharing = self.sharing.lock().unwrap();
             sharing.code = words().ok()?;
@@ -312,16 +314,20 @@ impl Host {
 
     /// How the relay last answered the code's room.
     pub fn relayed(&self) -> Relayed {
-        self.pairing.lock().unwrap().relayed()
+        let pairing = self.pairing.lock().unwrap();
+        pairing.as_ref().map_or(Relayed::Unknown, Live::relayed)
     }
 
     /// The peers in the share's room.
     pub fn guests(&self) -> Vec<Peer> {
-        self.room.peers()
+        let room = self.room.lock().unwrap();
+        room.as_ref().map(Live::peers).unwrap_or_default()
     }
 
     pub fn set_presence(&self, presence: Presence) {
-        self.room.set_presence(presence);
+        if let Some(room) = &*self.room.lock().unwrap() {
+            room.set_presence(presence);
+        }
     }
 
     /// Tells every guest the files at these catalog paths changed.
@@ -329,10 +335,13 @@ impl Host {
         self.served.tell(paths);
     }
 
-    /// Stops sharing: every guest hears so and is let go.
-    pub fn stop(self) {
-        drop(self.pairing);
-        self.room.leave(STOPPED);
+    /// Stops sharing: no one new is welcomed, and every guest hears so and is let go.
+    pub fn stop(&self) {
+        drop(self.pairing.lock().unwrap().take());
+        let room = self.room.lock().unwrap().take();
+        if let Some(room) = room {
+            room.leave(STOPPED);
+        }
     }
 }
 

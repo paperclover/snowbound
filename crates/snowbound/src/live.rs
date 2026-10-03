@@ -474,11 +474,14 @@ impl State {
             background.on_touched(None);
         }
         if let Some(host) = self.peers.hosts.remove(location) {
-            crate::spawn(move || {
-                if let Some(host) = Arc::into_inner(host) {
-                    host.stop();
-                }
-            });
+            crate::spawn(move || host.stop());
+        }
+        // Kept, the share would start again on the next frame, as after a relaunch.
+        if let Some(sharing) = &mut self.peers.sharing
+            && sharing.remove(location).is_some()
+            && let Err(error) = keep(&kept(&self.cache, HOSTING), sharing)
+        {
+            eprintln!("Keeping what this computer shares: {error}");
         }
     }
 
