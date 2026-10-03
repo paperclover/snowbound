@@ -22,7 +22,7 @@ x86_64)
     # raw-dylib imports (the windows crates) are made by llvm-mingw's dlltool. Cargo
     # can't see link.sh's inputs; folding their hash into the flags relinks on change.
     runtime=$(cat "$here/link.sh" "$here"/rt/* | shasum | cut -c1-12)
-    set -- -Zbuild-std=std,panic_unwind \
+    set -- -Zbuild-std=std,panic_abort,panic_unwind \
         --config "target.$target.linker='$here/link.sh'" \
         --config "target.$target.rustflags=['-C','linker-flavor=gcc','-C','metadata=rt-$runtime','-C','dlltool=$LLVM_MINGW/bin/x86_64-w64-mingw32-dlltool']" "$@"
     ;;

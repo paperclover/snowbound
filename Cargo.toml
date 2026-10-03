@@ -16,6 +16,7 @@ sctk-adwaita = { path = "vendor/sctk-adwaita" }
 [profile.release]
 lto = "fat"
 codegen-units = 1
+panic = "abort"
 
 # Code that runs at a person's pace, not a frame's: system services, the network, file and
 # image formats, shader translation.

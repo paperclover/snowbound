@@ -935,42 +935,44 @@ pub fn cover_border_line(_: &mut Ui, _: f32) {}
 pub fn with_pool(
     run: impl FnOnce() -> Result<(), Box<dyn std::error::Error>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use std::panic;
-    let log = log_stderr();
+    let details = log_stderr().map(|log| format!("The log is at {}.", log.display()));
     let (major, minor, build) = version();
     eprintln!(
         "Snowbound {} on Windows {major}.{minor}.{build}",
         option_env!("SNOWBOUND_BUILD").unwrap_or("development")
     );
-    panic::set_hook(Box::new(|info| {
+    let shown = details.clone();
+    std::panic::set_hook(Box::new(move |info| {
         let thread = std::thread::current();
         let backtrace = std::backtrace::Backtrace::force_capture();
         eprintln!(
             "Thread {:?} {info}\n{backtrace}",
             thread.name().unwrap_or("")
         );
+        // The panic aborts the process once this returns, taking an alert's thread with it.
+        if cfg!(panic = "abort")
+            && let Some(details) = &shown
+        {
+            let text = wide(format!(
+                "Snowbound stopped because of a problem.\n\n{details}"
+            ));
+            let caption = wide("Snowbound");
+            let style = wm::MB_OK | wm::MB_ICONWARNING;
+            unsafe {
+                wm::MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), style)
+            };
+        }
     }));
     unsafe {
         windows_sys::Win32::System::Diagnostics::Debug::AddVectoredExceptionHandler(0, Some(fault))
     };
-    let result = panic::catch_unwind(panic::AssertUnwindSafe(run));
-    let Some(log) = log else {
-        return result.unwrap_or_else(|payload| panic::resume_unwind(payload));
-    };
-    let details = format!("The log is at {}.", log.display());
-    // The window is gone, and a message box it owned wouldn't show.
-    WINDOW.store(0, Ordering::Relaxed);
-    match result {
-        Ok(Err(error)) => {
-            alert(&error.to_string(), &details);
-            Err(error)
-        }
-        Ok(done) => done,
-        Err(payload) => {
-            alert("Snowbound stopped because of a problem.", &details);
-            panic::resume_unwind(payload)
-        }
+    let result = run();
+    if let (Err(error), Some(details)) = (&result, details) {
+        // The window is gone, and a message box it owned wouldn't show.
+        WINDOW.store(0, Ordering::Relaxed);
+        alert(&error.to_string(), &details);
     }
+    result
 }
 
 /// Points stderr at `snowbound.log` in the cache folder where it goes nowhere, keeping the
