@@ -341,6 +341,7 @@ pub struct Keys(Mutex<std::collections::HashMap<[u8; 16], (Key, Instant)>>);
 impl Library {
     /// `location` named `name`, with no notebook read, server, sync or kept sections.
     fn new(location: &str, name: String, cache: &Path) -> Self {
+        crate::crash::conceal(&name);
         Self {
             location: location.to_owned(),
             name,
@@ -807,6 +808,7 @@ impl Library {
         notify: Box<dyn Fn() + Send>,
         deadline: Instant,
     ) -> Result<Section, Box<dyn Error>> {
+        crate::crash::conceal(path);
         let notify = Arc::new(Mutex::new(notify));
         let notifier = || {
             let notify = Arc::clone(&notify);

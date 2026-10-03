@@ -60,9 +60,9 @@ extern "C" {
     fn date_strings(ms: f64) -> Vec<String>;
     #[wasm_bindgen(js_name = shortDate)]
     fn short_date_string(ms: f64) -> String;
-    /// Resolves to whether the user chose `action` over `cancel`.
-    #[wasm_bindgen(js_name = askConfirm)]
-    fn ask_confirm(message: &str, detail: &str, cancel: &str, action: &str) -> js_sys::Promise;
+    /// Resolves to the index of the button in `buttons` pressed, or -1.
+    #[wasm_bindgen(js_name = askChoice)]
+    fn ask_choice(message: &str, detail: &str, buttons: Vec<String>) -> js_sys::Promise;
     /// Resolves to the text the user enters, starting as `value`; undefined when cancelled.
     #[wasm_bindgen(js_name = askText)]
     fn ask_text(message: &str, value: &str) -> js_sys::Promise;
@@ -70,6 +70,9 @@ extern "C" {
     fn tell(message: &str, detail: &str);
     #[wasm_bindgen(js_name = openLink)]
     fn open_link(url: &str);
+    /// Posts a crash report to the site the page came from.
+    #[wasm_bindgen(js_name = sendCrash)]
+    pub fn send_crash(report: &str);
     /// Writes changes out: `[path]` removed, `[path, null]` a folder, and `[path, length,
     /// [[offset, bytes], ...]]` a file's new length and the ranges that changed; with a
     /// fourth `true`, a section committed under a folder of the user's, written only where
@@ -813,15 +816,15 @@ pub fn pick_new(title: &str, name: &str, _: &str, _: Option<&Path>, reply: Reply
     });
 }
 
-pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str, reply: Reply<()>) {
-    answered(
-        ask_confirm(message, detail, cancel, action),
-        move |chosen| {
-            if chosen.is_truthy() {
-                reply.send(());
-            }
-        },
-    );
+/// Asks `message` with a button for each of `buttons`, the last the safe answer, and replies
+/// with the one pressed.
+pub fn choose(message: &str, detail: &str, buttons: &[&str], reply: Reply<usize>) {
+    let buttons = buttons.iter().map(|&button| button.to_owned()).collect();
+    answered(ask_choice(message, detail, buttons), move |pressed| {
+        if let Some(pressed) = pressed.as_f64().filter(|&pressed| pressed >= 0.0) {
+            reply.send(pressed as usize);
+        }
+    });
 }
 
 pub fn alert(message: &str, detail: &str) {
@@ -932,9 +935,11 @@ pub async fn start(
     fonts: Vec<js_sys::Uint8Array>,
     dictionaries: Vec<String>,
 ) -> Result<(), JsValue> {
-    std::panic::set_hook(Box::new(|info| report(info)));
     let window = web_sys::window().ok_or("No window")?;
     let navigator = window.navigator();
+    crate::crash::hook(navigator.user_agent().unwrap_or_default(), |text| {
+        report(text)
+    });
     MAC.set(navigator.platform().is_ok_and(|platform| {
         ["Mac", "iPhone", "iPad"]
             .iter()
@@ -977,6 +982,7 @@ pub async fn start(
         JsValue::from_str(&error.to_string())
     })?;
     state.surface.show();
+    state.offer_crash_report();
     // The first frame is the loading shell's layout, a toolbar over the page; `loaded` eases
     // the rest in.
     state.full_page = true;
@@ -1631,7 +1637,7 @@ pub fn check_for_update(asked: bool) {
                             update_now(state);
                             Ok(())
                         });
-                        confirm(
+                        crate::confirm(
                             "Update ready",
                             "Reload to use the newest Snowbound.",
                             "Later",

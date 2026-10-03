@@ -9,6 +9,7 @@ mod background;
 mod commands;
 #[cfg(all(test, feature = "wgpu", not(windows)))]
 mod conflict_render;
+mod crash;
 #[cfg(target_os = "linux")]
 #[path = "desktop_linux.rs"]
 mod desktop;
@@ -263,6 +264,16 @@ impl<T: Send + 'static> Reply<T> {
             }
         });
     }
+}
+
+/// Asks whether to go ahead with `action`, offering `cancel`, the default, too.
+fn confirm(message: &str, detail: &str, cancel: &str, action: &str, reply: Reply<()>) {
+    let pressed = Reply(Box::new(move |pressed| {
+        if pressed == 0 {
+            reply.send(());
+        }
+    }));
+    platform::choose(message, detail, &[action, cancel], pressed);
 }
 
 enum UserEvent {
@@ -1035,6 +1046,9 @@ async fn start_surface(
         match surface::Surface::new(window.clone(), backdrop, backend).await {
             Ok((surface, renderer, adapter)) => {
                 note(&format!("Drawing with {} ({adapter})", backend.label()));
+                if let Ok(mut renderer) = crash::RENDERER.lock() {
+                    *renderer = format!("{} ({adapter})", backend.label());
+                }
                 unavailable.retain(|(failed, _)| *failed != backend);
                 return Ok((surface, renderer, (backend, adapter)));
             }
@@ -6351,7 +6365,7 @@ impl App {
         }) else {
             return self.exit(event_loop);
         };
-        platform::confirm(
+        crate::confirm(
             "Discard this page?",
             "This temporary page has no saved copy. Closing it will discard your edits.",
             "Keep Editing",
@@ -6435,6 +6449,14 @@ impl ApplicationHandler<UserEvent> for App {
                 _ => {
                     for path in self.opening.drain(..) {
                         state.open_path(&path);
+                    }
+                    state.offer_crash_report();
+                    if cfg!(debug_assertions) && std::env::var_os("SNOWBOUND_CRASH").is_some() {
+                        let open = state.session.as_ref().map(|session| &session.library);
+                        panic!(
+                            "SNOWBOUND_CRASH asked to crash with {:?} open",
+                            open.map(|library| &library.location)
+                        );
                     }
                     self.state = Some(state);
                 }
@@ -6948,12 +6970,16 @@ fn launch() -> Result<(), Box<dyn Error>> {
             event_loop.create_proxy(),
         )?;
     }
+    // A screenshot leaves the settings as it found them.
+    let settings_file = settings_file.filter(|_| screenshot.is_none());
+    if let Some(file) = &settings_file {
+        let _ = crash::REPORT.set(file.with_file_name("crash.txt"));
+    }
     let mut app = App {
         proxy: event_loop.create_proxy(),
         input: Some(input),
-        // A screenshot leaves the settings as it found them.
         launch: Some(settings::Launch {
-            file: settings_file.filter(|_| screenshot.is_none()),
+            file: settings_file,
             saved,
             renderer,
             cache,

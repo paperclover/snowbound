@@ -867,7 +867,7 @@ impl State {
             }
             (Target::Section { library, path }, Action::Delete) => {
                 let name = crate::library::entry_name(&path).to_owned();
-                platform::confirm(
+                crate::confirm(
                     "Are you sure you want to move this section to this notebook's Recycle Bin?",
                     &name,
                     "Cancel",
@@ -882,7 +882,7 @@ impl State {
             }
             (Target::Group { library, path }, Action::Delete) => {
                 let name = crate::library::entry_name(&path).to_owned();
-                platform::confirm(
+                crate::confirm(
                     "Are you sure you want to move the sections in this section group to this notebook's Recycle Bin?",
                     &name,
                     "Cancel",

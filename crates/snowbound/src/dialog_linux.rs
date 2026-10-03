@@ -11,11 +11,10 @@ use winit::keyboard::NamedKey;
 pub enum Ask {
     /// A message with an OK button.
     Message,
-    /// Whether to go ahead: buttons for `cancel` and for `action`.
-    Question {
-        cancel: String,
-        action: String,
-        reply: Reply<()>,
+    /// A button for each of `buttons`, the last the safe answer; replies with the one pressed.
+    Choice {
+        buttons: Vec<String>,
+        reply: Reply<usize>,
     },
     /// A line of text, starting as `text`.
     Entry { text: String, reply: Reply<String> },
@@ -109,6 +108,8 @@ fn field() -> Id {
 enum Answer {
     Cancel,
     Accept,
+    /// A choice's button.
+    Pressed(usize),
     /// A file chooser moves to this folder.
     Open(PathBuf),
     /// A file chooser's file to open, or the name to save as.
@@ -182,10 +183,10 @@ impl State {
             pad: [6.0, 0.0],
             ..Spec::default()
         };
-        // Return goes ahead, but for a question, whose safe answer is the default as
-        // AppKit's and Windows' are.
-        let mut answer = entered.then_some(match dialog.ask {
-            Ask::Question { .. } => Answer::Cancel,
+        // Return goes ahead, but for a choice, whose safe answer is the default as AppKit's
+        // and Windows' are.
+        let mut answer = entered.then_some(match &dialog.ask {
+            Ask::Choice { buttons, .. } => Answer::Pressed(buttons.len() - 1),
             _ => Answer::Accept,
         });
         match &mut dialog.ask {
@@ -260,7 +261,7 @@ impl State {
                     crate::name(ui, field(), "Name");
                 }
             }
-            Ask::Message | Ask::Question { .. } => {}
+            Ask::Message | Ask::Choice { .. } => {}
         }
         ui.open(
             "buttons",
@@ -284,18 +285,22 @@ impl State {
                 ..Spec::default()
             },
         );
-        let (cancel, action) = match &dialog.ask {
-            Ask::Message => (None, "OK"),
-            Ask::Question { cancel, action, .. } => (Some(cancel.as_str()), action.as_str()),
-            Ask::Entry { .. } => (Some("Cancel"), "OK"),
-            Ask::File { save: false, .. } => (Some("Cancel"), "Open"),
-            Ask::File { save: true, .. } => (Some("Cancel"), "Save"),
+        // Left to right, the safe answer first, as GNOME and KDE place Cancel.
+        let buttons: Vec<(&str, Answer)> = match &dialog.ask {
+            Ask::Message => vec![("OK", Answer::Accept)],
+            Ask::Choice { buttons, .. } => (buttons.iter().enumerate().rev())
+                .map(|(index, button)| (button.as_str(), Answer::Pressed(index)))
+                .collect(),
+            Ask::Entry { .. } => vec![("Cancel", Answer::Cancel), ("OK", Answer::Accept)],
+            Ask::File { save, .. } => vec![
+                ("Cancel", Answer::Cancel),
+                (if *save { "Save" } else { "Open" }, Answer::Accept),
+            ],
         };
-        if cancel.is_some_and(|cancel| ui::button(ui, "cancel", cancel).clicked) {
-            answer = Some(Answer::Cancel);
-        }
-        if ui::button(ui, "action", action).clicked {
-            answer = Some(Answer::Accept);
+        for (index, (button, pressed)) in buttons.into_iter().enumerate() {
+            if ui::button(ui, ("button", index), button).clicked {
+                answer = Some(pressed);
+            }
         }
         ui.close();
         ui.close();
@@ -343,7 +348,11 @@ impl State {
         }
         match dialog.ask {
             Ask::Message => {}
-            Ask::Question { reply, .. } => reply.send(()),
+            Ask::Choice { reply, .. } => {
+                if let Answer::Pressed(index) = answer {
+                    reply.send(index);
+                }
+            }
             Ask::Entry { text, reply } => reply.send(text),
             Ask::File {
                 folder,

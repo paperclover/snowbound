@@ -942,13 +942,8 @@ pub fn with_pool(
         option_env!("SNOWBOUND_BUILD").unwrap_or("development")
     );
     let shown = details.clone();
-    std::panic::set_hook(Box::new(move |info| {
-        let thread = std::thread::current();
-        let backtrace = std::backtrace::Backtrace::force_capture();
-        eprintln!(
-            "Thread {:?} {info}\n{backtrace}",
-            thread.name().unwrap_or("")
-        );
+    crate::crash::hook(format!("Windows {major}.{minor}.{build}"), move |report| {
+        eprint!("{report}");
         // The panic aborts the process once this returns, taking an alert's thread with it.
         if cfg!(panic = "abort")
             && let Some(details) = &shown
@@ -962,7 +957,7 @@ pub fn with_pool(
                 wm::MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), style)
             };
         }
-    }));
+    });
     unsafe {
         windows_sys::Win32::System::Diagnostics::Debug::AddVectoredExceptionHandler(0, Some(fault))
     };
@@ -1759,15 +1754,17 @@ pub fn alert(message: &str, detail: &str) {
     });
 }
 
-/// Asks whether to go ahead with `action`, offering `cancel` too.
-pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str, reply: Reply<()>) {
-    let [message, detail, cancel, action] = [message, detail, cancel, action].map(str::to_owned);
-    reply.after(move || ask(&message, &detail, &cancel, &action).then_some(()));
+/// Asks `message` with a button for each of `buttons`, the last the safe answer, and replies
+/// with the one pressed.
+pub fn choose(message: &str, detail: &str, buttons: &[&str], reply: Reply<usize>) {
+    let [message, detail] = [message, detail].map(str::to_owned);
+    let buttons: Vec<String> = buttons.iter().map(|&button| button.to_owned()).collect();
+    reply.after(move || ask(&message, &detail, &buttons));
 }
 
-/// Whether the user goes ahead with `action`: a task dialog with buttons for it and `cancel`
-/// where the common controls have one, as from Windows Vista, else OK and Cancel.
-fn ask(message: &str, detail: &str, cancel: &str, action: &str) -> bool {
+/// The button pressed: a task dialog with `buttons` left to right where the common controls
+/// have one, as from Windows Vista, else OK, the first, and Cancel.
+fn ask(message: &str, detail: &str, buttons: &[String]) -> Option<usize> {
     use windows_sys::Win32::UI::Controls as controls;
     type Indirect = unsafe extern "system" fn(
         *const controls::TASKDIALOGCONFIG,
@@ -1775,20 +1772,17 @@ fn ask(message: &str, detail: &str, cancel: &str, action: &str) -> bool {
         *mut i32,
         *mut BOOL,
     ) -> i32;
-    let [title, instruction, content, cancel_text, action_text] =
-        ["Snowbound", message, detail, cancel, action].map(wide);
+    let [title, instruction, content] = ["Snowbound", message, detail].map(wide);
     if let Some(indirect) = function::<Indirect>("comctl32.dll", c"TaskDialogIndirect") {
-        const ACTION: i32 = 100;
-        let buttons = [
-            controls::TASKDIALOG_BUTTON {
-                nButtonID: ACTION,
-                pszButtonText: action_text.as_ptr(),
-            },
-            controls::TASKDIALOG_BUTTON {
-                nButtonID: wm::IDCANCEL,
-                pszButtonText: cancel_text.as_ptr(),
-            },
-        ];
+        const FIRST: i32 = 100;
+        let texts: Vec<_> = buttons.iter().map(|button| wide(button.as_str())).collect();
+        let buttons: Vec<_> = (FIRST..)
+            .zip(&texts)
+            .map(|(id, text)| controls::TASKDIALOG_BUTTON {
+                nButtonID: id,
+                pszButtonText: text.as_ptr(),
+            })
+            .collect();
         let mut config: controls::TASKDIALOGCONFIG = unsafe { std::mem::zeroed() };
         config.cbSize = size_of::<controls::TASKDIALOGCONFIG>() as u32;
         config.hwndParent = owner();
@@ -1798,7 +1792,7 @@ fn ask(message: &str, detail: &str, cancel: &str, action: &str) -> bool {
         config.pszContent = content.as_ptr();
         config.cButtons = buttons.len() as u32;
         config.pButtons = buttons.as_ptr();
-        config.nDefaultButton = wm::IDCANCEL;
+        config.nDefaultButton = FIRST + buttons.len() as i32 - 1;
         let mut pressed = 0;
         let shown = unsafe {
             indirect(
@@ -1809,7 +1803,9 @@ fn ask(message: &str, detail: &str, cancel: &str, action: &str) -> bool {
             )
         };
         if shown >= 0 {
-            return pressed == ACTION;
+            return usize::try_from(pressed - FIRST)
+                .ok()
+                .filter(|&pressed| pressed < buttons.len());
         }
     }
     let text = wide(format!("{message}\n\n{detail}"));
@@ -1821,7 +1817,7 @@ fn ask(message: &str, detail: &str, cancel: &str, action: &str) -> bool {
             wm::MB_OKCANCEL | wm::MB_ICONQUESTION | wm::MB_DEFBUTTON2,
         )
     };
-    answer == wm::IDOK
+    (answer == wm::IDOK).then_some(0)
 }
 
 /// The common controls' date and time picker in a dialog of its own.

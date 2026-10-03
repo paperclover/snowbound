@@ -30,6 +30,12 @@ Options' Renderer, the settings' `renderer`, `SNOWBOUND_RENDERER` or `--renderer
 (each over the last) picks one, and one that fails to start falls back to the
 default and says so. Choosing another in Options starts it at once: the renderer and
 surface go and new ones begin, the window and everything in it staying as they are.
+A panic writes a crash report beside the settings before the process ends (`crash.rs`):
+the build, system, renderer, thread, uptime, panic and backtrace, with paths and the
+open notebooks' and sections' names hidden; the browser keeps it in local storage. The next
+launch asks whether to send it to the site's `POST /crash`, shows the exact text on Show
+Report, and sends nothing unless Send Report is chosen; either answer deletes it. A run
+with no settings of its own, as a screenshot or replay, writes and reads none.
 `commands.rs` is the one table of commands: each one's title, its chords on
 macOS and elsewhere, when it is enabled or checked, and what it does. The
 keyboard, the toolbar and the macOS menu bar all run commands from it.

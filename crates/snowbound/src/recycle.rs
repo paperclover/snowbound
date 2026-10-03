@@ -76,7 +76,7 @@ impl State {
 
     /// Empty Recycle Bin on `library`, once confirmed as OneNote asks.
     pub(crate) fn empty_recycle_bin(&mut self, library: Arc<Library>) {
-        crate::platform::confirm(
+        crate::confirm(
             "Are you sure you want to empty the Recycle Bin for this notebook?",
             "Its pages and sections are deleted for good.",
             "Cancel",
@@ -95,7 +95,7 @@ impl State {
             return self.recycle_now(request);
         };
         let spaces = spaces.clone();
-        crate::platform::confirm(
+        crate::confirm(
             "Are you sure you want to delete this page for good?",
             "It can't be restored.",
             "Cancel",

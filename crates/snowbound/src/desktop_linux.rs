@@ -488,7 +488,7 @@ pub fn uninstall(proxy: &winit::event_loop::EventLoopProxy<crate::UserEvent>) {
         remove();
         Ok(())
     });
-    crate::platform::confirm(
+    crate::confirm(
         "Uninstall Snowbound?",
         &detail,
         "Cancel",

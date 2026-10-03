@@ -9,10 +9,9 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApplication, NSColor,
-    NSColorSpace, NSDatePicker, NSDatePickerElementFlags, NSDatePickerStyle, NSEvent,
-    NSEventSubtype, NSEventType, NSMenu, NSMenuItem, NSModalResponse, NSModalResponseCancel,
-    NSModalResponseOK, NSSavePanel, NSWindow,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSColor, NSColorSpace, NSDatePicker,
+    NSDatePickerElementFlags, NSDatePickerStyle, NSEvent, NSEventSubtype, NSEventType, NSMenu,
+    NSMenuItem, NSModalResponse, NSModalResponseCancel, NSModalResponseOK, NSSavePanel, NSWindow,
 };
 use objc2_foundation::{
     MainThreadMarker, NSAttributedString, NSCalendar, NSCalendarUnit, NSDate, NSDateFormatter,
@@ -33,7 +32,14 @@ use winit::{
 /// Runs `run` inside an autorelease pool. 10.6 has none outside NSApplication's run loop,
 /// and quitting releases the windows after it returns.
 pub fn with_pool<R>(run: impl FnOnce() -> R) -> R {
-    objc2::rc::autoreleasepool(|_| run())
+    objc2::rc::autoreleasepool(|_| {
+        let version: Retained<NSString> = unsafe {
+            let info: Retained<AnyObject> = msg_send_id![class!(NSProcessInfo), processInfo];
+            msg_send_id![&info, operatingSystemVersionString]
+        };
+        crate::crash::hook(format!("macOS {version}"), |report| eprint!("{report}"));
+        run()
+    })
 }
 
 pub use crate::aqua::{cover_border_line, move_cursor, resize_grip, system_interface};
@@ -1648,18 +1654,23 @@ pub fn reveal(target: impl AsRef<std::ffi::OsStr>) {
     }
 }
 
-/// Asks whether to go ahead with `action`, offering `cancel` first.
-pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str, reply: Reply<()>) {
+/// Asks `message` with a button for each of `buttons`, the last the safe answer, and replies
+/// with the one pressed. AppKit places the last first, on Return.
+pub fn choose(message: &str, detail: &str, buttons: &[&str], reply: Reply<usize>) {
     let mtm = MainThreadMarker::new().expect("Window events run on the main thread");
+    let count = buttons.len();
     unsafe {
         let alert = NSAlert::new(mtm);
         alert.setMessageText(&NSString::from_str(message));
         alert.setInformativeText(&NSString::from_str(detail));
-        alert.addButtonWithTitle(&NSString::from_str(cancel));
-        alert.addButtonWithTitle(&NSString::from_str(action));
-        begin_alert(&alert, |response| {
-            if response == NSAlertSecondButtonReturn {
-                reply.send(());
+        for button in buttons.iter().rev() {
+            alert.addButtonWithTitle(&NSString::from_str(button));
+        }
+        begin_alert(&alert, move |response| {
+            if let Ok(added) = usize::try_from(response - NSAlertFirstButtonReturn)
+                && added < count
+            {
+                reply.send(count - 1 - added);
             }
         });
     }

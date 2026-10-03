@@ -47,7 +47,7 @@ fn running() -> Option<Version> {
 
 /// This build's platform, as `latest.json` and `build.json` key their entries; Apple
 /// silicon's for an Intel build Rosetta runs.
-fn platform() -> String {
+pub(crate) fn platform() -> String {
     if translated() {
         "macos-aarch64".to_owned()
     } else if cfg!(target_os = "macos") && !cfg!(feature = "wgpu") {
@@ -561,38 +561,7 @@ fn download(_: &str, _: u64) -> Result<Vec<u8>, String> {
 /// The `Fetch` the app uses.
 #[cfg(not(target_arch = "wasm32"))]
 fn download(path: &str, limit: u64) -> Result<Vec<u8>, String> {
-    let system = rustls_native_certs::load_native_certs().certs;
-    let bundled = webpki_root_certs::TLS_SERVER_ROOT_CERTS;
-    let roots = (system.iter().chain(bundled))
-        .map(|der| Certificate::from_der(der).to_owned())
-        .collect();
-    // The proxy Live Share's relay goes through, the system's included; ureq reads only the
-    // environment's.
-    #[cfg(feature = "live")]
-    let proxy = {
-        let host = BASE.trim_start_matches("https://").split('/').next();
-        notebook::live::proxy::for_host(host.unwrap_or_default(), true).and_then(|proxy| {
-            let credentials = (proxy.credentials.as_ref())
-                .map_or_else(String::new, |(name, password)| {
-                    format!("{name}:{password}@")
-                });
-            ureq::Proxy::new(&format!("http://{credentials}{proxy}")).ok()
-        })
-    };
-    #[cfg(not(feature = "live"))]
-    let proxy = ureq::Proxy::try_from_env();
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .proxy(proxy)
-        .tls_config(
-            TlsConfig::builder()
-                .root_certs(RootCerts::Specific(Arc::new(roots)))
-                .build(),
-        )
-        .timeout_global(Some(Duration::from_secs(10 * 60)))
-        .timeout_connect(Some(Duration::from_secs(30)))
-        .build()
-        .into();
-    agent
+    agent(BASE, Duration::from_secs(10 * 60))
         .get(&format!("{BASE}{path}"))
         .call()
         .and_then(|mut response| {
@@ -604,6 +573,49 @@ fn download(path: &str, limit: u64) -> Result<Vec<u8>, String> {
                 .read_to_vec()
         })
         .map_err(|error| error.to_string())
+}
+
+/// An HTTP client for `address`, through the proxy the system names for it, trusting the
+/// system's certificate authorities and Mozilla's, giving up after `timeout`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn agent(address: &str, timeout: Duration) -> ureq::Agent {
+    let system = rustls_native_certs::load_native_certs().certs;
+    let bundled = webpki_root_certs::TLS_SERVER_ROOT_CERTS;
+    let roots = (system.iter().chain(bundled))
+        .map(|der| Certificate::from_der(der).to_owned())
+        .collect();
+    // The proxy Live Share's relay goes through, the system's included; ureq reads only the
+    // environment's.
+    #[cfg(feature = "live")]
+    let proxy = {
+        let host = address
+            .split("://")
+            .nth(1)
+            .and_then(|rest| rest.split(['/', ':']).next());
+        notebook::live::proxy::for_host(host.unwrap_or_default(), true).and_then(|proxy| {
+            let credentials = (proxy.credentials.as_ref())
+                .map_or_else(String::new, |(name, password)| {
+                    format!("{name}:{password}@")
+                });
+            ureq::Proxy::new(&format!("http://{credentials}{proxy}")).ok()
+        })
+    };
+    #[cfg(not(feature = "live"))]
+    let proxy = {
+        let _ = address;
+        ureq::Proxy::try_from_env()
+    };
+    ureq::Agent::config_builder()
+        .proxy(proxy)
+        .tls_config(
+            TlsConfig::builder()
+                .root_certs(RootCerts::Specific(Arc::new(roots)))
+                .build(),
+        )
+        .timeout_global(Some(timeout))
+        .timeout_connect(Some(Duration::from_secs(30)))
+        .build()
+        .into()
 }
 
 #[derive(Default)]
@@ -744,7 +756,7 @@ impl State {
             return;
         };
         match status {
-            Status::Ready(version, _, changes) => platform::confirm(
+            Status::Ready(version, _, changes) => crate::confirm(
                 "Update ready",
                 &described(
                     format!("Snowbound {version} is ready to install."),
@@ -757,7 +769,7 @@ impl State {
                     Ok(())
                 }),
             ),
-            Status::Available(version, changes) => platform::confirm(
+            Status::Available(version, changes) => crate::confirm(
                 "Update available",
                 &described(
                     format!("Download Snowbound {version} from its build folder."),

@@ -208,7 +208,7 @@ impl State {
             Scope::Notebook => ("notebook", session.library.name.clone()),
         };
         let asked = Arc::clone(&session.library);
-        platform::confirm(
+        crate::confirm(
             &format!("Do you want to delete all page versions in the {container} \"{name}\"?"),
             "You can't restore these versions afterward.",
             "Cancel",

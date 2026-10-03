@@ -472,8 +472,8 @@ function ask(message, detail, buttons, value) {
   );
 }
 
-export function askConfirm(message, detail, cancel, action) {
-  return ask(message, detail, [action, cancel]).then(([pressed]) => pressed === 0);
+export function askChoice(message, detail, buttons) {
+  return ask(message, detail, buttons).then(([pressed]) => pressed);
 }
 
 export function askText(message, value) {
@@ -484,6 +484,11 @@ export function askText(message, value) {
 
 export function tell(message, detail) {
   ask(message, detail, ["OK"]);
+}
+
+export function sendCrash(report) {
+  fetch("/crash", { method: "POST", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: report })
+    .catch((error) => console.error("Cannot send the crash report", error));
 }
 
 export function openLink(url) {

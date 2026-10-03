@@ -828,14 +828,17 @@ fn log_crashes() {
     let field =
         |field: &[libc::c_char]| unsafe { CStr::from_ptr(field.as_ptr()) }.to_string_lossy();
     let session = |name| std::env::var(name).unwrap_or_default();
-    let _ = writeln!(
-        log,
-        "Snowbound {} on Linux {} {}, {} {}",
-        option_env!("SNOWBOUND_BUILD").unwrap_or("development"),
+    let described = format!(
+        "Linux {} {}, {} {}",
         field(&system.release),
         field(&system.machine),
         session("XDG_SESSION_TYPE"),
         session("XDG_CURRENT_DESKTOP"),
+    );
+    let _ = writeln!(
+        log,
+        "Snowbound {} on {described}",
+        option_env!("SNOWBOUND_BUILD").unwrap_or("development"),
     );
     let mut stderr: libc::stat = unsafe { std::mem::zeroed() };
     let seen = unsafe { libc::isatty(2) } == 1
@@ -848,15 +851,9 @@ fn log_crashes() {
         None
     };
     let _ = LOG.set((path, copy));
-    std::panic::set_hook(Box::new(|info| {
-        let thread = std::thread::current();
-        let backtrace = std::backtrace::Backtrace::force_capture();
-        let report = format!(
-            "Thread {:?} {info}\n{backtrace}\n",
-            thread.name().unwrap_or("")
-        );
+    crate::crash::hook(described, |report| {
         crashed(|fd| write_all(fd, report.as_bytes()));
-    }));
+    });
     if let Ok(path) = crate::loader::executable()
         && let Ok(path) = CString::new(path.into_os_string().into_vec())
     {
@@ -1595,7 +1592,7 @@ pub fn pick_file(title: &str, types: &[&str], reply: Reply<PathBuf>) {
         options.insert("filters", filters(&patterns, &globs));
     }
     let types = types.iter().map(|kind| kind.to_string()).collect();
-    choose(
+    pick(
         title,
         "OpenFile",
         options,
@@ -1618,7 +1615,7 @@ fn filters(name: &str, globs: &[String]) -> Value<'static> {
 
 /// Replies with the file the file chooser portal answers `method` with, titled `title`, or
 /// where no portal answers, Snowbound's `own`.
-fn choose(
+fn pick(
     title: &str,
     method: &'static str,
     mut options: HashMap<&'static str, Value<'static>>,
@@ -1747,14 +1744,15 @@ pub fn reveal(target: impl AsRef<std::ffi::OsStr>) {
     }
 }
 
-/// Asks whether to go ahead with `action`, offering `cancel` first.
-pub fn confirm(message: &str, detail: &str, cancel: &str, action: &str, reply: Reply<()>) {
-    let ask = Ask::Question {
-        cancel: cancel.into(),
-        action: action.into(),
-        reply,
-    };
-    crate::dialog::show(message.into(), detail.into(), ask);
+/// Asks `message` with a button for each of `buttons`, the last the safe answer, and replies
+/// with the one pressed.
+pub fn choose(message: &str, detail: &str, buttons: &[&str], reply: Reply<usize>) {
+    let buttons = buttons.iter().map(|&button| button.to_owned()).collect();
+    crate::dialog::show(
+        message.into(),
+        detail.into(),
+        Ask::Choice { buttons, reply },
+    );
 }
 
 /// Asks for a notebook's table of contents or a section file, titled `title`.
@@ -1762,7 +1760,7 @@ pub fn pick_notebook(title: &str, reply: Reply<PathBuf>) {
     let name = "OneNote notebooks, sections and packages";
     let types = ["onetoc2", "one", "onepkg"];
     let globs = types.map(|kind| format!("*.{kind}"));
-    choose(
+    pick(
         title,
         "OpenFile",
         HashMap::from([("filters", filters(name, &globs))]),
@@ -1800,7 +1798,7 @@ pub fn pick_new(
         name.to_owned(),
         folder.map_or_else(crate::dialog::start_folder, Into::into),
     );
-    choose(
+    pick(
         title,
         "SaveFile",
         options,

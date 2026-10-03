@@ -593,7 +593,7 @@ impl State {
             };
             detail += &format!(" {changes} not yet saved to its files will be lost.");
         }
-        platform::confirm(
+        crate::confirm(
             &format!("Delete “{}”?", library.name),
             &detail,
             "Cancel",
