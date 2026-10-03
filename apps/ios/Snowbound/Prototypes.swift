@@ -49,7 +49,7 @@ extension Prototype {
         welcome.button = button
         welcome.buttonProperties.primaryAction = UIAction { _ in new() }
         var open = UIButton.Configuration.plain()
-        open.title = "Open Existing Notebook"
+        open.title = "Open Notebook"
         welcome.secondaryButton = open
         var elsewhere = [
             UIAction(title: "Open Folder", image: UIImage(systemName: "folder")) { _ in openFolder() },

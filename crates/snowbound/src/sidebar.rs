@@ -272,7 +272,7 @@ fn sidebar(
         (
             "open",
             Leading::Notebook(art::NOTEBOOK, None),
-            "Open Existing",
+            "Open Notebook",
             Action::OpenNotebook,
         ),
         #[cfg(feature = "live")]
@@ -1260,7 +1260,7 @@ impl crate::State {
                 (
                     "open",
                     Leading::Notebook(art::NOTEBOOK, None),
-                    "Open Existing",
+                    "Open Notebook",
                     crate::Command::OpenNotebook,
                 ),
                 #[cfg(feature = "live")]
