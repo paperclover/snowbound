@@ -203,6 +203,12 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   kind of context it gives, so each renderer starts on a canvas of its own, which then takes
   the page's place and its input. Only where even the 2D canvas fails does `start` reject,
   with a `NoGraphicsError`.
+- Updating is a reload. With Update automatically on, the page checks hourly whether
+  `index.html` names another build's folder than the one its module came from; finding
+  one, it fetches that build's module, JavaScript and fonts into the HTTP cache, then
+  reloads at a quiet moment (idle 90 seconds, or when the user comes back to the tab, with
+  no popup or dialog open and its files written), back on the same page and scroll. A
+  reload that didn't bring the build isn't tried again.
 - AccessKit has no web adapter, so once a screen reader asks for it (a visually hidden
   button, then on every visit) the trees AccessKit would get are mirrored as hidden
   elements with ARIA roles; acting on one sends AccessKit's action back.

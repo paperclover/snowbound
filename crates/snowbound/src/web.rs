@@ -92,6 +92,20 @@ extern "C" {
     /// follows.
     #[wasm_bindgen(js_name = adoptCanvas)]
     pub fn adopt_canvas(canvas: &web_sys::HtmlCanvasElement);
+    /// The build running, as the folder its module came from names it; none where it came
+    /// from none.
+    #[wasm_bindgen(js_name = runningBuild)]
+    fn running_build() -> Option<String>;
+    /// Resolves to the build the site's `index.html` names where it is another, its files
+    /// fetched for the reload into it; null where it is the same.
+    #[wasm_bindgen(js_name = fetchUpdate)]
+    fn fetch_update() -> js_sys::Promise;
+    /// Reloads once the files handed over are written, giving the next load `resume`;
+    /// resolves to false, staying, where a dialog of the page's is open.
+    #[wasm_bindgen(js_name = reloadInto)]
+    fn reload_into(resume: &str) -> js_sys::Promise;
+    /// What the load before this one gave it, once.
+    fn resumed() -> Option<String>;
 }
 
 /// Where the browser keeps its notebooks, which a first visit makes one in.
@@ -154,6 +168,13 @@ const FALLBACKS: [(&str, &[RangeInclusive<u32>]); 7] = [
 const EMOJI: &str = "Noto-COLRv1.ttf.gz";
 /// How long changed files wait to be written out, so a burst of edits writes once.
 const STORE_AFTER: Duration = Duration::from_millis(500);
+/// When `tools/release_web.py` built this module, in seconds since 1970; development builds
+/// have none.
+const BUILT: Option<&str> = option_env!("SNOWBOUND_WEB_BUILD");
+/// How often the site is checked for a newer build, and how long the page goes without input
+/// before it reloads into one.
+const CHECK_EVERY: Duration = Duration::from_secs(60 * 60);
+const IDLE: Duration = Duration::from_secs(90);
 
 /// What the page's input brought, waiting for the next frame.
 enum Input {
@@ -210,6 +231,16 @@ thread_local! {
     static LANGUAGE: RefCell<String> = const { RefCell::new(String::new()) };
     /// The look last handed to `keepLook`.
     static LOOK: RefCell<String> = const { RefCell::new(String::new()) };
+    /// When the site is next checked for a newer build, whether one waits in the HTTP cache,
+    /// when the page last took input, whether the user came back to it, and whether it is
+    /// reloading.
+    static CHECK_DUE: Cell<Option<Instant>> = const { Cell::new(None) };
+    static UPDATE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// A build the page reloaded to and didn't get, which it doesn't reload to again.
+    static MISSED: RefCell<Option<String>> = const { RefCell::new(None) };
+    static LAST_INPUT: Cell<Option<Instant>> = const { Cell::new(None) };
+    static RETURNED: Cell<bool> = const { Cell::new(false) };
+    static RELOADING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Whether the browser runs on a Mac, where Command takes the editing chords.
@@ -949,6 +980,20 @@ pub async fn start(
     // The first frame is the loading shell's layout, a toolbar over the page; `loaded` eases
     // the rest in.
     state.full_page = true;
+    // Reloaded into an update, the page goes back to where it was scrolled.
+    if let Some(resume) = resumed().and_then(|resume| serde_json::from_str::<Resume>(&resume).ok())
+    {
+        for (axis, offset) in resume.offset.into_iter().enumerate() {
+            match state.view.scroll_to(axis, offset) {
+                Ok(response) => state.respond(response),
+                Err(error) => report(error),
+            }
+        }
+        if Some(&resume.build) != running_build().as_ref() {
+            MISSED.set(Some(resume.build));
+        }
+    }
+    CHECK_DUE.set(Some(Instant::now() + Duration::from_secs(10)));
     // Text no run tags is in the browser's language, as typed in it.
     if let Some(spelling) = &state.spelling {
         spelling.untagged(canvas::language::lcid(&input_language()));
@@ -1138,6 +1183,7 @@ async fn open(
 }
 
 fn queue(input: Input) {
+    LAST_INPUT.set(Some(Instant::now()));
     INPUT.with_borrow_mut(|queue| queue.push(input));
     request_frame();
 }
@@ -1288,6 +1334,13 @@ pub fn resize(width: u32, height: u32, ratio: f32) {
 #[wasm_bindgen]
 pub fn focus(focused: bool) {
     queue(Input::Focus(focused));
+}
+
+/// The user came back to the page's window or tab.
+#[wasm_bindgen]
+pub fn returned() {
+    RETURNED.set(true);
+    request_frame();
 }
 
 #[wasm_bindgen]
@@ -1496,10 +1549,16 @@ fn turn(state: &mut State) -> Result<(), Box<dyn Error>> {
     if STORE_DUE.get().is_some_and(|due| due <= now) {
         store();
     }
-    let next = [blink, wake.filter(|wake| *wake > now), STORE_DUE.get()]
-        .into_iter()
-        .flatten()
-        .min();
+    let updating = follow_updates(state, now);
+    let next = [
+        blink,
+        wake.filter(|wake| *wake > now),
+        STORE_DUE.get(),
+        updating,
+    ]
+    .into_iter()
+    .flatten()
+    .min();
     if let Some(next) = next {
         wake_in(next.saturating_duration_since(now).as_secs_f64() * 1e3);
     }
@@ -1518,6 +1577,136 @@ fn remember_look(state: &State) {
         keep_look(&look);
         LOOK.set(look);
     }
+}
+
+/// This build as Options and About name it.
+pub fn describe_build() -> String {
+    match BUILT.and_then(|seconds| seconds.parse::<u64>().ok()) {
+        Some(seconds) => {
+            let [date, time] = date_text((seconds + 11_644_473_600) * 10_000_000);
+            format!("Snowbound built {date}, {time}")
+        }
+        None => "Snowbound development build".to_owned(),
+    }
+}
+
+/// What a reload into an update hands the page it loads.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Resume {
+    /// How far the page was scrolled, in device pixels.
+    offset: [f32; 2],
+    /// The build reloaded for.
+    build: String,
+}
+
+/// Whether a newer build waits in the HTTP cache for the page to reload into.
+pub fn update_ready() -> bool {
+    UPDATE.with_borrow(Option::is_some)
+}
+
+/// Looks for a newer build and fetches it into the HTTP cache; `asked` says what it finds.
+pub fn check_for_update(asked: bool) {
+    if running_build().is_none() {
+        if asked {
+            inform(
+                "Snowbound is up to date",
+                "Development builds don't update.",
+            );
+        }
+        return;
+    }
+    wasm_bindgen_futures::spawn_local(async move {
+        let found = wasm_bindgen_futures::JsFuture::from(fetch_update()).await;
+        let found = found.map(|found| {
+            found
+                .as_string()
+                .filter(|found| !MISSED.with_borrow(|missed| missed.as_ref() == Some(found)))
+        });
+        match found {
+            Ok(Some(newer)) => {
+                UPDATE.set(Some(newer));
+                send(UserEvent::Then(Box::new(move |state| {
+                    if asked {
+                        let reload = state.reply(|state, ()| {
+                            update_now(state);
+                            Ok(())
+                        });
+                        confirm(
+                            "Update ready",
+                            "Reload to use the newest Snowbound.",
+                            "Later",
+                            "Reload",
+                            reload,
+                        );
+                    }
+                    state.window.request_redraw();
+                    Ok(())
+                })));
+            }
+            Ok(_) if asked => tell(
+                "Snowbound is up to date",
+                &format!("You have {}.", describe_build()),
+            ),
+            Err(_) if asked => tell(
+                "Couldn't check for updates",
+                "Snowbound couldn’t reach its site. Check your connection, then try again.",
+            ),
+            _ => {}
+        }
+    });
+}
+
+/// Reloads into the newer build once everything is written, back on the page shown and
+/// scrolled as it is.
+pub fn update_now(state: &mut State) {
+    if RELOADING.replace(true) {
+        return;
+    }
+    if let Err(error) = state.persist() {
+        report(error);
+    }
+    store();
+    let Some(build) = UPDATE.with_borrow(Clone::clone) else {
+        return RELOADING.set(false);
+    };
+    let resume = Resume {
+        offset: state.view.viewport.origin.map(|origin| -origin),
+        build,
+    };
+    let reloading = reload_into(&serde_json::to_string(&resume).unwrap_or_default());
+    wasm_bindgen_futures::spawn_local(async move {
+        let reloaded = wasm_bindgen_futures::JsFuture::from(reloading).await;
+        if !reloaded.is_ok_and(|reloaded| reloaded.is_truthy()) {
+            RELOADING.set(false);
+        }
+    });
+}
+
+/// With updates automatic: checks the site when due, and reloads into a newer build at a
+/// quiet moment, idle or just come back to, with no popup open and nothing loading or recording.
+/// Returns when to come back.
+fn follow_updates(state: &mut State, now: Instant) -> Option<Instant> {
+    let returned = RETURNED.take();
+    if !state.updates.automatic() {
+        return None;
+    }
+    if CHECK_DUE.get().is_some_and(|due| due <= now) {
+        CHECK_DUE.set(Some(now + CHECK_EVERY));
+        if !update_ready() {
+            check_for_update(false);
+        }
+    }
+    let idle = LAST_INPUT.get().map_or(now, |last| last + IDLE);
+    let quiet = !state.ui.popups_open()
+        && state.opening.is_none()
+        && state.loading == 0
+        && matches!(state.media, crate::recording::Media::Idle);
+    if update_ready() && (returned || idle <= now) && quiet {
+        update_now(state);
+    }
+    // A moment that wasn't quiet is looked at again shortly.
+    let retry = update_ready().then(|| idle.max(now + Duration::from_secs(5)));
+    [CHECK_DUE.get(), retry].into_iter().flatten().min()
 }
 
 /// Fetches the fallback faces `text` calls for that are not yet asked for.

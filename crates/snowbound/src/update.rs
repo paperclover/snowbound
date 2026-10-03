@@ -3,8 +3,8 @@
 //! `history.json` every build. A thread checks on launch and daily, downloads a newer build
 //! for this platform, verifies it, and unpacks it beside the install. Restart to Update
 //! swaps it in once the app quits.
-//! `tools/RELEASE.md` describes the publishing side. In the browser an update is a reload,
-//! so nothing is fetched or installed there.
+//! `tools/RELEASE.md` describes the publishing side. In the browser an update is a reload:
+//! `web.rs` reloads into the build the site's `index.html` names where it is another.
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
 #[cfg(target_os = "linux")]
@@ -124,6 +124,9 @@ impl std::fmt::Display for Version {
 
 /// The running build as Options and About name it.
 pub fn describe_running() -> String {
+    #[cfg(target_arch = "wasm32")]
+    return platform::describe_build();
+    #[cfg(not(target_arch = "wasm32"))]
     running().map_or_else(
         || "Snowbound development build".to_owned(),
         |version| format!("Snowbound {version}"),
@@ -240,9 +243,9 @@ fn verify(_: &[u8], _: &[u8], _: &str) -> Result<(), String> {
     Err(BROWSER.to_owned())
 }
 
-/// Why the browser installs no builds: it loads the newest each time the page opens.
+/// Why the browser installs no builds: it reloads into them.
 #[cfg(target_arch = "wasm32")]
-const BROWSER: &str = "The browser loads the newest Snowbound each time the page opens.";
+const BROWSER: &str = "The browser updates Snowbound by reloading it.";
 
 /// `KEY`'s ed25519 public key, after minisign's algorithm and key id.
 #[cfg(not(target_arch = "wasm32"))]
@@ -711,7 +714,7 @@ impl Updates {
     /// Checks now, and shows what the check finds when it finishes.
     pub fn check_now(&self) {
         #[cfg(target_arch = "wasm32")]
-        platform::inform("Snowbound is up to date", BROWSER);
+        platform::check_for_update(true);
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.shared.lock().unwrap().asked = true;

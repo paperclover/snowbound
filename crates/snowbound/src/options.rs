@@ -256,6 +256,13 @@ const SECTIONS: &[Section] = &[
                     "update download",
                     Control::Check(|options| &mut options.automatic_updates),
                 ),
+                #[cfg(target_arch = "wasm32")]
+                Row::new(
+                    "Update automatically",
+                    "update reload newer version",
+                    Control::Check(|options| &mut options.automatic_updates),
+                )
+                .hint("Reloads into new versions while you're idle, your work saved"),
                 #[cfg(target_os = "linux")]
                 Row::new(
                     "Installed:",
@@ -304,6 +311,9 @@ pub struct Options {
     /// Live Share's relay; empty uses Snowbound's.
     relay: String,
     notebook_theme: Option<String>,
+    /// Update Now was chosen: OK, then reload into the newer build.
+    #[cfg(target_arch = "wasm32")]
+    update_now: bool,
     renderer: Backend,
     pub(crate) keyboard: crate::keys::Keyboard,
 }
@@ -393,6 +403,8 @@ impl State {
             relay: self.live_options.relay.clone().unwrap_or_default(),
             notebook_theme: self.notebook_theme.clone(),
             renderer: self.renderer_choice,
+            #[cfg(target_arch = "wasm32")]
+            update_now: false,
             keyboard: crate::keys::Keyboard::new(),
         });
         self.ui.open_popup(id());
@@ -668,6 +680,8 @@ impl State {
         );
         let [cancel, ok] = ui::dialog_buttons(ui, "OK", true);
         let ok = ok || entered;
+        #[cfg(target_arch = "wasm32")]
+        let ok = ok || options.update_now;
         ui.close();
         ui.close();
         if ok {
@@ -705,6 +719,11 @@ impl State {
             self.save_settings();
             if switch {
                 let _ = self.proxy.send_event(UserEvent::Renderer(options.renderer));
+            }
+            #[cfg(target_arch = "wasm32")]
+            if options.update_now {
+                self.ui.close_popup(id());
+                return crate::platform::update_now(self);
             }
         } else if !cancel {
             self.options = Some(options);
@@ -1099,7 +1118,9 @@ fn cache(state: &mut State, _: &mut Options, _: &str) {
     }
 }
 
-fn version(state: &mut State, _: &mut Options, _: &str) {
+/// The build running, and in the browser Update Now once a newer one is fetched.
+#[cfg_attr(not(target_arch = "wasm32"), allow(unused_variables))]
+fn version(state: &mut State, options: &mut Options, _: &str) {
     let ui = &mut state.ui;
     let spec = Spec {
         size: [fill(), px(row_height(&ui.theme))],
@@ -1107,6 +1128,10 @@ fn version(state: &mut State, _: &mut Options, _: &str) {
         ..Spec::default()
     };
     ui.leaf("version", spec);
+    #[cfg(target_arch = "wasm32")]
+    if crate::platform::update_ready() && ui::button(ui, "update", "Update Now").clicked {
+        options.update_now = true;
+    }
 }
 
 /// Where Install put Snowbound and Uninstall, or Install where it isn't in the app menu.

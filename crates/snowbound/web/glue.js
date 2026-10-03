@@ -114,7 +114,8 @@ function storageWorker() {
             files = await list(root, "", []);
           }
           postMessage(files, files.flatMap(([, bytes]) => (bytes ? [bytes.buffer] : [])));
-        } else
+        } else if (data.kind === "settle") postMessage(null);
+        else
           for (const [path, length, ranges] of data.changes)
             if (length === undefined) await remove(path);
             else if (length === null) await folder(names(path));
@@ -130,10 +131,16 @@ export function loadFiles() {
   storage = new Worker(source);
   storage.postMessage({ kind: "load" });
   return new Promise((resolve, reject) => {
-    storage.onmessage = ({ data }) => resolve(data);
+    storage.onmessage = ({ data }) => {
+      storage.onmessage = () => settling.shift()?.();
+      resolve(data);
+    };
     storage.onerror = (error) => reject(new Error(`The storage worker failed: ${error.message}`));
   });
 }
+
+// Callers waiting for the storage worker to finish what it was given.
+const settling = [];
 
 /** Writes `[path]` (removed), `[path, null]` (a folder) and `[path, length, ranges]` entries;
  * those under a folder of the user's go there, a committed section only where nothing else
@@ -311,6 +318,62 @@ export function fetchDictionary(name) {
   Promise.all(["aff", "dic"].map((kind) => inflated(`dictionaries/${name}.${kind}.gz`)))
     .then(([affix, words]) => wasm.dictionary_arrived(name, text.decode(affix), text.decode(words)))
     .catch((error) => console.warn("Dictionary", name, error));
+}
+
+/** Resolves once every file handed over so far is written. */
+function settled() {
+  const kept = new Promise((resolve) => {
+    settling.push(resolve);
+    storage.postMessage({ kind: "settle" });
+  });
+  return Promise.all([kept, writing]);
+}
+
+// A deployed build's module and JavaScript lie in b/HASH/, which names the build.
+const BUILD_FOLDER = /\bb\/([0-9a-f]+)\//;
+const BUILD = import.meta.url.match(BUILD_FOLDER)?.[1];
+
+/** The build running, as its folder names it; undefined where it came from none. */
+export function runningBuild() {
+  return BUILD;
+}
+
+/** Resolves to the build the site's index.html names where it is another, once what the
+ * page fetches before the app starts (its SIZES), the JavaScript and what that imports are in
+ * the HTTP cache, where the reload finds them; null where it is the same. */
+export async function fetchUpdate() {
+  const response = await fetch(location.pathname, { cache: "no-cache" });
+  if (!response.ok) throw new Error(`${location.pathname}: ${response.status}`);
+  const page = await response.text();
+  const build = page.match(BUILD_FOLDER)?.[1];
+  if (!build || build === BUILD) return null;
+  const folder = `b/${build}/`;
+  const script = await fetch(`${folder}snowbound_web.js`).then((each) => each.text());
+  const imported = [...script.matchAll(/from\s*["']\.\/([^"']+)["']/g)].map((found) => folder + found[1]);
+  const sizes = JSON.parse(page.match(/const SIZES = (\{.*?\});/)?.[1] ?? "{}");
+  const starting = [`${folder}snowbound_web_bg.wasm`, ...Object.keys(sizes)];
+  await Promise.all([...new Set([...imported, ...starting])].map((url) =>
+    fetch(url).then((each) => each.arrayBuffer())));
+  return build;
+}
+
+const RESUME = "snowbound.resume";
+
+/** Reloads once the files handed over are written, giving the next load `resume`; resolves
+ * to false, staying, where a dialog of the page's is open. */
+export async function reloadInto(resume) {
+  if (document.querySelector("dialog[open]")) return false;
+  await settled();
+  sessionStorage.setItem(RESUME, resume);
+  location.reload();
+  return true;
+}
+
+/** What the load before this one gave it, once. */
+export function resumed() {
+  const resume = sessionStorage.getItem(RESUME);
+  sessionStorage.removeItem(RESUME);
+  return resume ?? undefined;
 }
 
 export function requestFrame() {
@@ -674,6 +737,7 @@ export function attach(module) {
     if (others.length) wasm.files("place", await read(others));
   });
   addEventListener("pagehide", () => wasm.flush());
+  addEventListener("focus", () => wasm.returned());
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") wasm.flush();
   });

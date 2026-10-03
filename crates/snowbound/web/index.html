@@ -180,9 +180,11 @@
   };
 
   // One tab at a time writes the notebooks this browser keeps; the lock lasts as long as the tab.
+  // Reloading into an update, it waits for the page it replaces to let go.
   const owned = await new Promise((resolve) => {
     if (!navigator.locks) return resolve(true);
-    navigator.locks.request("snowbound", { ifAvailable: true }, (lock) => {
+    const updating = sessionStorage.getItem("snowbound.resume") !== null;
+    navigator.locks.request("snowbound", { ifAvailable: !updating }, (lock) => {
       resolve(Boolean(lock));
       return lock && new Promise(() => {});
     });

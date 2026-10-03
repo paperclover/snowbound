@@ -1159,6 +1159,11 @@ impl Ui {
         self.popups.iter().any(|popup| popup.id == id)
     }
 
+    /// Whether any menu, dialog or other popup is open.
+    pub fn popups_open(&self) -> bool {
+        !self.popups.is_empty()
+    }
+
     /// Closes popup `id` and those opened from it, returning the focus it took; a submenu
     /// closes the menus it opened from with it, as choosing from it ends them.
     pub fn close_popup(&mut self, id: Id) {

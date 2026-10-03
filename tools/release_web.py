@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -96,9 +97,11 @@ def environment():
 
 
 def build(out):
-    """Writes index.html, the module, its JavaScript and the fonts to `out`."""
+    """Writes index.html, the module, its JavaScript and the fonts to `out`, the module knowing
+    when it was built."""
+    built = str(int(time.time()))
     run(['cargo', 'build', '--locked', '-p', 'snowbound', '--release', '--target', 'wasm32-unknown-unknown', '--no-default-features', '--features', 'wgpu',
-         *PROFILE], env=environment())
+         *PROFILE], env={**environment(), 'SNOWBOUND_WEB_BUILD': built})
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
