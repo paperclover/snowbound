@@ -10,6 +10,7 @@ use notebook::{
     Replica,
     discover::Folder,
     session::{arrange, blank},
+    sidecar::themes::{Theme, Themes},
 };
 use onestore::{
     ExGuid, PageCreation, PageEdit,
@@ -106,6 +107,19 @@ pub enum Change {
         folder: Option<[u8; 16]>,
         order: Vec<[u8; 16]>,
     },
+    /// Colours section `entry` `to` while it is coloured `from`.
+    Recolor {
+        entry: [u8; 16],
+        from: Option<u32>,
+        to: Option<u32>,
+    },
+    /// Names the notebook `to` and colours it, where `to` has a colour, while it is `from`.
+    Properties {
+        from: (String, Option<u32>),
+        to: (String, Option<u32>),
+    },
+    /// Writes the notebook's themes and assignments `to` while those `from` wrote still hold.
+    Themes { from: Themes, to: Themes },
 }
 
 /// A page taken out of its section, and where it was: before `before` at `level`.
@@ -607,7 +621,11 @@ impl Site {
                     gone,
                 }
             }
-            Change::Rename { .. } | Change::Place { .. } => {
+            Change::Rename { .. }
+            | Change::Place { .. }
+            | Change::Recolor { .. }
+            | Change::Properties { .. }
+            | Change::Themes { .. } => {
                 unreachable!("a section's own change is the notebook's")
             }
         }))
@@ -692,6 +710,15 @@ pub fn structure_undo(library: &Library, change: &crate::manage::Structure) -> O
                 order: entries(folder).into_iter().map(|(id, _)| id).collect(),
             }
         }
+        Structure::Color { path, color } => Change::Recolor {
+            entry: identity_at(catalog, path)?,
+            from: *color,
+            to: library.section_color(path),
+        },
+        Structure::Properties { name, color } => Change::Properties {
+            from: (name.clone(), *color),
+            to: (library.name.clone(), library.color()),
+        },
         _ => return None,
     };
     Some(Action {
@@ -699,6 +726,62 @@ pub fn structure_undo(library: &Library, change: &crate::manage::Structure) -> O
         section: None,
         change,
     })
+}
+
+/// Whether `current` holds the themes and assignments `wrote`, whatever their timestamps.
+fn holds(current: &Themes, wrote: &Themes) -> bool {
+    let same =
+        |a: &Theme, b: &Theme| (&a.name, &a.styles, a.deleted) == (&b.name, &b.styles, b.deleted);
+    wrote.themes.iter().all(|wrote| {
+        (current.themes.iter())
+            .find(|kept| kept.id == wrote.id)
+            .is_some_and(|kept| same(kept, wrote))
+    }) && wrote.assignments.iter().all(|wrote| {
+        let kept = (current.assignments.iter()).find(|kept| kept.scope == wrote.scope);
+        kept.and_then(|kept| kept.theme.as_ref()) == wrote.theme.as_ref()
+    })
+}
+
+/// The action taking back `wrote`, just written to `library`'s themes, which held `before`
+/// until then: the themes as they were, a new one deleted, and each scope's theme.
+pub fn themes_undo(
+    library: &Library,
+    section: Option<[u8; 16]>,
+    before: &Themes,
+    wrote: Themes,
+) -> Action {
+    let was = Themes {
+        themes: (wrote.themes.iter())
+            .map(|theme| {
+                (before.themes.iter())
+                    .find(|kept| kept.id == theme.id)
+                    .cloned()
+                    .unwrap_or_else(|| Theme {
+                        deleted: true,
+                        ..theme.clone()
+                    })
+            })
+            .collect(),
+        assignments: (wrote.assignments.iter())
+            .map(|assignment| {
+                (before.assignments.iter())
+                    .find(|kept| kept.scope == assignment.scope)
+                    .cloned()
+                    .unwrap_or_else(|| notebook::sidecar::themes::Assignment {
+                        theme: None,
+                        ..assignment.clone()
+                    })
+            })
+            .collect(),
+    };
+    Action {
+        notebook: library.location.clone(),
+        section,
+        change: Change::Themes {
+            from: wrote,
+            to: was,
+        },
+    }
 }
 
 /// The structure change carrying out a section or group's `change` in `library` now, with
@@ -772,6 +855,35 @@ fn restructuring(library: &Library, change: &Change) -> Option<(crate::manage::S
                 },
             };
             (structure, undo)
+        }
+        Change::Recolor { entry, from, to } => {
+            let (_, path) = entry_of(catalog, *entry)?;
+            if library.section_color(&path) != *from {
+                return None;
+            }
+            (
+                Structure::Color { path, color: *to },
+                Change::Recolor {
+                    entry: *entry,
+                    from: *to,
+                    to: *from,
+                },
+            )
+        }
+        Change::Properties { from, to } => {
+            if library.name != from.0 || from.1.is_some() && library.color() != from.1 {
+                return None;
+            }
+            (
+                Structure::Properties {
+                    name: to.0.clone(),
+                    color: to.1,
+                },
+                Change::Properties {
+                    from: to.clone(),
+                    to: from.clone(),
+                },
+            )
         }
         _ => return None,
     };
@@ -875,6 +987,42 @@ impl State {
             section,
             change,
         } = action;
+        if let Change::Themes { from, to } = change {
+            let library = self
+                .notebooks
+                .iter()
+                .find(|library| library.location == notebook)
+                .cloned()
+                .ok_or("That notebook is closed")?;
+            if !holds(&library.themes(), &from) {
+                return match taken {
+                    Some(redo) => self.take(redo),
+                    None => Ok(()),
+                };
+            }
+            let now = crate::filetime();
+            library.save_themes(Themes {
+                themes: (to.themes.iter())
+                    .map(|theme| Theme {
+                        modified: now,
+                        ..theme.clone()
+                    })
+                    .collect(),
+                assignments: (to.assignments.iter())
+                    .map(|assignment| notebook::sidecar::themes::Assignment {
+                        assigned: now,
+                        ..assignment.clone()
+                    })
+                    .collect(),
+            });
+            let undo = Action {
+                notebook,
+                section,
+                change: Change::Themes { from: to, to: from },
+            };
+            self.undo.note(taken, undo);
+            return self.wear_theme();
+        }
         let Some(section) = section else {
             let library = self
                 .notebooks
@@ -1613,6 +1761,127 @@ mod tests {
                 notebook::fs::copy(entry.path(), target).unwrap();
             }
         }
+    }
+
+    /// A section's colour and the notebook's name and colour go back while they are as the
+    /// change left them.
+    #[test]
+    fn colours_and_names_go_back() {
+        use crate::manage::Structure;
+        let folder =
+            std::env::temp_dir().join(format!("snowbound-undo-colours-{}", std::process::id()));
+        let _ = notebook::fs::remove_dir_all(&folder);
+        notebook::fs::create_dir_all(&folder).unwrap();
+        let root = folder.join("Notebook");
+        let mut notebook =
+            Notebook::create(&root, folder.join("cache"), Notebook::NEW_COLOR, &dated()).unwrap();
+        notebook
+            .set_section_color("New Section 1.one", Some(0x00F0_A0A0))
+            .unwrap();
+        let opened = Library::created(root.to_str().unwrap(), notebook, &folder.join("cache"));
+        let recolor = Structure::Color {
+            path: "New Section 1.one".into(),
+            color: Some(0x0000_80FF),
+        };
+        let undo = structure_undo(&opened, &recolor).unwrap();
+        let mut notebook = opened.reopen().unwrap();
+        notebook
+            .set_section_color("New Section 1.one", Some(0x0000_80FF))
+            .unwrap();
+        let shown = opened.with(notebook);
+        let (back, redo) = restructuring(&shown, &undo.change).unwrap();
+        assert!(matches!(
+            back,
+            Structure::Color {
+                color: Some(0x00F0_A0A0),
+                ..
+            }
+        ));
+        // Coloured again elsewhere, the section keeps that colour.
+        let mut notebook = shown.reopen().unwrap();
+        notebook
+            .set_section_color("New Section 1.one", None)
+            .unwrap();
+        assert!(restructuring(&shown.with(notebook), &redo.change).is_none());
+
+        let renamed = Structure::Properties {
+            name: "Renamed".into(),
+            color: Some(0x0000_FF00),
+        };
+        let undo = structure_undo(&shown, &renamed).unwrap();
+        let Change::Properties { to, .. } = &undo.change else {
+            panic!()
+        };
+        assert_eq!(to, &(shown.name.clone(), Some(Notebook::NEW_COLOR)));
+        // The name it gave is not the notebook's now, so nothing goes back.
+        assert!(restructuring(&shown, &undo.change).is_none());
+        let _ = notebook::fs::remove_dir_all(&folder);
+    }
+
+    /// A theme saved and given to the notebook goes back: a new theme is deleted and the
+    /// scope's theme is as it was; another device's assignment since leaves it.
+    #[test]
+    fn theme_changes_go_back_while_they_hold() {
+        use notebook::sidecar::themes::{Assignment, Scope, built_in, merge};
+        let fixture = Fixture::new("themes", &["First"]);
+        let library = &fixture.library;
+        let before = library.themes();
+        let mut mine = built_in().remove(1);
+        mine.id = "mine".into();
+        mine.modified = 5;
+        let wrote = Themes {
+            themes: vec![mine],
+            assignments: vec![Assignment {
+                scope: Scope::Notebook,
+                theme: Some("mine".into()),
+                assigned: 5,
+            }],
+        };
+        let mut after = (*before).clone();
+        merge(&mut after, wrote.clone());
+        let undo = themes_undo(library, None, &before, wrote);
+        let Change::Themes { from, to } = &undo.change else {
+            panic!()
+        };
+        assert!(holds(&after, from));
+        assert!(to.themes[0].deleted);
+        assert_eq!(to.assignments[0].theme, None);
+        let mut back = after.clone();
+        merge(
+            &mut back,
+            Themes {
+                themes: to
+                    .themes
+                    .iter()
+                    .map(|theme| Theme {
+                        modified: 6,
+                        ..theme.clone()
+                    })
+                    .collect(),
+                assignments: to
+                    .assignments
+                    .iter()
+                    .map(|a| Assignment {
+                        assigned: 6,
+                        ..a.clone()
+                    })
+                    .collect(),
+            },
+        );
+        assert!(holds(&back, to));
+        assert_eq!(back.effective(None, None), None);
+        merge(
+            &mut after,
+            Themes {
+                assignments: vec![Assignment {
+                    scope: Scope::Notebook,
+                    theme: Some("editorial".into()),
+                    assigned: 9,
+                }],
+                ..Themes::default()
+            },
+        );
+        assert!(!holds(&after, from));
     }
 
     /// Steps a page's editor no longer holds, dropped by a change made elsewhere, leave the

@@ -681,10 +681,21 @@ impl State {
                 theme: apply.then(|| chosen.id.clone()),
                 assigned: now,
             };
-            dialog.library.save_themes(Themes {
+            let wrote = Themes {
                 themes,
                 assignments: vec![assignment],
-            });
+            };
+            let before = dialog.library.themes();
+            dialog.library.save_themes(wrote.clone());
+            // A page's theme is taken back in its section, others anywhere in the notebook.
+            let section = (dialog.targets[at].0 == Scope::Page)
+                .then(|| {
+                    let session = self.session.as_ref()?;
+                    (session.library).section_identity(&session.tabs[session.tab].path)
+                })
+                .flatten();
+            let undo = crate::undo::themes_undo(&dialog.library, section, &before, wrote);
+            self.undo.record(undo);
         }
         self.ui.close_popup(id());
         self.themes = None;
