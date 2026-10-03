@@ -10,7 +10,15 @@ publish = false
 name = "snowbound-relay"
 path = "src/main.rs"
 
+# snowbound.paperclover.net: the hosted web build, and a page for each Live Share code.
+[[bin]]
+name = "snowbound-site"
+path = "src/site_main.rs"
+
 [dependencies]
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 getrandom = "0.4.3"
 sha1 = "0.11.0"
+
+[dev-dependencies]
+tempfile = "3"

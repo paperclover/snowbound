@@ -1547,6 +1547,11 @@ pub fn event_loop(headless: bool) -> Result<EventLoop<crate::UserEvent>, EventLo
             sel!(application:openFiles:),
             open_files as unsafe extern "C" fn(_, _, _, _),
         );
+        // And -application:openURLs:, which 10.13 and later send for a snowbound:// link.
+        class.add_method(
+            sel!(application:openURLs:),
+            open_urls as unsafe extern "C" fn(_, _, _, _),
+        );
         let class = class.register();
         // The subclass adds no ivars, so the existing allocation remains valid.
         AnyObject::set_class(&delegate, class);
@@ -1566,6 +1571,21 @@ unsafe extern "C" fn open_files(
     }
     // NSApplicationDelegateReplySuccess.
     let _: () = unsafe { msg_send![app, replyToOpenOrPrint: 0usize] };
+}
+
+unsafe extern "C" fn open_urls(
+    _: &AnyObject,
+    _: Sel,
+    _: &NSApplication,
+    urls: &objc2_foundation::NSArray<objc2_foundation::NSURL>,
+) {
+    if let Some(proxy) = PROXY.get() {
+        let links = (urls.iter())
+            .filter_map(|url| unsafe { url.absoluteString() })
+            .map(|url| url.to_string().into())
+            .collect();
+        let _ = proxy.send_event(crate::UserEvent::Open(links));
+    }
 }
 
 /// Replaces Winit's application menu with the menu bar, whose items the table validates.

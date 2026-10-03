@@ -34,6 +34,25 @@ pub(crate) const DEFAULT_RELAY: &str = "wss://relay.snowbound.paperclover.net";
 /// How long opening a notebook joined for the first time waits for the computer sharing it.
 const FIRST_LISTING: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// Where a code's link goes: the page that opens it (`crates/relay`'s `snowbound-site`).
+const SITE: &str = "https://snowbound.paperclover.net/";
+/// What opens Snowbound at a code, as the site's page and the desktop pass it.
+const SCHEME: &str = "snowbound://join/";
+
+/// The link that opens `code`.
+pub(crate) fn link(code: &str) -> String {
+    format!("{SITE}{code}")
+}
+
+/// The code a link names, `snowbound://join/<code>` or the site's page for it.
+pub(crate) fn linked(text: &str) -> Option<String> {
+    let text = text.trim();
+    let code = text
+        .strip_prefix(SCHEME)
+        .or_else(|| text.strip_prefix(SITE))?;
+    notebook::live::share::code(code.trim_end_matches('/'))
+}
+
 /// Who this computer is to others and where it meets them, as Options last said.
 struct Me {
     name: String,
@@ -1023,4 +1042,21 @@ fn system_picture() -> Option<Vec<u8>> {
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn system_picture() -> Option<Vec<u8>> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A link names its code however it came, and anything else names none.
+    #[test]
+    fn links_name_their_codes() {
+        let code = notebook::live::code::format(412, "4MZ9XR").unwrap();
+        assert_eq!(linked(&link(&code)), Some(code.clone()));
+        let typed = format!("snowbound://join/{}/", code.to_lowercase());
+        assert_eq!(linked(&typed), Some(code.clone()));
+        assert_eq!(linked(&code), None, "a bare code is not a link");
+        assert_eq!(linked("https://example.com/7KQ-4MZ-9XR"), None);
+        assert_eq!(linked("snowbound://join/not-a-code"), None);
+    }
 }

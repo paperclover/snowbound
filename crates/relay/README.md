@@ -12,11 +12,11 @@ HTTP and WebSocket; a proxy in front of it terminates TLS.
 ## Build
 
 ```sh
-python3 tools/release_relay.py          # target/relay/snowbound-relay-linux-{x86_64,aarch64}
+python3 tools/release_relay.py   # target/relay/snowbound-{relay,site}-linux-{x86_64,aarch64}
 ```
 
 It links with Rust's own lld against Rust's own musl, so it needs only `rustup`. The folder
-it makes holds both executables, `SHA256SUMS`, this README and `snowbound-relay.service`.
+it makes holds the executables, `SHA256SUMS`, this README and both systemd units.
 
 ## Deploy
 
@@ -28,7 +28,7 @@ sudo install -m 755 /tmp/snowbound-relay /usr/local/bin/snowbound-relay
 sudo install -m 644 /tmp/snowbound-relay.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now snowbound-relay
-curl -s http://127.0.0.1:7650/health      # {"rooms":0,"peers":0,"connections":1,"seconds":3}
+curl -s http://127.0.0.1:23592/health     # {"rooms":0,"peers":0,"connections":1,"seconds":3}
 ```
 
 Then point a name at the server and put a TLS proxy in front. Caddy fetches its own
@@ -36,7 +36,7 @@ certificate and passes WebSocket upgrades through as they are:
 
 ```text
 live.example.net {
-    reverse_proxy 127.0.0.1:7650
+    reverse_proxy 127.0.0.1:23592
 }
 ```
 
@@ -49,7 +49,7 @@ server {
     ssl_certificate     /etc/letsencrypt/live/live.example.net/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/live.example.net/privkey.pem;
     location / {
-        proxy_pass http://127.0.0.1:7650;
+        proxy_pass http://127.0.0.1:23592;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -60,13 +60,49 @@ server {
 }
 ```
 
-The app then uses `wss://live.example.net` (for now, `SNOWBOUND_LIVE_RELAY=wss://live.example.net`
-with a build that has the `live` feature).
+The app uses `wss://relay.snowbound.paperclover.net` unless Options ▸ Sync & Storage ▸ Live
+Share names another relay.
 
 `--trust-forwarded true`, as the unit sets it, counts each peer by the last
 `X-Forwarded-For` entry, the one the proxy added. Without a proxy, leave it off: a client
 could otherwise claim any address. Listening on a public address without TLS works but lets
 anyone on the path see room tags and nameplates.
+
+## The site: snowbound.paperclover.net
+
+`snowbound-site` serves the hosted web build's folder, and for a path that is a Live Share
+code (`/7KQ-4MZ-9XR`, read as loosely as the app reads one) a page that opens it with
+`snowbound://join/<code>`, and in the web build where `--web` names where (once the web build
+joins shares). Anything else under the folder is a file; `/` is its `index.html`. A build's
+module and JavaScript sit in `b/<hash>/` and are cached for good; `index.html` and the
+codes' pages are checked on every load, and the rest (fonts, dictionaries) for a day. It
+holds no state.
+
+`python3 tools/release_web.py --deploy` builds the web app and the site for the VPS's
+architecture, copies the build into `~/snowbound-web/site/` (keeping the last three builds'
+folders for pages still running them) and the binary to `~/snowbound-web/snowbound-site`,
+and restarts pm2's `snowbound-site` only when the binary changed. The first time:
+
+```sh
+ssh vps
+mkdir -p ~/snowbound-web/site
+# after the first `release_web.py --deploy` has put the binary there:
+pm2 start ~/snowbound-web/snowbound-site --name snowbound-site -- \
+    --listen 127.0.0.1:23593 --root "$HOME/snowbound-web/site"
+pm2 save
+```
+
+Caddy in front:
+
+```text
+snowbound.paperclover.net {
+    encode gzip
+    reverse_proxy 127.0.0.1:23593
+}
+```
+
+`snowbound-site.service` runs it under systemd instead (`--root /srv/snowbound/web`).
+`snowbound-site --help` lists the options, each also `SNOWBOUND_SITE_<OPTION>`.
 
 ## Options
 

@@ -7,9 +7,9 @@ const USAGE: &str = "\
 usage: snowbound-relay [OPTION VALUE]...
 
 Each option may also come from the environment as SNOWBOUND_RELAY_<OPTION>, upper case with
-underscores: SNOWBOUND_RELAY_LISTEN=127.0.0.1:7650. Flags win.
+underscores: SNOWBOUND_RELAY_LISTEN=127.0.0.1:23592. Flags win.
 
-  --listen ADDRESS                    where to listen (127.0.0.1:7650)
+  --listen ADDRESS                    where to listen (127.0.0.1:23592)
   --trust-forwarded true|false        count peers by X-Forwarded-For, behind a proxy (false)
   --max-connections N                 (256)
   --max-connections-per-address N     per IPv4 address or IPv6 /64 (16)
@@ -27,7 +27,7 @@ underscores: SNOWBOUND_RELAY_LISTEN=127.0.0.1:7650. Flags win.
 ";
 
 fn main() -> ExitCode {
-    let mut listen = String::from("127.0.0.1:7650");
+    let mut listen = String::from("127.0.0.1:23592");
     let mut config = Config::default();
     let from_environment = std::env::vars().filter_map(|(key, value)| {
         let option = key.strip_prefix("SNOWBOUND_RELAY_")?;

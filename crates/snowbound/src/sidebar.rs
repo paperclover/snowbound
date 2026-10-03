@@ -1133,6 +1133,10 @@ impl crate::State {
     /// Opens what the open panel chose: a notebook folder, a notebook's table of contents,
     /// or a section, in its notebook where it has one.
     pub(crate) fn open_path(&mut self, path: &std::path::Path) {
+        #[cfg(feature = "live")]
+        if let Some(code) = path.to_str().and_then(crate::live::linked) {
+            return self.join_link(code);
+        }
         match crate::library::locate(path) {
             crate::library::Located::Notebook { root, section } => {
                 self.open_notebook(root.to_string_lossy().into_owned(), section)

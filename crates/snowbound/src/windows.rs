@@ -225,6 +225,14 @@ fn offer_to_open() {
     for extension in [".one", ".onetoc2", ".onepkg"] {
         set(&format!(r"{extension}\OpenWithProgids"), Some(PROG_ID), "");
     }
+    // Live Share's links, snowbound://join/<code>, as snowbound.paperclover.net's pages open.
+    set("snowbound", None, "URL:Snowbound Live Share");
+    set("snowbound", Some("URL Protocol"), "");
+    set(
+        r"snowbound\shell\open\command",
+        None,
+        &format!("\"{executable}\" \"%1\""),
+    );
 }
 
 /// The executable's icon, and where the row draws the caption buttons, no system frame:

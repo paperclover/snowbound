@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""Builds snowbound-relay, the Live Share relay (crates/relay), as one static executable for each
-Linux architecture a server runs, with the files that deploy it, into target/relay/ by default.
+"""Builds snowbound-relay, the Live Share relay, and snowbound-site, which serves the web build and
+the codes' pages (crates/relay), as static executables for each Linux architecture a server
+runs, with the files that deploy them, into target/relay/ by default.
 It ships on its own, outside the app's builds and latest.json; see crates/relay/README.md."""
 import argparse
 import hashlib
@@ -23,9 +24,12 @@ def build(arch, output):
     subprocess.run(['cargo', 'build', '--locked', '--release', '-p', 'relay', '--target', triple],
                    cwd=ROOT, env=environment, check=True)
     target = Path(os.environ.get('CARGO_TARGET_DIR') or ROOT / 'target')
-    file = output / f'snowbound-relay-linux-{arch}'
-    shutil.copy(target / triple / 'release/snowbound-relay', file)
-    return file
+    files = []
+    for name in ['snowbound-relay', 'snowbound-site']:
+        file = output / f'{name}-linux-{arch}'
+        shutil.copy(target / triple / f'release/{name}', file)
+        files.append(file)
+    return files
 
 
 def main():
@@ -34,7 +38,7 @@ def main():
     parser.add_argument('--architectures', nargs='+', choices=ARCHITECTURES, default=ARCHITECTURES)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
-    files = [build(arch, args.output) for arch in args.architectures]
+    files = [file for arch in args.architectures for file in build(arch, args.output)]
     for deployed in (ROOT / 'crates/relay/deploy').iterdir():
         shutil.copy(deployed, args.output)
     shutil.copy(ROOT / 'crates/relay/README.md', args.output)

@@ -1,21 +1,21 @@
-# /etc/systemd/system/snowbound-relay.service: the Live Share relay behind a TLS proxy on
-# this machine (README.md). Options go on ExecStart, or as SNOWBOUND_RELAY_* in Environment.
+# /etc/systemd/system/snowbound-site.service: snowbound.paperclover.net, the hosted web build
+# and the codes' pages, behind a TLS proxy on this machine (README.md). Options go on
+# ExecStart, or as SNOWBOUND_SITE_* in Environment.
 [Unit]
-Description=Snowbound Live Share relay
+Description=Snowbound web build and Live Share links
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/snowbound-relay --listen 127.0.0.1:23592 --trust-forwarded true
+ExecStart=/usr/local/bin/snowbound-site --listen 127.0.0.1:23593 --root /srv/snowbound/web
 Restart=always
 RestartSec=2
 DynamicUser=yes
-# Two threads a connection, and a few more.
-TasksMax=600
-LimitNOFILE=1024
-MemoryMax=512M
+TasksMax=200
+MemoryMax=256M
 NoNewPrivileges=yes
 ProtectSystem=strict
+ReadOnlyPaths=/srv/snowbound/web
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes

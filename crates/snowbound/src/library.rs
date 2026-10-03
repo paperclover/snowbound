@@ -215,7 +215,7 @@ fn bonjour_instance(server: &str) -> Option<String> {
 }
 
 /// `text` with `%XX` escapes decoded.
-fn decode(text: &str) -> String {
+pub fn decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut at = 0;

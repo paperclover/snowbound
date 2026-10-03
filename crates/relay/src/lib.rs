@@ -12,7 +12,9 @@
 //! its opening `met`; a peer that `failed`, left first, or stayed silent too long counts a
 //! wrong code against its address and the code. See `resources/live-share.md`.
 
+pub mod code;
 pub mod server;
+pub mod site;
 pub mod ws;
 
 use std::{fmt, str::FromStr};

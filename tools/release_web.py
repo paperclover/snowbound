@@ -6,9 +6,11 @@ static folder and deploys it to the VPS, which serves it at https://snowbound.pa
     python3 tools/release_web.py --deploy                        # build, then replace the site
 
 The module and its JavaScript go in a folder named by their contents, b/HASH/, which
-index.html names, so a page never pairs one build's module with another's JavaScript; the
-server (tools/web/serve.py, which pm2's `snowbound-web` runs as `serve.py 23593 site` in the
-VPS's snowbound-web/) has index.html checked on every load and keeps a build's folder for good.
+index.html names, so a page never pairs one build's module with another's JavaScript. The
+server is snowbound-site (crates/relay), which pm2's `snowbound-site` runs from the VPS's
+snowbound-web/ on 127.0.0.1:23593, serving site/ and the Live Share codes' pages: it has
+index.html checked on every load and keeps a build's folder for good. Deploying builds it
+for the VPS too, and restarts it only when its binary changed.
 """
 import argparse
 import gzip
@@ -31,10 +33,11 @@ WEB = ROOT / 'crates/snowbound/web'
 FONTS = ROOT / 'crates/canvas/assets/fonts'
 # Where the loading shell's icons are looked up by name, in order.
 ICONS = [ROOT / 'crates/snowbound/assets/icons', ROOT / 'crates/canvas/assets/tags', ROOT / 'crates/ui/assets']
-# The VPS's folder: serve.py, and the site it serves on 127.0.0.1:23593 as pm2's
-# `snowbound-web`, behind https://snowbound.paperclover.net.
+# The VPS's folder: snowbound-site, and the site/ it serves on 127.0.0.1:23593 as pm2's
+# `snowbound-site`, behind https://snowbound.paperclover.net.
 HOST = 'clo@paperclover.net'
 DEPLOYED = 'snowbound-web'
+SERVER = 'snowbound-site'
 URL = 'https://snowbound.paperclover.net'
 # Builds the server keeps beside the newest, for pages still running one.
 KEPT = 3
@@ -208,14 +211,19 @@ def fallbacks(fonts):
 
 def deploy(built):
     """Makes the VPS's site `built`, each file taking its place once all have arrived, and
-    leaves the last builds' folders for pages still running them."""
+    leaves the last builds' folders for pages still running them; replaces its server, and
+    restarts it, where the server built now differs."""
     sync = ['rsync', '--recursive', '--links', '--times', '--compress', '--itemize-changes']
-    server = subprocess.run([*sync, ROOT / 'tools/web/serve.py', f'{HOST}:{DEPLOYED}/'],
-                            check=True, capture_output=True, text=True).stdout
+    arch = subprocess.check_output(['ssh', HOST, 'uname -m'], text=True).strip()
+    with tempfile.TemporaryDirectory() as scratch:
+        run([sys.executable, ROOT / 'tools/release_relay.py', '--architectures', arch, '--output', scratch])
+        server = subprocess.run([*sync, '--checksum', Path(scratch) / f'{SERVER}-linux-{arch}',
+                                 f'{HOST}:{DEPLOYED}/{SERVER}'],
+                                check=True, capture_output=True, text=True).stdout
     run([*sync, '--delete', '--delay-updates', '--filter=P b/*', f'{built}/', f'{HOST}:{DEPLOYED}/site/'])
     run(['ssh', HOST, f'cd {DEPLOYED}/site/b && ls -t | tail -n +{KEPT + 2} | xargs -r rm -rf --'])
     if server.strip():
-        run(['ssh', HOST, 'pm2 restart snowbound-web'])
+        run(['ssh', HOST, f'pm2 restart {SERVER}'])
     print(f'Deployed {URL}')
 
 

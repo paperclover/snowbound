@@ -6769,6 +6769,12 @@ fn launch() -> Result<(), Box<dyn Error>> {
                     .to_str()
                     .ok_or("The page title must be valid Unicode.")?,
             )?);
+        } else if arg.to_string_lossy().starts_with("snowbound:") {
+            // A Live Share link the desktop opens with Snowbound.
+            opening.push(PathBuf::from(arg));
+        } else if let Some(file) = arg.to_str().and_then(|arg| arg.strip_prefix("file://")) {
+            // A file as a desktop entry's %U passes it.
+            opening.push(PathBuf::from(library::decode(file)));
         } else if library::locate(Path::new(&arg)) != library::Located::Nothing {
             // A file the desktop opens with Snowbound, as a double-clicked section.
             opening.push(std::path::absolute(arg)?);

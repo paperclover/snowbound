@@ -720,8 +720,9 @@ fn stop_sharing_ends_the_share() {
     let mut steps = vec!["modifiers command shift", "key p", "modifiers", "settle"];
     steps.extend(["type Live Share", "settle", "key Enter", "settle"]);
     steps.extend(["key Enter", "wait 1500", "accessibility shared"]);
-    // Copy, then Stop Sharing.
+    // Copy, Copy Link, then Stop Sharing.
     steps.extend([
+        "key Tab",
         "key Tab",
         "key Tab",
         "key Enter",

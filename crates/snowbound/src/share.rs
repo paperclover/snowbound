@@ -41,11 +41,14 @@ pub(crate) struct ShareDialog {
     library: Arc<Library>,
     protect: bool,
     password: String,
-    copied: bool,
+    /// What was copied last: the code, or the link.
+    copied: Option<&'static str>,
 }
 
 /// Open Shared Notebook while it is open.
 pub(crate) struct JoinDialog {
+    /// Join without waiting for Open, as a link asks.
+    open: bool,
     code: String,
     password: String,
     status: Status,
@@ -234,14 +237,24 @@ impl State {
             library,
             protect: false,
             password: String::new(),
-            copied: false,
+            copied: None,
         });
         self.ui.open_popup(share_id());
+    }
+
+    /// Opens the shared notebook a link names: Open Shared Notebook, joining at once.
+    pub(crate) fn join_link(&mut self, code: String) {
+        self.open_shared();
+        if let Some(dialog) = &mut self.peers.join {
+            dialog.code = code;
+            dialog.open = true;
+        }
     }
 
     /// Opens Open Shared Notebook.
     pub(crate) fn open_shared(&mut self) {
         self.peers.join = Some(JoinDialog {
+            open: false,
             code: String::new(),
             password: String::new(),
             status: Status::Idle,
@@ -304,9 +317,19 @@ impl State {
                     },
                 );
                 if let Some(code) = &code {
-                    let label = if dialog.copied { "Copied" } else { "Copy" };
-                    if ui::button(ui, "copy", label).clicked {
-                        copy = Some(code.clone());
+                    let link = crate::live::link(code);
+                    for (part, what, label, text) in [
+                        ("copy", "code", "Copy", code.clone()),
+                        ("link", "link", "Copy Link", link),
+                    ] {
+                        let label = if dialog.copied == Some(what) {
+                            "Copied"
+                        } else {
+                            label
+                        };
+                        if ui::button(ui, part, label).clicked {
+                            copy = Some((what, text));
+                        }
                     }
                 }
                 ui.close();
@@ -315,9 +338,10 @@ impl State {
                     ui,
                     "how",
                     if protected {
-                        "Others open it with Open Shared Notebook, this code and the password."
+                        "Send the link, or the code for Open Shared Notebook. They also need \
+                         the password."
                     } else {
-                        "Others open it with Open Shared Notebook and this code."
+                        "Send the link, or the code for Open Shared Notebook."
                     },
                     true,
                 );
@@ -394,8 +418,8 @@ impl State {
         let done = ui::button(ui, "done", "Done").clicked || entered && !offered;
         ui.close();
         ui.close();
-        if let Some(code) = copy {
-            dialog.copied = self.clipboard.set_text(code).is_ok();
+        if let Some((what, text)) = copy {
+            dialog.copied = self.clipboard.set_text(text).is_ok().then_some(what);
         }
         if stop {
             self.stop_sharing(&location);
@@ -482,7 +506,8 @@ impl State {
         }
         buttons(ui);
         let cancel = ui::button(ui, "cancel", "Cancel").clicked;
-        let open = ui::button(ui, "open", "Open").clicked || entered;
+        let open =
+            ui::button(ui, "open", "Open").clicked || entered || std::mem::take(&mut dialog.open);
         ui.close();
         ui.close();
         if cancel {
@@ -491,7 +516,7 @@ impl State {
             return;
         }
         if open && !matches!(dialog.status, Status::Waiting) {
-            match share::code(&dialog.code) {
+            match crate::live::linked(&dialog.code).or_else(|| share::code(&dialog.code)) {
                 None => dialog.status = Status::Failed(refusal(&Refusal::Malformed)),
                 Some(code) => {
                     dialog.status = Status::Waiting;

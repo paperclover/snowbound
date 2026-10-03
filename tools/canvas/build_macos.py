@@ -157,6 +157,8 @@ if build:
         'NSUbiquitousContainerSupportedFolderLevels': 'Any',
     }},
     'LSMinimumSystemVersion': minimum,
+    # Live Share's links: snowbound://join/<code>, as snowbound.paperclover.net's pages open.
+    'CFBundleURLTypes': [{'CFBundleURLName': 'Snowbound Live Share', 'CFBundleURLSchemes': ['snowbound']}],
     'CFBundleDocumentTypes': [{
         'CFBundleTypeName': 'OneNote Notebook',
         'CFBundleTypeRole': 'Editor',

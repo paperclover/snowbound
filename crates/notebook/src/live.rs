@@ -7,7 +7,7 @@
 //! and one writing. A connection whose frames arrive out of order is dropped and met again
 //! from scratch.
 
-pub mod code;
+pub use ::relay::code;
 mod relay;
 pub mod share;
 pub mod wire;

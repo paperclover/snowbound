@@ -567,7 +567,7 @@ mod tests {
     #[test]
     fn only_the_hidden_entry_names_an_owner() {
         let installed = entry_text(Path::new("/bin/snowbound"), APP_ID);
-        assert!(installed.contains("\nExec=\"/bin/snowbound\" %F\n"));
+        assert!(installed.contains("\nExec=\"/bin/snowbound\" %U\n"));
         assert!(installed.contains(&format!("\nIcon={APP_ID}\n")));
         assert_eq!(portable_owner(&installed), None);
         let hidden = installed + &format!("NoDisplay=true\n{PORTABLE}=42\n");
