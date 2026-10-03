@@ -183,10 +183,16 @@ impl State {
         section: Option<u32>,
     ) {
         let themes = library.themes();
-        let assigned = themes.assigned(&target).map(|theme| theme.id);
-        let all = themes.all();
+        let assigned = themes.assigned(&target);
+        let mut all = themes.all();
+        // A retired built-in the scope wears is listed while it does.
+        if let Some(assigned) = &assigned
+            && !all.contains(assigned)
+        {
+            all.push(assigned.clone());
+        }
         let selected = assigned
-            .and_then(|id| all.iter().position(|theme| theme.id == id))
+            .and_then(|assigned| all.iter().position(|theme| theme.id == assigned.id))
             .unwrap_or(0);
         self.themes = Some(Dialog {
             scope,
@@ -315,9 +321,9 @@ impl State {
                 ..Spec::default()
             },
         );
+        let built = stored::is_built_in(&dialog.themes[dialog.selected].id);
         let duplicate = ui::button(ui, "duplicate", "Duplicate").clicked;
-        let delete =
-            dialog.selected >= built_in().len() && ui::button(ui, "delete", "Delete").clicked;
+        let delete = !built && ui::button(ui, "delete", "Delete").clicked;
         ui.close();
         ui.close();
         // The selected theme's styles.
@@ -330,7 +336,6 @@ impl State {
                 ..Spec::default()
             },
         );
-        let built = dialog.selected < built_in().len();
         if built {
             ui.leaf(
                 "locked",
@@ -591,7 +596,7 @@ impl State {
             copy(dialog, name);
         }
         if let Some(change) = change {
-            if dialog.selected < built_in().len() {
+            if built {
                 let name = format!("My {}", dialog.themes[dialog.selected].name);
                 copy(dialog, name);
             }
@@ -606,7 +611,7 @@ impl State {
                 dialog.changed.push(edited.id.clone());
             }
         }
-        if delete && dialog.selected >= built_in().len() {
+        if delete {
             let mut gone = dialog.themes.remove(dialog.selected);
             gone.deleted = true;
             dialog.deleted.push(gone);

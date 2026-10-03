@@ -52,6 +52,8 @@ pub struct Settings {
     pub recent: Vec<crate::navigation::Place>,
     pub passwords: Passwords,
     pub live: Live,
+    /// Options' "Default for new notebooks": the built-in theme new notebooks take.
+    pub notebook_theme: NotebookTheme,
 }
 
 /// Options' Live Share.
@@ -73,6 +75,17 @@ impl Default for Live {
             picture: true,
             relay: None,
         }
+    }
+}
+
+/// A built-in theme by id, Modern until chosen otherwise; none leaves notebooks OneNote's.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NotebookTheme(pub Option<String>);
+
+impl Default for NotebookTheme {
+    fn default() -> Self {
+        Self(Some(notebook::sidecar::themes::DEFAULT.into()))
     }
 }
 
@@ -217,6 +230,7 @@ impl crate::State {
             keys: crate::commands::Keymap::current().saved(),
             recent: self.trail.recent.clone(),
             passwords: self.passwords,
+            notebook_theme: NotebookTheme(self.notebook_theme.clone()),
             live: self.live_options.clone(),
         };
         if let Err(error) = settings.save(path) {
@@ -307,6 +321,7 @@ mod tests {
                 picture: false,
                 relay: Some("wss://relay.example.net".into()),
             },
+            notebook_theme: NotebookTheme(None),
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
@@ -323,6 +338,9 @@ mod tests {
         let toolbar = Settings::load(&path).toolbar;
         assert_eq!(toolbar.highlight, None);
         assert_eq!(toolbar.font_color, Toolbar::default().font_color);
+        // New notebooks take Modern until another theme, or none, is picked.
+        let theme = Settings::load(&path).notebook_theme;
+        assert_eq!(theme.0.as_deref(), Some(notebook::sidecar::themes::DEFAULT));
         notebook::fs::remove_dir_all(&directory).unwrap();
     }
 }

@@ -35,7 +35,7 @@ class StylesTest(unittest.TestCase):
             'OneNote': ('Calibri', 16.0, True, '#17365D'),
             'Manuscript': ('Georgia', 20.0, False, '#3B2F2A'),
             'Editorial': ('Georgia', 18.0, True, '#9A3B1F'),
-            'Modern': ('Arial', 16.0, True, '#0E6E6E'),
+            'Modern': ('Arial', 16.0, True, '#2E5CB8'),
         }
         seen = set()
         for path in sorted((FIXTURE / 'cold/read').glob('page-*.xml')):
@@ -44,6 +44,9 @@ class StylesTest(unittest.TestCase):
             seen.add(theme)
             self.assertEqual(set(defined), GALLERY, theme)
             self.assertEqual(defined['h1'], [heading[theme]], theme)
+            if theme == 'Modern':
+                # OneNote's own page title, in Arial.
+                self.assertEqual(defined['PageTitle'], [('Arial', 17.0, False, 'automatic')])
         self.assertEqual(seen, set(heading))
 
     def test_onenote_s_own_styles_read_under_the_same_names(self):

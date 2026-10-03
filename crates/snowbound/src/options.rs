@@ -110,6 +110,14 @@ const SECTIONS: &[Section] = &[
                 ],
             },
             Group {
+                heading: "Default style theme",
+                rows: &[Row {
+                    label: "New notebooks:",
+                    keywords: "default for new notebooks styles headings modern",
+                    control: Control::Field(notebook_theme),
+                }],
+            },
+            Group {
                 heading: "Proofing",
                 rows: &[Row {
                     label: "Hide spelling errors",
@@ -273,6 +281,7 @@ pub struct Options {
     picture: bool,
     /// Live Share's relay; empty uses Snowbound's.
     relay: String,
+    notebook_theme: Option<String>,
     pub(crate) keyboard: crate::keys::Keyboard,
 }
 
@@ -310,6 +319,10 @@ fn lock_times() -> Id {
 
 fn font_colors() -> Id {
     id().child("font-colors")
+}
+
+fn notebook_themes() -> Id {
+    id().child("notebook-themes")
 }
 
 /// Whether `word`, lowercase, starts a word of `text`: "pen" finds "Pen" and "pen-like",
@@ -372,6 +385,7 @@ impl State {
             presence: self.live_options.presence,
             picture: self.live_options.picture,
             relay: self.live_options.relay.clone().unwrap_or_default(),
+            notebook_theme: self.notebook_theme.clone(),
             keyboard: crate::keys::Keyboard::new(),
         });
         self.ui.open_popup(id());
@@ -679,6 +693,7 @@ impl State {
                 lock_after: options.lock_idle.then_some(options.lock_minutes),
                 lock_on_leave: options.lock_on_leave,
             };
+            self.notebook_theme = options.notebook_theme;
             self.updates.set_automatic(options.automatic_updates);
             let relay = options.relay.trim();
             self.live_options = crate::settings::Live {
@@ -787,6 +802,39 @@ fn appearance(state: &mut State, options: &mut Options) {
     let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
     if let Some(index) = ui::popup::menu(ui, schemes(), anchor, &items, None) {
         options.color_scheme = SCHEMES[index].0;
+    }
+}
+
+fn notebook_theme(state: &mut State, options: &mut Options) {
+    let ui = &mut state.ui;
+    let combo = ui.id("combo");
+    let themes = notebook::sidecar::themes::built_in();
+    let choices: Vec<(Option<&str>, &str)> = std::iter::once((None, "No Theme"))
+        .chain(
+            themes
+                .iter()
+                .map(|theme| (Some(theme.id.as_str()), theme.name.as_str())),
+        )
+        .collect();
+    let chosen = options.notebook_theme.as_deref();
+    let current = choices
+        .iter()
+        .find(|(id, _)| *id == chosen)
+        .map_or("", |(_, name)| name);
+    let title = "Default for new notebooks";
+    ui::shell::combo(ui, "combo", title, current, 140.0, notebook_themes(), true);
+    let items: Vec<Item> = choices
+        .iter()
+        .map(|(id, name)| Item {
+            text: name,
+            checked: Some(*id == chosen),
+            current: *id == chosen,
+            ..Item::default()
+        })
+        .collect();
+    let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
+    if let Some(index) = ui::popup::menu(ui, notebook_themes(), anchor, &items, None) {
+        options.notebook_theme = choices[index].0.map(Into::into);
     }
 }
 

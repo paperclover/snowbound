@@ -432,11 +432,22 @@ impl State {
     ) -> Result<(), Box<dyn Error>> {
         let page = self.dated_page(None)?;
         let (cache, notify) = (self.cache.clone(), notify(self.proxy.clone()));
+        let theme = self.notebook_theme.clone();
         self.load(move || {
             let location = notebook::fs::absolute(&root)?
                 .to_string_lossy()
                 .into_owned();
             let notebook = Notebook::create(&location, &cache, Notebook::NEW_COLOR, &page)?;
+            if theme.is_some() {
+                notebook.save_themes(notebook::sidecar::themes::Themes {
+                    assignments: vec![notebook::sidecar::themes::Assignment {
+                        scope: notebook::sidecar::themes::Scope::Notebook,
+                        theme,
+                        assigned: crate::filetime(),
+                    }],
+                    ..Default::default()
+                })?;
+            }
             let library = Arc::new(Library::created(&location, notebook, &cache));
             let path = library
                 .first_section()

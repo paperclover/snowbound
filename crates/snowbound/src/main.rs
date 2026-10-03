@@ -868,6 +868,8 @@ struct State {
     password: Option<protection::Asking>,
     /// Options' Passwords.
     passwords: settings::Passwords,
+    /// The theme new notebooks take, by id.
+    notebook_theme: Option<String>,
     /// What the pointer is dragging: a page's tab, a section tab or a sidebar row.
     drag: Option<menus::Drag>,
     /// Pages whose template strip was dismissed this run.
@@ -1248,6 +1250,7 @@ impl State {
             locked,
             password: None,
             passwords: stored.passwords,
+            notebook_theme: stored.notebook_theme.0,
             live_options: stored.live,
             drag: None,
             templates: templates::View::Strip,

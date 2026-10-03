@@ -112,8 +112,12 @@ impl Themes {
         all
     }
 
+    /// The theme `id` names, retired built-ins too, which pages may still wear.
     pub fn theme(&self, id: &str) -> Option<Theme> {
-        self.all().into_iter().find(|theme| theme.id == id)
+        shipped()
+            .into_iter()
+            .chain(self.themes.iter().filter(|theme| !theme.deleted).cloned())
+            .find(|theme| theme.id == id)
     }
 
     /// The theme `scope` names itself, if one it can find.
@@ -224,8 +228,9 @@ pub(crate) fn write(storage: &dyn Storage, change: Themes) -> Result<Themes> {
     Err(io::Error::from(io::ErrorKind::ResourceBusy).into())
 }
 
-fn is_built_in(id: &str) -> bool {
-    built_in().iter().any(|theme| theme.id == id)
+/// Whether `id` names a theme Snowbound ships, or once offered.
+pub fn is_built_in(id: &str) -> bool {
+    shipped().iter().any(|theme| theme.id == id)
 }
 
 /// The accent of a section coloured `section` (a COLORREF; none for OneNote's None), as a
@@ -350,10 +355,22 @@ const ITALIC: [bool; 2] = [false, true];
 const BOTH: [bool; 2] = [true, true];
 const NONE: [f32; 2] = [0.0; 2];
 
-/// The themes Snowbound ships. Once shipped a built-in never changes: two versions
-/// disagreeing would restyle a page back and forth as each opens it. A changed look ships
-/// under a new id.
+/// The theme new notebooks take unless the user chooses another.
+pub const DEFAULT: &str = "modern-2";
+
+/// Built-ins a page wears still but no longer offered: a changed look ships under a new id.
+const RETIRED: [&str; 1] = ["modern"];
+
+/// The themes Snowbound offers, OneNote 2010's first.
 pub fn built_in() -> Vec<Theme> {
+    let mut offered = shipped();
+    offered.retain(|theme| !RETIRED.contains(&theme.id.as_str()));
+    offered
+}
+
+/// Every theme Snowbound ever shipped. Once shipped a built-in's look never changes: two
+/// versions disagreeing would restyle a page back and forth as each opens it.
+fn shipped() -> Vec<Theme> {
     let theme = |id: &str, name: &str, styles: [ThemeStyle; 11]| Theme {
         id: id.into(),
         name: name.into(),
@@ -366,6 +383,11 @@ pub fn built_in() -> Vec<Theme> {
         deleted: false,
     };
     let blue = Some("#366092");
+    let tinted = |style: ThemeStyle| ThemeStyle {
+        color: Some(color_hex(accent(None))),
+        accent: true,
+        ..style
+    };
     vec![
         // OneNote 2010's own (lab, 2026-09-30).
         theme(
@@ -419,9 +441,27 @@ pub fn built_in() -> Vec<Theme> {
                 style("Calibri", 11.5, PLAIN, Some("#262626"), [0.0, 3.0]),
             ],
         ),
+        // OneNote's page title in Arial; its accent the section's.
+        theme(
+            "modern-2",
+            "Modern",
+            [
+                tinted(style("Arial", 16.0, BOLD, None, [10.0, 2.0])),
+                style("Arial", 13.0, BOLD, Some("#1B2631"), [8.0, 2.0]),
+                style("Arial", 11.0, BOLD, Some("#1B2631"), [6.0, 0.0]),
+                style("Arial", 10.5, BOTH, Some("#1B2631"), [6.0, 0.0]),
+                tinted(style("Arial", 10.5, BOLD, None, [6.0, 0.0])),
+                tinted(style("Arial", 10.5, ITALIC, None, [6.0, 0.0])),
+                style("Arial", 17.0, PLAIN, None, NONE),
+                style("Arial", 8.0, PLAIN, Some("#7B868C"), NONE),
+                style("Arial", 10.5, ITALIC, Some("#5F6B73"), [0.0, 3.0]),
+                style("Courier New", 10.0, PLAIN, Some("#1B2631"), NONE),
+                style("Arial", 10.5, PLAIN, Some("#2E2E2E"), [0.0, 3.0]),
+            ],
+        ),
         theme(
             "modern",
-            "Modern",
+            "Modern (original)",
             [
                 style("Arial", 16.0, BOLD, Some("#0E6E6E"), [10.0, 2.0]),
                 style("Arial", 13.0, BOLD, Some("#1B2631"), [8.0, 2.0]),
@@ -544,9 +584,32 @@ mod tests {
         assert_eq!(json["accent"], true);
     }
 
+    /// Modern's title is OneNote's in Arial. The Modern first shipped, its title bold, is
+    /// no longer offered, but pages given it keep it.
+    #[test]
+    fn modern_keeps_onenote_s_page_title_and_the_first_modern_stays() {
+        let [onenote, modern] = ["onenote", "modern-2"]
+            .map(|id| built_in().into_iter().find(|theme| theme.id == id).unwrap());
+        let title = |theme: &Theme| definition("PageTitle", &theme.styles["PageTitle"], None);
+        let mut expected = title(&onenote);
+        expected.format.font = Some("Arial".into());
+        assert_eq!(title(&modern), expected);
+        assert!(built_in().iter().all(|theme| theme.id != "modern"));
+        let themes = Themes {
+            assignments: vec![Assignment {
+                scope: Scope::Notebook,
+                theme: Some("modern".into()),
+                assigned: 1,
+            }],
+            ..Themes::default()
+        };
+        assert!(themes.effective(None, None).unwrap().styles["PageTitle"].bold);
+        assert!(themes.all().iter().all(|theme| theme.id != "modern"));
+    }
+
     #[test]
     fn every_built_in_theme_names_every_gallery_style() {
-        for theme in built_in() {
+        for theme in shipped() {
             let sheet = theme.sheet(None);
             for (name, _) in STYLES {
                 assert!(sheet.contains_key(name), "{} {name}", theme.id);

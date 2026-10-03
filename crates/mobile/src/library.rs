@@ -1567,8 +1567,17 @@ pub unsafe extern "C" fn sb_notebook_create(
     time: *const c_char,
     error: *mut *mut c_char,
 ) -> bool {
+    use notebook::sidecar::themes::{Assignment, DEFAULT, Scope, Themes};
     let created = dated(&string(author), &string(date), &string(time)).and_then(|page| {
-        Notebook::create(string(path), string(cache), Notebook::NEW_COLOR, &page)?;
+        let notebook = Notebook::create(string(path), string(cache), Notebook::NEW_COLOR, &page)?;
+        notebook.save_themes(Themes {
+            assignments: vec![Assignment {
+                scope: Scope::Notebook,
+                theme: Some(DEFAULT.into()),
+                assigned: filetime(),
+            }],
+            ..Default::default()
+        })?;
         Ok(())
     });
     created.map_err(|cause| failed(cause, error)).is_ok()
