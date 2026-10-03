@@ -153,10 +153,13 @@ impl Ui {
         let mut nodes = Vec::new();
         let mut children = Vec::new();
         let mut seen = HashSet::from([Id::ROOT]);
-        self.describe(0, scale, None, &mut children, &mut nodes, &mut seen);
         let mut root = Node::new(Role::Window);
         root.set_label(label);
-        root.set_bounds(bounds(self.nodes[0].rect, scale));
+        // Before the first frame is built, the window is all there is.
+        if let Some(built) = self.nodes.first() {
+            self.describe(0, scale, None, &mut children, &mut nodes, &mut seen);
+            root.set_bounds(bounds(built.rect, scale));
+        }
         root.set_children(children.into_iter().map(|(id, _)| id).collect::<Vec<_>>());
         nodes.push((Id::ROOT, root));
         let focus = self.focus.filter(|focus| seen.contains(focus));
