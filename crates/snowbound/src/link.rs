@@ -59,26 +59,9 @@ fn system_url(address: &str) -> String {
     }
 }
 
-/// A page, or a paragraph on it, as Copy Link to Page gives it: the section file's path
-/// before the title, then the identities OneNote finds it by.
-fn clipboard_link(
-    path: &str,
-    section: [u8; 16],
-    title: &str,
-    page: [u8; 16],
-    object: Option<ExGuid>,
-) -> String {
-    let target = match object {
-        Some(object) => LinkTarget::Object {
-            identity: page,
-            title,
-            object,
-        },
-        None => LinkTarget::Page {
-            identity: page,
-            title,
-        },
-    };
+/// A section, page or paragraph as Copy Link gives it: the section file's path, then the
+/// title and identities OneNote finds it by.
+fn clipboard_link(path: &str, section: [u8; 16], target: LinkTarget) -> String {
     let stored = internal_link(section, "", target);
     let fragment = stored
         .strip_prefix("onenote:#")
@@ -335,6 +318,9 @@ impl State {
         };
         let corrections = items.len();
         let format = self.format_state();
+        let disabled = |id| !self.status(&commands::Choice::Command(id), &format).enabled;
+        // Paste stands for any edit to the text here.
+        let (fixed, unlinkable) = (disabled(commands::Id::Paste), disabled(commands::Id::Link));
         let lists = [commands::Id::ToDoList, commands::Id::BulletedList]
             .into_iter()
             .filter(|id| {
@@ -348,7 +334,7 @@ impl State {
         } else {
             let mut items = vec![
                 Item {
-                    disabled: !context.selected,
+                    disabled: !context.selected || fixed,
                     separated: corrections > 0,
                     ..drawn("Cut", art::CUT)
                 },
@@ -356,12 +342,16 @@ impl State {
                     disabled: !context.selected,
                     ..drawn("Copy", art::COPY)
                 },
-                drawn("Paste", art::PASTE),
+                Item {
+                    disabled: fixed,
+                    ..drawn("Paste", art::PASTE)
+                },
             ];
             match &context.link {
                 Some(_) => items.extend([
                     Item {
                         separated: true,
+                        disabled: unlinkable,
                         ..drawn("Edit Link", art::LINK)
                     },
                     drawn("Copy Link to Paragraph", art::COPY_LINK),
@@ -370,11 +360,15 @@ impl State {
                         ..drawn("Copy Link", art::COPY_LINK)
                     },
                     drawn("Select Link", art::SELECT),
-                    drawn("Remove Link", art::REMOVE_LINK),
+                    Item {
+                        disabled: unlinkable,
+                        ..drawn("Remove Link", art::REMOVE_LINK)
+                    },
                 ]),
                 None => items.extend([
                     Item {
                         separated: true,
+                        disabled: unlinkable,
                         ..drawn("Link", art::LINK)
                     },
                     drawn("Copy Link to Paragraph", art::COPY_LINK),
@@ -391,9 +385,13 @@ impl State {
                 items.extend([
                     Item {
                         separated: true,
+                        disabled: fixed,
                         ..drawn("Professional", art::EQUATION)
                     },
-                    drawn("Linear", art::EQUATION),
+                    Item {
+                        disabled: fixed,
+                        ..drawn("Linear", art::EQUATION)
+                    },
                 ]);
             }
             items
@@ -489,12 +487,30 @@ impl State {
             .iter()
             .find(|(listed, ..)| *listed == space)
             .map_or(page.title.as_str(), |(_, title, _)| title.as_str());
+        let target = match object {
+            Some(object) => LinkTarget::Object {
+                identity,
+                title,
+                object,
+            },
+            None => LinkTarget::Page { identity, title },
+        };
         Ok(clipboard_link(
             &session.section.file().to_string_lossy(),
             session.section.identity()?,
-            title,
+            target,
+        ))
+    }
+
+    /// Copy Link to Section: the link OneNote 2010 puts on the clipboard for the section at
+    /// catalog `path`; none for one without a file here.
+    pub(crate) fn section_link(&self, library: &crate::Library, path: &str) -> Option<String> {
+        let file = library.folder()?.join(path);
+        let identity = library.section_identity(path)?;
+        Some(clipboard_link(
+            &file.to_string_lossy(),
             identity,
-            object,
+            LinkTarget::Section,
         ))
     }
 
@@ -541,13 +557,27 @@ mod tests {
     }
 
     /// OneNote 2010's Copy Link to Page (`corpus/link-edit/native-typed`, README): the file's
-    /// path, the title, and the section and page identities.
+    /// path, the title, and the section and page identities; and its Copy Link to Section,
+    /// as the lab's OneNote 2010 copied one, the path's spaces escaped.
     #[test]
-    fn page_links_copy_as_onenote_copies_them() {
+    fn links_copy_as_onenote_copies_them() {
         let section = *b"\x25\xfc\x1e\x0f\x7c\xdf\xcb\x45\x87\xa4\xbd\xd0\x3f\x42\x05\x7e";
-        let page = *b"\x18\xa3\xcc\xa9\x3e\xa4\x12\x49\xa1\xc7\xf1\x9f\x1e\xaf\x30\xca";
+        let identity = *b"\x18\xa3\xcc\xa9\x3e\xa4\x12\x49\xa1\xc7\xf1\x9f\x1e\xaf\x30\xca";
+        let page = LinkTarget::Page {
+            identity,
+            title: "Links",
+        };
+        let general = *b"\x1b\x79\xcd\xe4\x17\x94\x4f\x4b\x99\x3a\x34\xfe\xb3\xb2\xa8\x4d";
         assert_eq!(
-            clipboard_link("C:\\one\\links.one", section, "Links", page, None),
+            clipboard_link(
+                "C:\\Users\\clover\\Documents\\OneNote Notebooks\\Personal\\General.one",
+                general,
+                LinkTarget::Section
+            ),
+            "onenote:///C:\\Users\\clover\\Documents\\OneNote%20Notebooks\\Personal\\General.one#section-id={E4CD791B-9417-4B4F-993A-34FEB3B2A84D}&end"
+        );
+        assert_eq!(
+            clipboard_link("C:\\one\\links.one", section, page),
             "onenote:///C:\\one\\links.one#Links&section-id={0F1EFC25-DF7C-45CB-87A4-BDD03F42057E}&page-id={A9CCA318-A43E-4912-A1C7-F19F1EAF30CA}&end"
         );
     }

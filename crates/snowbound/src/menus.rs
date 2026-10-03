@@ -116,7 +116,6 @@ pub enum Action {
     /// A section's colour, COLORREF; none is OneNote's None.
     Color(Option<u32>),
     Sync,
-    NewNotebook,
     /// Moves a notebook up the notebook list, or down.
     Raise(bool),
     Properties,
@@ -154,7 +153,6 @@ impl Action {
             Action::Theme => art::STYLES,
             Action::Colors => art::SECTION_COLOR,
             Action::Sync => art::SYNC_NOW,
-            Action::NewNotebook => art::NEW_NOTEBOOK,
             Action::Raise(true) => art::MOVE_UP,
             Action::Raise(false) => art::MOVE_DOWN,
             Action::Properties => art::PROPERTIES,
@@ -335,9 +333,9 @@ impl State {
         };
         let nowhere = || self.destinations(target).is_empty();
         // Last on a page, section or notebook, under a rule.
-        let styles = || {
+        let styles = |library: &Library| {
             let title = commands::command(commands::Id::Themes).title;
-            item(Action::Theme, title, false, true)
+            item(Action::Theme, title, library.catalog().is_none(), true)
         };
         match target {
             // OneNote's Move or Copy takes a page out of the bin; nothing else changes it.
@@ -369,7 +367,7 @@ impl State {
                 // Levels and versions are known once the section is open.
                 let Some(session) = self.session.as_ref().filter(|_| self.open(library, path))
                 else {
-                    actions.push(styles());
+                    actions.push(styles(library));
                     return actions;
                 };
                 let pages = &session.pages;
@@ -398,12 +396,13 @@ impl State {
                         session.page_versions(*space).is_empty(),
                         true,
                     ),
-                    styles(),
+                    styles(library),
                 ]);
                 actions
             }
             Target::Section { library, path } | Target::Group { library, path } => {
                 let section = matches!(target, Target::Section { .. });
+                let cataloged = library.catalog().is_some();
                 let mut actions = vec![item(Action::Rename, "Rename", false, false)];
                 if section {
                     actions.push(item(Action::SaveAs, "Save As", false, false));
@@ -411,15 +410,21 @@ impl State {
                 actions.extend([
                     item(Action::Delete, "Delete", false, false),
                     item(Action::Move, "Move", nowhere(), false),
-                    item(Action::NewSection, "New Section", false, true),
-                    item(Action::NewGroup, "New Section Group", false, false),
+                ]);
+                if section {
+                    let link = self.section_link(library, path).is_none();
+                    actions.push(item(Action::CopyLink, "Copy Link to Section", link, true));
+                }
+                actions.extend([
+                    item(Action::NewSection, "New Section", !cataloged, true),
+                    item(Action::NewGroup, "New Section Group", !cataloged, false),
                 ]);
                 if section {
                     actions.extend([
                         item(
                             Action::Password,
                             "Password Protect This Section",
-                            library.catalog().is_none(),
+                            !cataloged,
                             true,
                         ),
                         item(Action::Colors, "Section Color", false, false),
@@ -429,7 +434,12 @@ impl State {
                             section_file(library, path).is_none(),
                             false,
                         ),
-                        styles(),
+                        item(
+                            Action::Theme,
+                            commands::command(commands::Id::Themes).title,
+                            library.section_identity(path).is_none(),
+                            true,
+                        ),
                     ]);
                 }
                 actions
@@ -467,12 +477,16 @@ impl State {
                         library.catalog().is_none() || library.joined.is_some(),
                         false,
                     ),
-                    item(Action::NewSection, "New Section", false, true),
-                    item(Action::NewGroup, "New Section Group", false, false),
                     item(
-                        Action::NewNotebook,
-                        commands::command(commands::Id::NewNotebook).title,
-                        false,
+                        Action::NewSection,
+                        "New Section",
+                        library.catalog().is_none(),
+                        true,
+                    ),
+                    item(
+                        Action::NewGroup,
+                        "New Section Group",
+                        library.catalog().is_none(),
                         false,
                     ),
                     item(
@@ -511,7 +525,7 @@ impl State {
                         library.catalog().is_none(),
                         false,
                     ),
-                    styles(),
+                    styles(library),
                 ]
             }
             Target::Closed(_) | Target::Server(_) => {
@@ -779,6 +793,14 @@ impl State {
                 library,
                 Structure::Color { path, color },
             )),
+            (Target::Section { library, path }, Action::CopyLink) => {
+                if let Some(link) = self.section_link(&library, &path)
+                    && let Err(error) = self.clipboard.set_text(link)
+                {
+                    eprintln!("Copying the link failed: {error}");
+                }
+                None
+            }
             (Target::Section { library, path }, Action::Reveal) => {
                 if let Some(file) = section_file(&library, &path) {
                     platform::show_file(&file);
@@ -823,10 +845,6 @@ impl State {
                 if let Err(error) = self.clipboard.set_text(link) {
                     eprintln!("Copying the link failed: {error}");
                 }
-                None
-            }
-            (Target::Notebook(_), Action::NewNotebook) => {
-                self.choose(Choice::Command(commands::Id::NewNotebook));
                 None
             }
             (Target::Notebook(library), Action::Raise(up)) => {
