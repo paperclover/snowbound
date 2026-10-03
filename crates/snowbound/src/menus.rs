@@ -709,14 +709,20 @@ impl State {
             (Target::Section { library, path }, Action::Theme) => {
                 if let Some(identity) = library.section_identity(&path) {
                     let scope = notebook::sidecar::themes::Scope::section(identity);
-                    let color = library.section_color(&path);
-                    self.show_themes(crate::themes::Scope::Section, library, scope, color);
+                    let (wearing, color) = (
+                        library.themes().assigned(&scope),
+                        library.section_color(&path),
+                    );
+                    let targets = vec![(crate::themes::Scope::Section, scope)];
+                    self.show_themes(library, targets, wearing, color);
                 }
                 None
             }
             (Target::Notebook(library), Action::Theme) => {
                 let scope = notebook::sidecar::themes::Scope::Notebook;
-                self.show_themes(crate::themes::Scope::Notebook, library, scope, None);
+                let wearing = library.themes().assigned(&scope);
+                let targets = vec![(crate::themes::Scope::Notebook, scope)];
+                self.show_themes(library, targets, wearing, None);
                 None
             }
             (Target::Section { library, path }, Action::Color(color)) => Some(Command::Structure(
@@ -844,8 +850,9 @@ impl State {
                 let identity = session.section.page(space).ok()?.identity?;
                 let library = Arc::clone(&session.library);
                 let scope = notebook::sidecar::themes::Scope::page(identity);
-                let color = self.section_color();
-                self.show_themes(crate::themes::Scope::Page, library, scope, color);
+                let (wearing, color) = (library.themes().assigned(&scope), self.section_color());
+                let targets = vec![(crate::themes::Scope::Page, scope)];
+                self.show_themes(library, targets, wearing, color);
                 None
             }
             Action::Versions(show) => Some(Command::History { page: space, show }),

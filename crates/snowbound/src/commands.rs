@@ -112,8 +112,9 @@ pub enum Id {
     Style(usize),
     /// The Styles gallery.
     Styles,
-    /// The Themes dialog, assigning a theme to the page, its section or its notebook.
-    Theme(crate::themes::Scope),
+    /// The Themes dialog, editing themes and giving one to the page, its section or its
+    /// notebook.
+    Themes,
     /// The tag at this place in the user's tag list.
     Tag(usize),
     CustomizeTags,
@@ -595,24 +596,7 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::Style(8), "Quote", NONE, NONE),
     row!(Id::Style(9), "Code", NONE, NONE),
     row!(Id::Style(10), "Normal", NONE, NONE),
-    row!(
-        Id::Theme(crate::themes::Scope::Page),
-        "Page Theme…",
-        NONE,
-        NONE
-    ),
-    row!(
-        Id::Theme(crate::themes::Scope::Section),
-        "Section Theme…",
-        NONE,
-        NONE
-    ),
-    row!(
-        Id::Theme(crate::themes::Scope::Notebook),
-        "Notebook Theme…",
-        NONE,
-        NONE
-    ),
+    row!(Id::Themes, "Customize Theme…", NONE, NONE),
     row!(Id::CustomizeTags, "Customize Tags…", NONE, NONE),
     row!(
         Id::RemoveTags,
@@ -1349,7 +1333,9 @@ impl State {
                         .get(place)
                         .map(|(name, _)| *name),
             ),
-            Id::Theme(scope) => enabled(!modal && self.theme_target(scope).is_some()),
+            Id::Themes => {
+                enabled(!modal && self.theme_target(crate::themes::Scope::Notebook).is_some())
+            }
             // A selected picture or file takes tags too, as in OneNote.
             Id::RemoveTags => enabled(text || tagged),
             Id::ToDoList => enabled(text && format.listed && self.to_do().is_some()),
@@ -1761,8 +1747,8 @@ impl State {
                 self.ui.open_popup(crate::toolbar_popup("styles"));
                 return Ok(());
             }
-            Id::Theme(scope) => {
-                self.open_themes(scope);
+            Id::Themes => {
+                self.open_themes();
                 return Ok(());
             }
             Id::Tag(place) => {

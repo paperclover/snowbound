@@ -1,7 +1,8 @@
 //! Style themes in the app (`resources/styles.md`): the page wears its own theme, else its
 //! section's, else its notebook's, as its paragraph style objects; the Styles gallery
-//! applies a style in the page's theme; the Themes dialog picks a theme for the page, the
-//! section or the notebook, and edits a notebook's own themes with a live preview.
+//! applies a style in the page's theme, and its Customize… opens the Themes dialog, which
+//! edits a notebook's own themes with a live preview and gives one to the page, the section
+//! or the notebook.
 
 use crate::{Library, State, filetime};
 use accesskit::Role;
@@ -32,9 +33,9 @@ impl Scope {
 
 /// The Themes dialog while it is open.
 pub struct Dialog {
-    scope: Scope,
     library: Arc<Library>,
-    target: stored::Scope,
+    /// Where Save can give the theme, asked with the first offered first; one alone takes it.
+    targets: Vec<(Scope, stored::Scope)>,
     /// The built-in themes, then the notebook's own as the dialog edits them.
     themes: Vec<Theme>,
     /// The notebook's own themes changed here, by id.
@@ -164,40 +165,48 @@ impl State {
         self.edit_page(ops)
     }
 
-    /// Opens the Themes dialog choosing a theme for `scope` of the open page.
-    pub(crate) fn open_themes(&mut self, scope: Scope) {
-        let Some((library, target)) = self.theme_target(scope) else {
+    /// Opens the Themes dialog on the open page's theme, saving to the page, its section or
+    /// its notebook.
+    pub(crate) fn open_themes(&mut self) {
+        let targets: Vec<(Arc<Library>, (Scope, stored::Scope))> =
+            [Scope::Page, Scope::Section, Scope::Notebook]
+                .into_iter()
+                .filter_map(|scope| {
+                    let (library, target) = self.theme_target(scope)?;
+                    Some((library, (scope, target)))
+                })
+                .collect();
+        let Some((library, _)) = targets.first() else {
             return;
         };
-        let section = self.section_color();
-        self.show_themes(scope, library, target, section);
+        let library = Arc::clone(library);
+        let (wearing, section) = (self.page_theme(), self.section_color());
+        let targets = targets.into_iter().map(|(_, target)| target).collect();
+        self.show_themes(library, targets, wearing, section);
     }
 
-    /// Opens the Themes dialog choosing a theme for `target`, which `scope` names, in a
+    /// Opens the Themes dialog on theme `wearing`, saving to `targets` of `library`, in a
     /// section coloured `section`.
     pub(crate) fn show_themes(
         &mut self,
-        scope: Scope,
         library: Arc<Library>,
-        target: stored::Scope,
+        targets: Vec<(Scope, stored::Scope)>,
+        wearing: Option<Theme>,
         section: Option<u32>,
     ) {
-        let themes = library.themes();
-        let assigned = themes.assigned(&target);
-        let mut all = themes.all();
-        // A retired built-in the scope wears is listed while it does.
-        if let Some(assigned) = &assigned
-            && !all.contains(assigned)
+        let mut all = library.themes().all();
+        // A retired built-in worn here is listed while it is.
+        if let Some(wearing) = &wearing
+            && !all.contains(wearing)
         {
-            all.push(assigned.clone());
+            all.push(wearing.clone());
         }
-        let selected = assigned
-            .and_then(|assigned| all.iter().position(|theme| theme.id == assigned.id))
+        let selected = wearing
+            .and_then(|wearing| all.iter().position(|theme| theme.id == wearing.id))
             .unwrap_or(0);
         self.themes = Some(Dialog {
-            scope,
             library,
-            target,
+            targets,
             themes: all,
             changed: Vec::new(),
             deleted: Vec::new(),
@@ -208,9 +217,9 @@ impl State {
         self.ui.open_popup(id());
     }
 
-    /// Builds the Themes dialog while it is open. Apply keeps the edits and gives the theme
-    /// to the dialog's scope; No Theme takes the scope's own away; Cancel, Escape or a press
-    /// outside leave everything as it was.
+    /// Builds the Themes dialog while it is open. Save keeps the edits and gives the theme to
+    /// the scope it then asks for, This Page first; No Theme takes that scope's own away;
+    /// Cancel, Escape or a press outside leave everything as it was.
     pub(crate) fn themes_dialog(&mut self) {
         let Some(dialog) = &mut self.themes else {
             return;
@@ -241,7 +250,10 @@ impl State {
         if let Some(node) = ui.access(id()) {
             node.set_label("Themes");
         }
-        let title = format!("Theme for {}", dialog.scope.name());
+        let title = match &dialog.targets[..] {
+            [(scope, _)] => format!("Theme for {}", scope.name()),
+            _ => "Themes".to_owned(),
+        };
         ui.leaf(
             "title",
             Spec {
@@ -568,7 +580,30 @@ impl State {
                 ..Spec::default()
             },
         );
-        let none = ui::button(ui, "none", "No Theme").clicked;
+        // Each button gives its choice to the one place there is, else asks where.
+        let targets = &dialog.targets;
+        let place = |ui: &mut Ui, part: &str, label: &str| -> Option<usize> {
+            let clicked = ui::button(ui, part, label).clicked;
+            if targets.len() == 1 {
+                return clicked.then_some(0);
+            }
+            let menu = popup(part);
+            if clicked {
+                ui.open_popup(menu);
+            }
+            let items: Vec<Item> = targets
+                .iter()
+                .enumerate()
+                .map(|(at, (scope, _))| Item {
+                    text: scope.name(),
+                    current: at == 0,
+                    ..Item::default()
+                })
+                .collect();
+            let anchor = Anchor::Below(ui.rect(ui.id(part)).unwrap_or_default());
+            ui::popup::menu(ui, menu, anchor, &items, None)
+        };
+        let none = place(ui, "none", "No Theme");
         ui.leaf(
             "space",
             Spec {
@@ -577,7 +612,7 @@ impl State {
             },
         );
         let cancel = ui::button(ui, "cancel", "Cancel").clicked;
-        let apply = ui::button(ui, "apply", "Apply").clicked;
+        let save = place(ui, "save", "Save");
         ui.close();
         ui.close();
 
@@ -617,10 +652,11 @@ impl State {
             dialog.deleted.push(gone);
             dialog.selected = 0;
         }
-        if !(apply || none || cancel) {
+        let chosen = save.map(|at| (at, true)).or(none.map(|at| (at, false)));
+        if chosen.is_none() && !cancel {
             return;
         }
-        if !cancel {
+        if let Some((at, apply)) = chosen {
             let themes = dialog
                 .themes
                 .iter()
@@ -633,7 +669,7 @@ impl State {
                 .collect();
             let chosen = &dialog.themes[dialog.selected];
             let assignment = Assignment {
-                scope: dialog.target.clone(),
+                scope: dialog.targets[at].1.clone(),
                 theme: apply.then(|| chosen.id.clone()),
                 assigned: now,
             };
@@ -644,7 +680,9 @@ impl State {
         }
         self.ui.close_popup(id());
         self.themes = None;
-        if !cancel && let Err(error) = self.wear_theme() {
+        if chosen.is_some()
+            && let Err(error) = self.wear_theme()
+        {
             eprintln!("Restyling the page failed: {error}");
         }
     }
@@ -690,7 +728,8 @@ fn fresh_id(now: u64, count: usize) -> String {
 }
 
 /// The Styles gallery under the toolbar's Styles button: the eleven styles drawn in
-/// `sheet` in a section coloured `section`, the one at the caret outlined, then the theme commands. Returns the command chosen.
+/// `sheet` in a section coloured `section`, the one at the caret outlined, then Customize….
+/// Returns the command chosen.
 pub(crate) fn gallery(
     ui: &mut Ui,
     menu: Id,
@@ -700,7 +739,6 @@ pub(crate) fn gallery(
     current: Option<&str>,
 ) -> Option<crate::commands::Id> {
     use crate::commands::Id as Cmd;
-    let scopes = [Scope::Page, Scope::Section, Scope::Notebook];
     let groups = [
         ui::popup::Group {
             heading: &sheet.name,
@@ -709,8 +747,8 @@ pub(crate) fn gallery(
             size: [240.0, 34.0],
         },
         ui::popup::Group {
-            heading: "Theme",
-            cells: scopes.len(),
+            heading: "",
+            cells: 1,
             columns: 1,
             size: [240.0, 24.0],
         },
@@ -730,20 +768,20 @@ pub(crate) fn gallery(
             }
         }
         None => {
-            let label = format!("{}…", scopes[index - STYLES.len()].name());
             ui.leaf(
-                "scope",
+                "customize",
                 Spec {
                     size: [fill(), fill()],
-                    text: Some(&label),
+                    text: Some("Customize…"),
                     ..Spec::default()
                 },
             );
         }
     })?;
-    Some(match scopes.get(chosen.wrapping_sub(STYLES.len())) {
-        Some(scope) => Cmd::Theme(*scope),
-        None => Cmd::Style(chosen),
+    Some(if chosen < STYLES.len() {
+        Cmd::Style(chosen)
+    } else {
+        Cmd::Themes
     })
 }
 

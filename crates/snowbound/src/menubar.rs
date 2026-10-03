@@ -187,14 +187,7 @@ const MENUS: &[Item] = &[
                     C(Id::Style(10)),
                 ],
             ),
-            Item::Menu(
-                "Theme",
-                &[
-                    C(Id::Theme(crate::themes::Scope::Page)),
-                    C(Id::Theme(crate::themes::Scope::Section)),
-                    C(Id::Theme(crate::themes::Scope::Notebook)),
-                ],
-            ),
+            C(Id::Themes),
             S,
             Item::Menu("Font", &[Item::Fonts]),
             Item::Menu("Size", &[Item::Sizes]),
