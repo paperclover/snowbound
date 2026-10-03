@@ -222,6 +222,15 @@ impl Line {
             .send(Out::Frame(kind, body))
             .map_err(|_| io::ErrorKind::NotConnected.into())
     }
+
+    /// Says `reason` after the frames sent before, then hangs up.
+    pub fn hang_up(&self, reason: &str) {
+        let bye = minicbor::to_vec(wire::Bye {
+            reason: reason.into(),
+        })
+        .unwrap_or_default();
+        let _ = self.0.send(Out::Bye(bye));
+    }
 }
 
 /// A stream to one peer, read by one thread and written by another: a TCP connection, or
@@ -597,12 +606,18 @@ impl Shared {
                     }
                     (self.events)(Event::Changed);
                 }
-                kind => (self.events)(Event::Frame {
-                    from: &hello,
-                    kind,
-                    body: &body,
-                    line: &line,
-                }),
+                kind => {
+                    (self.events)(Event::Frame {
+                        from: &hello,
+                        kind,
+                        body: &body,
+                        line: &line,
+                    });
+                    // The peer hangs up after its bye.
+                    if kind == kind::BYE {
+                        break None;
+                    }
+                }
             }
         };
         if let Some(error) = ended.filter(|error| error.kind() == io::ErrorKind::InvalidData) {

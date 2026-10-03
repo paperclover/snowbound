@@ -429,3 +429,80 @@ fn large_files_travel_in_chunks() {
             .is_err()
     );
 }
+
+/// A guest that floods its host with requests is hung up on once too many wait, having had
+/// answers to few of them, and the host goes on serving the others.
+#[test]
+fn a_flooding_guest_is_hung_up_on() {
+    use notebook::live::{
+        Event, Live, Room,
+        wire::{Bye, Request, kind},
+    };
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let folder = notebook(directory.path());
+    let url = relay(Default::default());
+    let sharing = Sharing::new("").unwrap();
+    let host = host(&folder, &directory.path().join("host"), &sharing, &url);
+    let code = code(&host);
+    let (grace, notebook) = guest("Grace", &code, &url, &directory.path().join("grace"));
+    let welcome = share::join(hello("Mallory"), &code, "", None, Some(&url)).unwrap();
+    let replies = Arc::new(AtomicUsize::new(0));
+    let bye = Arc::new(Mutex::new(None));
+    let (counted, said) = (Arc::clone(&replies), Arc::clone(&bye));
+    let mallory = Live::start(
+        hello("Mallory"),
+        &Room::Notebook(welcome.secret),
+        None,
+        Some(&url),
+        move |event| match event {
+            Event::Frame {
+                kind: kind::REPLY, ..
+            } => {
+                counted.fetch_add(1, Ordering::Relaxed);
+            }
+            Event::Frame {
+                kind: kind::BYE,
+                body,
+                ..
+            } => *said.lock().unwrap() = minicbor::decode::<Bye>(body).ok(),
+            _ => {}
+        },
+    )
+    .unwrap();
+    let served = |live: &Live| {
+        live.peers()
+            .into_iter()
+            .find(|peer| peer.hello.serves == Some(welcome.share))
+    };
+    until("Mallory never met the host", || served(&mallory).is_some());
+    let line = mallory.line(&served(&mallory).unwrap().hello.peer).unwrap();
+    const SENT: u64 = 5000;
+    for id in 0..SENT {
+        let request = Request {
+            id,
+            path: "Garden.one".into(),
+            ..Request::default()
+        };
+        if line.send(kind::STAMP, &request).is_err() {
+            break;
+        }
+    }
+    until("the host never hung up on Mallory", || {
+        bye.lock().unwrap().is_some() && served(&mallory).is_none()
+    });
+    assert_eq!(bye.lock().unwrap().as_ref().unwrap().reason, "flooded");
+    let answered = replies.load(Ordering::Relaxed);
+    // At most the burst a guest may start at once, what waits for the workers, and what the
+    // rate refills while the flood arrives.
+    assert!(answered < 300, "Mallory had {answered} answers of {SENT}");
+    // Grace, asking at her own pace, is served as before.
+    assert!(grace.host().is_some());
+    assert_eq!(
+        notebook.read_section("Garden.one").unwrap(),
+        std::fs::read(folder.join("Garden.one")).unwrap()
+    );
+}

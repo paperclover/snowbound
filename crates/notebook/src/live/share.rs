@@ -44,6 +44,16 @@ const SNAPSHOT_AGE: Duration = Duration::from_secs(120);
 const IMAGES: usize = 4;
 /// What a host says leaving as it stops sharing.
 const STOPPED: &str = "stopped";
+/// What a host says hanging up on a guest that asks too much too fast.
+const FLOODED: &str = "flooded";
+/// A guest's requests a host holds at once, waiting and in hand, past which it hangs up.
+const QUEUED: usize = 32;
+/// The threads working through each guest's requests.
+const WORKERS: usize = 2;
+/// Requests a guest may start each second, and at once: every request but a read's later
+/// chunks and an upload's, which come from memory or go to it.
+const STARTS: f64 = 100.0;
+const BURST: f64 = 200.0;
 
 const WORDS: &str = include_str!("words.txt");
 
@@ -231,7 +241,7 @@ impl Host {
             images: Mutex::default(),
             snapshots: Mutex::default(),
             puts: Mutex::default(),
-            lines: Mutex::default(),
+            guests: Mutex::default(),
         });
         let serving = Hello {
             serves: Some(sharing.share),
@@ -244,22 +254,12 @@ impl Host {
             reach,
             relay,
             move |event| match event {
-                Event::Met(hello, line) => {
-                    heard.lines.lock().unwrap().insert(hello.peer, line.clone());
-                }
+                Event::Met(hello, line) => heard.admit(hello.peer, line),
                 Event::Left(hello) => heard.forget(&hello.peer),
                 Event::Frame {
-                    from,
-                    kind,
-                    body,
-                    line,
+                    from, kind, body, ..
                 } if wire::KNOWN.contains(&kind) && kind > 256 && kind != kind::REPLY => {
-                    let (served, line, peer) = (Arc::clone(&heard), line.clone(), from.peer);
-                    let body = body.to_vec();
-                    thread::spawn(move || {
-                        let reply = served.handle(&peer, kind, &body);
-                        let _ = line.send(kind::REPLY, &reply);
-                    });
+                    heard.queue(&from.peer, kind, body);
                 }
                 Event::Changed => told(),
                 _ => {}
@@ -379,7 +379,16 @@ struct Served {
     snapshots: Mutex<ByGuest<(Arc<Vec<u8>>, Instant)>>,
     /// Bytes a later request carries, by guest and upload.
     puts: Mutex<ByGuest<Vec<u8>>>,
-    lines: Mutex<BTreeMap<[u8; 16], Line>>,
+    guests: Mutex<BTreeMap<[u8; 16], Admitted>>,
+}
+
+/// A guest as its host serves it: the line to it, its requests waiting for its workers, and
+/// how many more it may start now.
+struct Admitted {
+    line: Line,
+    queue: mpsc::SyncSender<(u16, Vec<u8>)>,
+    starts: f64,
+    counted: Instant,
 }
 
 /// A section's path, stamp and image.
@@ -406,8 +415,57 @@ fn refused(kind: io::ErrorKind, message: &str) -> Error {
 }
 
 impl Served {
+    /// Serves `peer` on `line`, through workers of its own that end as it leaves.
+    fn admit(self: &Arc<Self>, peer: [u8; 16], line: &Line) {
+        let (queue, waiting) = mpsc::sync_channel::<(u16, Vec<u8>)>(QUEUED - WORKERS);
+        let waiting = Arc::new(Mutex::new(waiting));
+        for _ in 0..WORKERS {
+            let (served, waiting, line) =
+                (Arc::downgrade(self), Arc::clone(&waiting), line.clone());
+            thread::spawn(move || {
+                loop {
+                    let next = waiting.lock().unwrap().recv();
+                    let (Ok((kind, body)), Some(served)) = (next, served.upgrade()) else {
+                        return;
+                    };
+                    let _ = line.send(kind::REPLY, &served.handle(&peer, kind, &body));
+                }
+            });
+        }
+        let guest = Admitted {
+            line: line.clone(),
+            queue,
+            starts: BURST,
+            counted: Instant::now(),
+        };
+        self.guests.lock().unwrap().insert(peer, guest);
+    }
+
+    /// Hands a request from `peer` to its workers, or hangs up on a guest that has too many
+    /// waiting or starts them too fast.
+    fn queue(&self, peer: &[u8; 16], kind: u16, body: &[u8]) {
+        let mut guests = self.guests.lock().unwrap();
+        let Some(guest) = guests.get_mut(peer) else {
+            return;
+        };
+        let continued = kind == kind::PUT
+            || matches!(kind, kind::READ | kind::READ_FILE)
+                && minicbor::decode::<Request>(body).is_ok_and(|request| request.handle.is_some());
+        let now = Instant::now();
+        guest.starts =
+            (guest.starts + now.duration_since(guest.counted).as_secs_f64() * STARTS).min(BURST);
+        guest.counted = now;
+        if !continued {
+            guest.starts -= 1.0;
+        }
+        if guest.starts < 0.0 || guest.queue.try_send((kind, body.to_vec())).is_err() {
+            guest.line.hang_up(FLOODED);
+            guests.remove(peer);
+        }
+    }
+
     fn forget(&self, peer: &[u8; 16]) {
-        self.lines.lock().unwrap().remove(peer);
+        self.guests.lock().unwrap().remove(peer);
         self.snapshots
             .lock()
             .unwrap()
@@ -423,8 +481,8 @@ impl Served {
         let touched = Touched {
             paths: paths.to_vec(),
         };
-        for line in self.lines.lock().unwrap().values() {
-            let _ = line.send(kind::TOUCHED, &touched);
+        for guest in self.guests.lock().unwrap().values() {
+            let _ = guest.line.send(kind::TOUCHED, &touched);
         }
     }
 
