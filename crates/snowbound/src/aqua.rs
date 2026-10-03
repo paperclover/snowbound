@@ -77,7 +77,7 @@ pub fn cover_border_line(ui: &mut ui::Ui, width: f32) {
         ui::Spec {
             flags: ui::Flags::FLOAT,
             size: [ui::px(width), ui::px(1.0)],
-            position: [0.0, crate::TITLE + crate::TAB_ROW - 1.0],
+            position: [0.0, crate::TOOLBAR + crate::TAB_ROW - 1.0],
             fill: Some(draw::srgb(grey, grey, grey)),
             ..ui::Spec::default()
         },
@@ -85,7 +85,8 @@ pub fn cover_border_line(ui: &mut ui::Ui, width: f32) {
 }
 
 /// `-mouseDownCanMoveWindow` for the content view: a textured window drags from any press
-/// on a view that allows it, asking once. The app drags from its toolbar's empty space
+/// on a view that allows it, and a title bar the view lies under drags and zooms from it,
+/// buttons drawn there included. The app drags and zooms from its toolbar's empty space
 /// itself, through `-performWindowDragWithEvent:`.
 pub extern "C" fn no_window_drags(_: &AnyObject, _: Sel) -> Bool {
     Bool::NO

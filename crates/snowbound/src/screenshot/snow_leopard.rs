@@ -181,7 +181,7 @@ fn window(
 ) -> Result<Vec<[f32; 4]>, Box<dyn Error>> {
     let [highlight, top, bottom, body] = GREYS[usize::from(!key)];
     // The gradient runs from under the highlight to the top content border's last row.
-    let end = TITLE_LINE + (crate::TITLE + crate::TAB_ROW) as usize - 1;
+    let end = TITLE_LINE + (crate::TOOLBAR + crate::TAB_ROW) as usize - 1;
     let total = height + TITLE_LINE;
     let mut pixels: Vec<[f32; 4]> = (0..total)
         .flat_map(|y| {

@@ -390,7 +390,8 @@ pub struct Spec<'a> {
     pub anchor: Option<Anchor>,
     /// Makes the box a group of a row in two forms, its first two children, both built every
     /// frame: its full form, and the one it folds to where the row lacks room. The row folds
-    /// its groups by ascending priority until it fits, once the space sized by ancestors has
+    /// its groups, and those in rows of its own sized by their children, by ascending
+    /// priority until it fits, once the space sized by ancestors has
     /// yielded and before any other box gives up room. The form not shown takes no room,
     /// paint or input, and its boxes take the group's rectangle, so what opens from them
     /// opens from the form shown.

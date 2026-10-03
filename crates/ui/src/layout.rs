@@ -90,13 +90,9 @@ pub(crate) fn solve(
                 // goes back to the space.
                 let spare: f32 = space.iter().map(|child| nodes[*child].computed[axis]).sum();
                 while excess > spare && axis == 0 {
-                    let Some(group) = children
-                        .iter()
-                        .copied()
-                        .filter(|child| {
-                            nodes[*child].fold.is_some() && !nodes[nodes[*child].children[0]].hidden
-                        })
-                        .min_by_key(|child| nodes[*child].fold)
+                    let mut groups = Vec::new();
+                    unfolded(nodes, &children, &mut groups);
+                    let Some(group) = groups.into_iter().min_by_key(|group| nodes[*group].fold)
                     else {
                         break;
                     };
@@ -104,8 +100,14 @@ pub(crate) fn solve(
                     nodes[full].hidden = true;
                     nodes[folded].hidden = false;
                     let width = nodes[folded].computed[0] + 2.0 * nodes[group].pad[0];
-                    excess -= nodes[group].computed[0] - width;
-                    nodes[group].computed[0] = width;
+                    let freed = nodes[group].computed[0] - width;
+                    excess -= freed;
+                    // A group inside boxes sized by their children narrows them too.
+                    let mut inside = group;
+                    while inside != index {
+                        nodes[inside].computed[0] -= freed;
+                        inside = nodes[inside].parent;
+                    }
                 }
                 excess = give_back(nodes, &space, axis, excess);
                 let mut tiers: Vec<f32> = sized
@@ -311,6 +313,21 @@ fn in_flow(nodes: &[Built], index: usize) -> impl Iterator<Item = usize> + '_ {
             && nodes[*child].anchor.is_none()
             && !nodes[*child].hidden
     })
+}
+
+/// The groups among `boxes` still in their full form, and those inside any of them that is a
+/// row sized by its children, whose width follows theirs.
+fn unfolded(nodes: &[Built], boxes: &[usize], groups: &mut Vec<usize>) {
+    for &child in boxes {
+        let node = &nodes[child];
+        if node.fold.is_some() {
+            if !nodes[node.children[0]].hidden {
+                groups.push(child);
+            }
+        } else if node.size[0].size == Size::Children && node.axis == Axis::X {
+            unfolded(nodes, &in_flow(nodes, child).collect::<Vec<_>>(), groups);
+        }
+    }
 }
 
 /// The children's extent on `axis`: summed with gaps along the flow, otherwise the largest.

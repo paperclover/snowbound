@@ -805,7 +805,7 @@ pub fn window_controls(ui: &mut Ui, window: &Window, end: bool) {
     let size = if found {
         [bounds.right - bounds.left, bounds.bottom - bounds.top].map(|side| side as f32 / scale)
     } else {
-        [3.0 * CAPTION_BUTTON, crate::TITLE]
+        [3.0 * CAPTION_BUTTON, crate::TOOLBAR]
     };
     let offset = [GAP, -(crate::TITLE - ui::shell::TOOL) / 2.0];
     if system && !eleven() {

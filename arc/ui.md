@@ -81,7 +81,8 @@ frame N
   pixels, by its label, as a fraction of an ancestor, or by its children. When
   siblings overflow, space sized from an ancestor gives way first. Then a row
   *folds* its groups, boxes with a full and a folded form (`Spec::fold`), by
-  priority. Only then do boxes give up room by their *strictness*, the least
+  priority, reaching into its boxes sized by their children, so a group can
+  fold inside another. Only then do boxes give up room by their *strictness*, the least
   strict first. That one knob covers most of what flexbox is usually needed
   for. A box filling across a parent sized by its children stretches to what
   its siblings make it, and a popup that isn't strict gives way to the window,

@@ -18,6 +18,8 @@ const TAB_ROUNDING: f32 = 4.0;
 pub const TOOL: f32 = 22.0;
 /// Width of a menu arrow beside a toolbar button.
 const ARROW: f32 = 10.0;
+/// Width of a button showing only a menu arrow, which ends its group as tight as an icon does.
+const MORE: f32 = 14.0;
 /// Where a section tab's label starts inside it.
 pub const TAB_PAD: f32 = 10.0;
 /// How far section tabs fade out at an end of their row they are cut at, and how near it a
@@ -481,6 +483,48 @@ pub fn split_button(
     );
     ui.close();
     ui.signal(button)
+}
+
+/// A narrow button showing only a menu arrow, which opens popup `menu` of more of a group's
+/// commands at the group's end; where not `enabled` it shows faded and takes no clicks.
+pub fn more_button(ui: &mut Ui, part: impl Hash, menu: Id, enabled: bool) -> Anchor {
+    let theme = ui.theme.clone();
+    let open = ui.popup_open(menu);
+    let id = ui.open(
+        part,
+        Spec {
+            flags: if enabled {
+                Flags::CLICKABLE
+            } else {
+                Flags::default()
+            },
+            size: [px(MORE), px(TOOL)],
+            icon: Some(CHEVRON),
+            color: Some(if enabled {
+                theme.text_dim
+            } else {
+                faded(theme.text_dim)
+            }),
+            fill: open.then(|| theme.hover()).or(rest(&theme)),
+            hover_fill: enabled.then(|| theme.hover()),
+            radius: 4.0,
+            center: true,
+            role: Some(Role::Button),
+            ..Spec::default()
+        },
+    );
+    if let Some(node) = ui.access(id) {
+        node.set_has_popup(HasPopup::Menu);
+        node.set_expanded(open);
+        if !enabled {
+            node.set_disabled();
+        }
+    }
+    ui.close();
+    if enabled && ui.signal(id).pressed {
+        ui.open_popup(menu);
+    }
+    Anchor::Below(ui.rect(id).unwrap_or_default())
 }
 
 /// A button showing `icon` and a menu arrow, one control that opens popup `menu`, a toggle

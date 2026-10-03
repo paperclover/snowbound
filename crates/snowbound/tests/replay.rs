@@ -364,7 +364,7 @@ fn renaming_a_section_from_its_tab_types_into_the_sidebar_at_once() {
     let scratch = Scratch::new("rename-shut-sidebar");
     let notebook =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
-    let mut steps = vec!["move 53 53", "press right", "release right", "settle"];
+    let mut steps = vec!["move 110 53", "press right", "release right", "settle"];
     steps.extend(["key Down", "key Enter", "settle"]);
     steps.extend(["type Renamed", "accessibility typed"]);
     let [typed] = replay(&scratch, Some(&notebook), &steps)

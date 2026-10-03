@@ -31,9 +31,12 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
 ### macOS
 
 - The toolbar's row is the title bar. An empty `NSToolbar`, unified compact
-  from macOS 11, with the title hidden makes the title bar the row's height,
-  and AppKit places the traffic lights in it; a press in the row's gaps drags
-  the window. The title is still set, for the Window menu, Mission Control and
+  from macOS 11, with the title hidden makes the title bar 38 pt, and AppKit
+  centres the traffic lights in it beside the row's buttons; the row ends 4 pt
+  short of it, so the tabs stand as near the buttons as a tab bar would. A
+  press in the row's empty space drags the window and a double press zooms or
+  minimizes it, as Desktop & Dock says; presses in a group of buttons do
+  neither, so AppKit is told the view never moves the window. The title is still set, for the Window menu, Mission Control and
   VoiceOver. `--screenshot` paints the lights where the hidden window's AppKit
   put them. The app draws the row as part of the same frame as the rest of the
   chrome. Under the whole

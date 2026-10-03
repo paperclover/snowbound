@@ -233,6 +233,79 @@ fn a_row_is_narrowest_with_every_group_folded_and_every_box_squeezed() {
 }
 
 #[test]
+fn a_group_inside_a_box_sized_by_its_children_folds_with_the_row() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let build = |ui: &mut Ui, width: f32| {
+        frame(ui, |ui| {
+            ui.open(
+                "row",
+                Spec {
+                    size: [px(width), px(20.0)],
+                    ..Spec::default()
+                },
+            );
+            ui.open("outer", Spec::default());
+            ui.leaf(
+                "fixed",
+                Spec {
+                    size: [px(50.0), px(20.0)],
+                    ..Spec::default()
+                },
+            );
+            ui.open(
+                "group",
+                Spec {
+                    fold: Some(0),
+                    ..Spec::default()
+                },
+            );
+            for (form, width) in [("full", 100.0), ("folded", 20.0)] {
+                ui.open(form, Spec::default());
+                ui.leaf(
+                    "button",
+                    Spec {
+                        size: [px(width), px(20.0)],
+                        ..Spec::default()
+                    },
+                );
+                ui.close();
+            }
+            ui.close();
+            ui.close();
+            ui.open(
+                "later",
+                Spec {
+                    fold: Some(1),
+                    ..Spec::default()
+                },
+            );
+            for (form, width) in [("full", 30.0), ("folded", 30.0)] {
+                ui.open(form, Spec::default());
+                ui.leaf(
+                    "button",
+                    Spec {
+                        size: [px(width), px(20.0)],
+                        ..Spec::default()
+                    },
+                );
+                ui.close();
+            }
+            ui.close();
+            ui.close();
+        });
+    };
+    let [outer, after] = ["outer", "later"].map(|part| Id::ROOT.child("row").child(part));
+    build(&mut ui, 180.0);
+    assert_eq!(ui.rect(outer), Some([0.0, 0.0, 150.0, 20.0]));
+    // 50 + 100 + 30 overflows 179, so the group folds before the later one of higher priority,
+    // and the box around it narrows to 70.
+    build(&mut ui, 179.0);
+    assert_eq!(ui.rect(outer), Some([0.0, 0.0, 70.0, 20.0]));
+    assert_eq!(ui.rect(after), Some([70.0, 0.0, 100.0, 20.0]));
+    assert_eq!(ui.narrowest(Id::ROOT.child("row")), Some(100.0));
+}
+
+#[test]
 fn a_box_sized_by_its_children_yields_what_they_yield() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let mut combo = None;

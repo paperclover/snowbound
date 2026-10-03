@@ -459,7 +459,7 @@ pub fn install_backdrop(window: &Window) -> bool {
     // Before 10.10 AppKit has no materials; 10.6's textured window stands in, its gradient
     // running through the toolbar and the tab row to the notebook's frame.
     let Some(effect) = AnyClass::get("NSVisualEffectView") else {
-        return crate::aqua::textured(window, crate::TITLE + crate::TAB_ROW);
+        return crate::aqua::textured(window, crate::TOOLBAR + crate::TAB_ROW);
     };
     let view = &*ns_view(window);
     unsafe {
@@ -1068,15 +1068,27 @@ pub fn set_min_size(window: &Window, size: [f32; 2]) {
     window.set_min_inner_size(Some(winit::dpi::LogicalSize::new(size[0], size[1])));
 }
 
-/// Zooms the window once the current event is handled: AppKit's zoom animation runs its
-/// own loop, and started from inside winit's handler it would hold every resize until the
-/// end, stretching the last frame instead of drawing each step.
+/// Zooms or minimizes the window, as a double click on a title bar does, once the current
+/// event is handled: AppKit's zoom animation runs its own loop, and started from inside
+/// winit's handler it would hold every resize until the end, stretching the last frame
+/// instead of drawing each step.
 pub fn zoom(window: &Window) {
     let window = ns_window(window);
+    // What a double click on a title bar does, as Desktop & Dock's setting says.
+    let action: Option<Retained<NSString>> = unsafe {
+        let defaults: Retained<AnyObject> =
+            msg_send_id![class!(NSUserDefaults), standardUserDefaults];
+        msg_send_id![&defaults, stringForKey: &*NSString::from_str("AppleActionOnDoubleClick")]
+    };
+    let selector = match action.map(|action| action.to_string()).as_deref() {
+        Some("None") => return,
+        Some("Minimize") => sel!(miniaturize:),
+        _ => sel!(zoom:),
+    };
     unsafe {
         let _: () = msg_send![
             &window,
-            performSelector: sel!(zoom:),
+            performSelector: selector,
             withObject: std::ptr::null::<AnyObject>(),
             afterDelay: 0.0f64
         ];
@@ -1096,12 +1108,10 @@ pub fn install_text_input(window: &Window) {
                 sel!(insertText:replacementRange:),
                 insert_text as unsafe extern "C" fn(_, _, _, _),
             );
-            if crate::aqua::before_lion() {
-                class.add_method(
-                    sel!(mouseDownCanMoveWindow),
-                    crate::aqua::no_window_drags as extern "C" fn(_, _) -> _,
-                );
-            }
+            class.add_method(
+                sel!(mouseDownCanMoveWindow),
+                crate::aqua::no_window_drags as extern "C" fn(_, _) -> _,
+            );
             class.register()
         });
         assert_eq!(class.superclass(), Some(view.class()));

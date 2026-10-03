@@ -134,9 +134,13 @@ use winit::{
     window::CursorIcon,
 };
 
-/// Height of the toolbar's row, which is the title bar where the platform lets it: a
-/// unified compact toolbar's on macOS.
+/// Height of the title bar the toolbar's buttons centre in: a unified compact toolbar's on
+/// macOS, whose traffic lights they line up with.
 const TITLE: f32 = 38.0;
+/// Height of the toolbar's row, which is the title bar where the platform lets it. Its foot
+/// is short of the title bar's, so the tabs below stand as near its buttons as a tab bar
+/// under a compact toolbar does.
+const TOOLBAR: f32 = TITLE - 4.0;
 /// Space between toolbar groups.
 const GAP: f32 = 6.0;
 /// A tool face's room beside its buttons.
@@ -898,6 +902,8 @@ struct State {
     strip_press: Option<Instant>,
     /// The strip is held and the window moves once the pointer does.
     strip_held: bool,
+    /// The zoom typed in the zoom's field while it is open.
+    zoom_typed: Option<String>,
     /// Where a replay asked the next frame to be written.
     snapshot: Option<PathBuf>,
     /// A replay waiting for nothing to be on its way, and where it wants the accessibility
@@ -1247,6 +1253,7 @@ impl State {
             pointer: [0.0; 2],
             strip_press: None,
             strip_held: false,
+            zoom_typed: None,
             snapshot: None,
             replay_settle: None,
             frames: std::env::var_os("SNOWBOUND_FRAMES").map(|dir| (dir.into(), Instant::now())),
@@ -1514,7 +1521,7 @@ impl State {
         if !self.navigation_bar_right {
             self.sidebar(&theme, sidebar);
         }
-        // Where the notebook button floats over the tab row while the sidebar is shut.
+        // Where the buttons float over the tab row while the sidebar is shut.
         let beside = 1.0 - sidebar / sidebar::WIDTH;
         self.ui.open(
             "main",
@@ -1544,14 +1551,19 @@ impl State {
         );
         if !self.temporary {
             // Past the row's padding, the frame's corner and the first tab's shadow, the tabs'
-            // outlines start where the button's square ends; the room shrinks on the sidebar's
-            // easing, so the tabs ease with it.
-            let room = TAB_ROW - FRAME - self.rounding() - ui::SHADOW[0];
-            let room = if self.navigation_bar_right { 0.0 } else { room };
+            // outlines start where Back and Forward end, and on the left the notebook button's
+            // square after them; that room shrinks on the sidebar's easing, as they move into
+            // its header, so the tabs ease with it.
+            let room = sidebar::NAV + TAB_ROW - FRAME - self.rounding() - ui::SHADOW[0];
+            let room = if self.navigation_bar_right {
+                room - TAB_ROW
+            } else {
+                room * beside
+            };
             self.ui.leaf(
                 "rail",
                 Spec {
-                    size: [px(room * beside), px(1.0)],
+                    size: [px(room), px(1.0)],
                     ..Spec::default()
                 },
             );
@@ -1675,6 +1687,7 @@ impl State {
         #[cfg(feature = "live")]
         self.avatars();
         if self.session.is_some() {
+            self.zoom(&theme)?;
             self.page_tools(&theme);
         }
         let button = if self.navigation_bar_right && !self.temporary {
@@ -1737,7 +1750,7 @@ impl State {
             if self.navigation_bar_right {
                 self.sidebar(&theme, sidebar);
             }
-            self.sidebar_button(height);
+            self.sidebar_button(height, sidebar);
             self.ui.close();
             self.context_menu();
             return Ok((section, open_tab, None));
@@ -1750,7 +1763,7 @@ impl State {
             if self.navigation_bar_right {
                 self.sidebar(&theme, sidebar);
             }
-            self.sidebar_button(height);
+            self.sidebar_button(height, sidebar);
             self.ui.close();
             self.context_menu();
             return Ok((section, open_tab, None));
@@ -1836,7 +1849,7 @@ impl State {
             self.sidebar(&theme, sidebar);
         }
         self.task_pane(&theme);
-        self.sidebar_button(height);
+        self.sidebar_button(height, sidebar);
         self.ui.close();
         self.context_menu();
         // No tab stands on the frame in Full Page View.
@@ -2025,7 +2038,7 @@ impl State {
             } else {
                 Flags::default()
             },
-            size: [fill(), px(TITLE)],
+            size: [fill(), px(TOOLBAR)],
             pad: [0.0, (TITLE - ui::shell::TOOL) / 2.0],
             gap: GAP,
             role: Some(accesskit::Role::Toolbar),
@@ -2042,7 +2055,7 @@ impl State {
         self.ui.open(
             "bar",
             Spec {
-                size: [fill(), px(TITLE)],
+                size: [fill(), px(TOOLBAR)],
                 fill: Some(theme.strip),
                 pad: [0.0, edge],
                 offset: [0.0, -edge],
@@ -2070,7 +2083,7 @@ impl State {
                 "tools",
                 Spec {
                     flags: Flags::CLIP,
-                    size: [fill(), px(TITLE)],
+                    size: [fill(), px(TOOLBAR)],
                     pad: [face.pad[0], edge],
                     offset: [0.0, -edge],
                     gap: if theme.tool[3] > 0.0 && !panel {
@@ -2121,7 +2134,6 @@ impl State {
         use Entry::{Open, Rule, Run};
         use canvas::editor::{Alignment, BULLET_LIBRARY, ListStyle, NUMBER_LIBRARY, Toggle};
         use commands::{Choice, Id as Cmd};
-        use ui::shell::TOOL;
         // A focused picture has no text to show a format for.
         let state = self.format_state();
         let statuses: Vec<_> = commands::COMMANDS
@@ -2145,90 +2157,73 @@ impl State {
         let engine = &self.view.engine;
         let session = self.session.as_ref();
         let update = self.updates.status();
-        let label = format!("{:.0}%", self.view.zoom() * 100.0);
         let sheet = self.gallery_sheet();
         let drawing_pens = self.pens();
         let ui = &mut self.ui;
         let text = theme.text;
         let tags: Vec<_> = self.tags.iter().enumerate().collect();
+        let face = tool_face(theme, grouped(theme), FACE_RISE);
         let mut choice = group(
             ui,
             "navigate",
             6,
+            face.clone(),
             |ui| {
                 let mut choice = None;
-                for id in [Cmd::Back, Cmd::Forward, Cmd::Undo, Cmd::Redo] {
+                for id in [Cmd::Undo, Cmd::Redo] {
                     choice = tool(ui, id, status_of(id)).or(choice);
                 }
                 choice
             },
             |ui| {
-                let entries = [Run(Cmd::Redo), Rule, Run(Cmd::Back), Run(Cmd::Forward)];
-                dropdown(ui, "menu", Head::Split(Cmd::Undo), &entries, status_of)
+                dropdown(
+                    ui,
+                    "menu",
+                    Head::Split(Cmd::Undo),
+                    &[Run(Cmd::Redo)],
+                    status_of,
+                )
             },
         );
-        choice = group(
-            ui,
+        ui.open(
             "clipboard",
-            5,
-            |ui| {
-                divider(ui, theme);
-                let mut choice = None;
-                let paste = ui.id("paste");
-                if !status_of(Cmd::Paste).enabled {
-                    ui::shell::unavailable(ui, "paste", art::PASTE, text, true);
-                } else if ui::shell::split_button(
-                    ui,
-                    "paste",
-                    title(Cmd::Paste),
-                    art::PASTE,
-                    None,
-                    None,
-                    toolbar_popup("paste"),
-                )
-                .clicked
-                {
-                    choice = Some(Choice::Command(Cmd::Paste));
-                }
-                tip(ui, Cmd::Paste);
-                // Pasting keeps only the text until #25.
-                let options = [
-                    ("Keep Source Formatting", false),
-                    ("Merge Formatting", false),
-                    ("Keep Text Only", true),
-                    ("Picture", false),
-                ];
-                let mut items = vec![ui::popup::Item {
-                    text: "Paste Options",
-                    heading: true,
-                    ..Default::default()
-                }];
-                items.extend(options.map(|(text, enabled)| ui::popup::Item {
-                    text,
-                    disabled: !enabled,
-                    ..Default::default()
-                }));
-                let anchor = ui::Anchor::Below(ui.rect(paste).unwrap_or_default());
-                if ui::popup::menu(ui, toolbar_popup("paste"), anchor, &items, None).is_some() {
-                    choice = Some(Choice::Command(Cmd::Paste));
-                }
-                for id in [Cmd::Cut, Cmd::Copy, Cmd::FormatPainter] {
-                    choice = tool(ui, id, status_of(id)).or(choice);
-                }
-                choice
+            Spec {
+                flags: Flags::CLICKABLE,
+                ..face.clone()
             },
-            |ui| {
-                let entries = [
-                    Run(Cmd::Cut),
-                    Run(Cmd::Copy),
-                    Run(Cmd::FormatPainter),
-                    Rule,
-                    Open("paste", Cmd::Paste),
-                ];
-                dropdown(ui, "menu", Head::Split(Cmd::Paste), &entries, status_of)
-            },
-        )
-        .or(choice);
+        );
+        divider(ui, theme);
+        let entries = [
+            Run(Cmd::Paste),
+            Open("paste", Cmd::Paste),
+            Rule,
+            Run(Cmd::Cut),
+            Run(Cmd::Copy),
+        ];
+        let head = Head::Menu("Clipboard", art::PASTE);
+        choice = dropdown(ui, "menu", head, &entries, status_of).or(choice);
+        // Pasting keeps only the text until #25.
+        let options = [
+            ("Keep Source Formatting", false),
+            ("Merge Formatting", false),
+            ("Keep Text Only", true),
+            ("Picture", false),
+        ];
+        let mut items = vec![ui::popup::Item {
+            text: "Paste Options",
+            heading: true,
+            ..Default::default()
+        }];
+        items.extend(options.map(|(text, enabled)| ui::popup::Item {
+            text,
+            disabled: !enabled,
+            ..Default::default()
+        }));
+        let anchor = ui::Anchor::Below(ui.rect(ui.id("menu")).unwrap_or_default());
+        if ui::popup::menu(ui, toolbar_popup("paste"), anchor, &items, None).is_some() {
+            choice = Some(Choice::Command(Cmd::Paste));
+        }
+        ui.close();
         let font = state.font.clone().unwrap_or_default();
         let size = state
             .font_size
@@ -2236,12 +2231,13 @@ impl State {
         ui.open(
             "font",
             Spec {
+                flags: Flags::CLICKABLE,
                 gap: 1.0,
-                ..tool_face(theme, grouped(theme), FACE_RISE)
+                ..face.clone()
             },
         );
         divider(ui, theme);
-        // Styles sits left of the font box (Clover, 2026-09-30), and like it never folds.
+        // Styles, the font and the size never fold.
         let styles = toolbar_popup("styles");
         let anchor = if status_of(Cmd::Styles).enabled {
             ui::shell::menu_button(ui, "styles", art::STYLES, None, styles)
@@ -2342,14 +2338,22 @@ impl State {
             let id = Cmd::Toggle(toggle);
             choice = tool(ui, id, status_of(id)).or(choice);
         }
-        ui.close();
+        let effects = [
+            Run(Cmd::Toggle(Toggle::Strikethrough)),
+            Run(Cmd::Toggle(Toggle::Subscript)),
+            Run(Cmd::Toggle(Toggle::Superscript)),
+            Rule,
+            Run(Cmd::ClearFormatting),
+        ];
+        // The rest of the group folds inside it, on its face.
         choice = group(
             ui,
             "character",
             8,
+            Spec::default(),
             |ui| {
-                divider(ui, theme);
-                let mut choice = None;
+                let head = Head::Menu("Text Effects", art::STRIKETHROUGH);
+                let mut choice = dropdown(ui, "script", head, &effects, status_of);
                 // Each button applies its menu's last pick: the highlighter shows it in its
                 // artwork, the font colour in a bar.
                 for (part, id, swatches, columns, none, bar) in [
@@ -2410,37 +2414,23 @@ impl State {
                         });
                     }
                 }
-                dropdown(
-                    ui,
-                    "script",
-                    Head::Menu("Text Effects", art::STRIKETHROUGH),
-                    &[
-                        Run(Cmd::Toggle(Toggle::Strikethrough)),
-                        Run(Cmd::Toggle(Toggle::Subscript)),
-                        Run(Cmd::Toggle(Toggle::Superscript)),
-                        Rule,
-                        Run(Cmd::ClearFormatting),
-                    ],
-                    status_of,
-                )
-                .or(choice)
+                tool(ui, Cmd::FormatPainter, status_of(Cmd::FormatPainter)).or(choice)
             },
             |ui| {
-                let entries = [
+                let mut entries = effects.to_vec();
+                entries.extend([
+                    Rule,
                     Open("highlight", Cmd::Highlight),
                     Run(Cmd::FontColor),
                     Open("color", Cmd::FontColor),
                     Rule,
-                    Run(Cmd::Toggle(Toggle::Strikethrough)),
-                    Run(Cmd::Toggle(Toggle::Subscript)),
-                    Run(Cmd::Toggle(Toggle::Superscript)),
-                    Rule,
-                    Run(Cmd::ClearFormatting),
-                ];
+                    Run(Cmd::FormatPainter),
+                ]);
                 dropdown(ui, "menu", Head::Split(Cmd::Highlight), &entries, status_of)
             },
         )
         .or(choice);
+        ui.close();
         let alignments = [Alignment::Left, Alignment::Center, Alignment::Right].map(Cmd::Align);
         let paragraph = [
             Rule,
@@ -2455,6 +2445,7 @@ impl State {
             ui,
             "paragraph",
             7,
+            face.clone(),
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
@@ -2603,6 +2594,7 @@ impl State {
             ui,
             "tags",
             9,
+            face.clone(),
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
@@ -2659,6 +2651,7 @@ impl State {
             ui,
             "insert",
             4,
+            face.clone(),
             |ui| {
                 divider(ui, theme);
                 let mut choice = None;
@@ -2742,6 +2735,7 @@ impl State {
                 ui,
                 part,
                 priority,
+                face.clone(),
                 |ui| {
                     divider(ui, theme);
                     let mut choice = None;
@@ -2760,6 +2754,7 @@ impl State {
             ui,
             "draw",
             2,
+            face.clone(),
             |ui| {
                 divider(ui, theme);
                 let mut choice = tool(ui, Cmd::SelectType, status_of(Cmd::SelectType));
@@ -2805,6 +2800,40 @@ impl State {
             |_| None,
         )
         .or(choice);
+        // Folded, Page Color stays in the view's menu at the row's end.
+        choice = group(
+            ui,
+            "page color",
+            1,
+            face.clone(),
+            |ui| {
+                divider(ui, theme);
+                if !status_of(Cmd::PageColor).enabled {
+                    ui::shell::unavailable(ui, "page color", art::PAGE_COLOR, text, true);
+                    tip(ui, Cmd::PageColor);
+                    return None;
+                }
+                let menu = toolbar_popup("page color");
+                let anchor = ui::shell::menu_button(ui, "page color", art::PAGE_COLOR, None, menu);
+                tip(ui, Cmd::PageColor);
+                background::menu(
+                    ui,
+                    menu,
+                    anchor,
+                    &mut self.thumbnails,
+                    &mut self.templates,
+                    // The page's own colour aside.
+                    canvas::gpu::Paper {
+                        color: ui.theme.paper,
+                        ink: ui.theme.paper_ink,
+                    },
+                    self.view.editor.page_color(),
+                    self.view.editor.rule_lines(),
+                )
+            },
+            |_| None,
+        )
+        .or(choice);
         ui.leaf(
             "space",
             Spec {
@@ -2815,7 +2844,14 @@ impl State {
         if let Some(session) = session {
             sync::control(ui, session, &update, theme);
         }
+        // The view's commands, with zoom and Page Color for where theirs have folded away.
         let views = [
+            Run(Cmd::ZoomIn),
+            Run(Cmd::ZoomOut),
+            Run(Cmd::ActualSize),
+            Rule,
+            Open("page color", Cmd::PageColor),
+            Rule,
             Run(Cmd::Sidebar),
             Run(Cmd::PageList),
             Run(Cmd::PagesMatchTheme),
@@ -2824,95 +2860,151 @@ impl State {
             Run(Cmd::HideSpelling),
             Run(Cmd::Spelling),
         ];
-        choice = group(
-            ui,
+        ui.open(
             "view",
-            1,
-            |ui| {
-                divider(ui, theme);
-                let mut choice = None;
-                if status_of(Cmd::PageColor).enabled {
-                    let anchor = ui::shell::menu_button(
-                        ui,
-                        "page color",
-                        art::PAGE_COLOR,
-                        None,
-                        toolbar_popup("page color"),
-                    );
-                    tip(ui, Cmd::PageColor);
-                    choice = background::menu(
-                        ui,
-                        toolbar_popup("page color"),
-                        anchor,
-                        &mut self.thumbnails,
-                        &mut self.templates,
-                        // The page's own colour aside.
-                        canvas::gpu::Paper {
-                            color: ui.theme.paper,
-                            ink: ui.theme.paper_ink,
-                        },
-                        self.view.editor.page_color(),
-                        self.view.editor.rule_lines(),
-                    )
-                    .or(choice.take());
-                } else {
-                    ui::shell::unavailable(ui, "page color", art::PAGE_COLOR, text, true);
-                    tip(ui, Cmd::PageColor);
-                }
-                choice = tool(ui, Cmd::ZoomOut, status_of(Cmd::ZoomOut)).or(choice);
-                let level = ui.leaf(
-                    "level",
-                    Spec {
-                        flags: Flags::CLICKABLE,
-                        size: [px(44.0), px(TOOL)],
-                        text: Some(&label),
-                        hover_fill: Some(theme.hover()),
-                        radius: 4.0,
-                        center: true,
-                        role: Some(accesskit::Role::Button),
-                        ..Spec::default()
-                    },
-                );
-                if level.clicked {
-                    choice = Some(Choice::Command(Cmd::ActualSize));
-                }
-                tip(ui, Cmd::ActualSize);
-                if let Some(node) = ui.access(ui.id("level")) {
-                    node.set_value(label.as_str());
-                }
-                choice = tool(ui, Cmd::ZoomIn, status_of(Cmd::ZoomIn)).or(choice);
-                dropdown(
-                    ui,
-                    "view",
-                    Head::More("More View Options"),
-                    &views,
-                    status_of,
-                )
-                .or(choice)
+            Spec {
+                flags: Flags::CLICKABLE,
+                ..face.clone()
             },
-            |ui| {
-                let mut entries = vec![
-                    Run(Cmd::ZoomIn),
-                    Run(Cmd::ZoomOut),
-                    Run(Cmd::ActualSize),
-                    Rule,
-                    Open("page color", Cmd::PageColor),
-                    Rule,
-                ];
-                entries.extend(views);
-                dropdown(
-                    ui,
-                    "menu",
-                    Head::Menu("View", art::ZOOM_IN),
-                    &entries,
-                    status_of,
-                )
-            },
-        )
-        .or(choice);
+        );
+        let head = Head::More("More View Options");
+        choice = dropdown(ui, "more", head, &views, status_of).or(choice);
+        ui.close();
         if let Some(choice) = choice {
             self.choose(choice);
         }
+    }
+
+    /// The page's zoom, left of the search box: Zoom Out, the level and Zoom In joined as one
+    /// control, which folds away first where the tab row lacks room. Clicking the level opens
+    /// it as a field, where Enter zooms to the percentage typed and Escape keeps the zoom.
+    fn zoom(&mut self, theme: &Theme) -> Result<(), Box<dyn Error>> {
+        use commands::{Choice, Id as Cmd};
+        use ui::shell::TOOL;
+        const LEVEL: f32 = 44.0;
+        let format = self.format_state();
+        let [out, into] =
+            [Cmd::ZoomOut, Cmd::ZoomIn].map(|id| self.status(&Choice::Command(id), &format));
+        let level = format!("{:.0}%", self.view.zoom() * 100.0);
+        let field = self.ui.id("zoom field");
+        if self.ui.focused() != Some(field) {
+            self.zoom_typed = None;
+        }
+        self.ui.open(
+            "zoom",
+            Spec {
+                flags: Flags::CLICKABLE,
+                fold: Some(0),
+                ..Spec::default()
+            },
+        );
+        self.ui.open(
+            "full",
+            Spec {
+                size: [children(), px(TAB_ROW)],
+                // As far from the search box as the page list's buttons are apart.
+                pad: [3.0, (TAB_ROW - TOOL) / 2.0],
+                ..Spec::default()
+            },
+        );
+        let typing = self.zoom_typed.is_some();
+        self.ui.open(
+            "control",
+            Spec {
+                size: [children(), px(TOOL)],
+                fill: Some(theme.base),
+                border: Some(if typing { theme.accent } else { theme.chip }),
+                radius: 4.0,
+                ..Spec::default()
+            },
+        );
+        let line = |ui: &mut Ui, part| {
+            ui.leaf(
+                part,
+                Spec {
+                    size: [px(1.0), px(TOOL)],
+                    fill: Some(theme.chip),
+                    ..Spec::default()
+                },
+            );
+        };
+        let mut choice = tool(&mut self.ui, Cmd::ZoomOut, out);
+        line(&mut self.ui, "before");
+        let mut zoom = None;
+        if let Some(typed) = &mut self.zoom_typed {
+            let signal = ui::text_field(
+                &mut self.ui,
+                field,
+                typed,
+                "",
+                Spec {
+                    size: [px(LEVEL), px(TOOL)],
+                    pad: [4.0, 0.0],
+                    ..Spec::default()
+                },
+            );
+            name(&mut self.ui, field, "Zoom");
+            let key = signal.events.iter().find_map(|event| match event {
+                ui::Event::Key {
+                    key: Key::Named(key @ (NamedKey::Enter | NamedKey::Escape)),
+                    ..
+                } => Some(*key),
+                _ => None,
+            });
+            if let Some(key) = key {
+                let percent = typed.trim().trim_end_matches('%').trim().parse::<f32>();
+                zoom = percent.ok().filter(|_| key == NamedKey::Enter);
+                self.zoom_typed = None;
+                self.ui.set_focus(Some(page()));
+            }
+        } else {
+            let id = self.ui.id("level");
+            let signal = self.ui.leaf(
+                "level",
+                Spec {
+                    // Zoom applies where its buttons do.
+                    flags: if out.enabled {
+                        Flags::CLICKABLE
+                    } else {
+                        Flags::default()
+                    },
+                    size: [px(LEVEL), px(TOOL)],
+                    text: Some(&level),
+                    color: Some(if out.enabled {
+                        theme.text
+                    } else {
+                        theme.text_dim
+                    }),
+                    hover_fill: Some(theme.hover()),
+                    center: true,
+                    role: Some(accesskit::Role::Button),
+                    ..Spec::default()
+                },
+            );
+            if let Some(node) = self.ui.access(id) {
+                node.set_label("Zoom");
+                node.set_value(level.as_str());
+            }
+            if signal.clicked {
+                self.zoom_typed = Some(level.trim_end_matches('%').to_owned());
+                self.ui.focus_all(field);
+            }
+        }
+        line(&mut self.ui, "after");
+        choice = tool(&mut self.ui, Cmd::ZoomIn, into).or(choice);
+        self.ui.close();
+        self.ui.close();
+        self.ui.open("folded", Spec::default());
+        self.ui.close();
+        self.ui.close();
+        if let Some(choice) = choice {
+            self.choose(choice);
+        }
+        if let Some(percent) = zoom {
+            let response = self.view.set_zoom(percent / 100.0)?;
+            self.respond(response);
+        }
+        Ok(())
     }
 
     /// The search box and the page list's buttons, above the list. Where the tab row lacks
@@ -2920,10 +3012,12 @@ impl State {
     /// on the page it stays.
     fn page_tools(&mut self, theme: &Theme) {
         let finding = self.search.finding;
+        // It folds after the zoom.
         self.ui.open(
             "tools",
             Spec {
-                fold: (!finding).then_some(0),
+                flags: Flags::CLICKABLE,
+                fold: (!finding).then_some(1),
                 ..Spec::default()
             },
         );
@@ -5131,19 +5225,21 @@ fn pen_gallery(
     )
 }
 
-/// A toolbar group that folds by `priority`: `full` builds its full form, `folded` the form
-/// it folds to. Returns what either chose.
+/// A toolbar group on `face` that folds by `priority`: `full` builds its full form, `folded`
+/// the form it folds to. Returns what either chose. Like every group, it takes presses
+/// between its buttons, so only the row's empty space drags and zooms the window.
 fn group(
     ui: &mut Ui,
     part: &str,
     priority: u32,
+    face: Spec<'static>,
     full: impl FnOnce(&mut Ui) -> Option<commands::Choice>,
     folded: impl FnOnce(&mut Ui) -> Option<commands::Choice>,
 ) -> Option<commands::Choice> {
-    let face = tool_face(&ui.theme, grouped(&ui.theme), FACE_RISE);
     ui.open(
         part,
         Spec {
+            flags: Flags::CLICKABLE,
             fold: Some(priority),
             ..face
         },
@@ -5239,13 +5335,9 @@ fn dropdown(
             anchor
         }
         // A menu of nothing that applies fades as a button would.
-        Head::Menu(label, _) | Head::Tools(label, _) | Head::More(label) if !usable => {
-            let (icon, arrow) = match head {
-                Head::Menu(_, icon) | Head::Tools(_, icon) => (icon, true),
-                _ => (ui::shell::CHEVRON, false),
-            };
+        Head::Menu(label, icon) | Head::Tools(label, icon) if !usable => {
             let tint = ui.theme.text;
-            ui::shell::unavailable(ui, part, icon, tint, arrow);
+            ui::shell::unavailable(ui, part, icon, tint, true);
             name(ui, button, label);
             ui::Anchor::Below(ui.rect(button).unwrap_or_default())
         }
@@ -5264,18 +5356,9 @@ fn dropdown(
             anchor
         }
         Head::More(label) => {
-            let open = ui.popup_open(menu);
-            let text = ui.theme.text;
-            if ui::shell::tool_button(ui, part, ui::shell::CHEVRON, text, Some(open)).pressed {
-                ui.open_popup(menu);
-            }
-            if let Some(node) = ui.access(button) {
-                node.set_label(label);
-                node.clear_toggled();
-                node.set_has_popup(accesskit::HasPopup::Menu);
-                node.set_expanded(open);
-            }
-            ui::Anchor::Below(ui.rect(button).unwrap_or_default())
+            let anchor = ui::shell::more_button(ui, part, menu, usable);
+            name(ui, button, label);
+            anchor
         }
     };
     let keys: Vec<_> = entries

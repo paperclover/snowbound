@@ -18,6 +18,13 @@ const RAIL: f32 = crate::TAB_ROW;
 /// on the row's foot, so their labels sit 1 to 3 pixels low.
 const DROP: f32 = 2.0;
 const ROW: f32 = 24.0;
+/// The tree's margin, and how far inside a row its icon starts and its label after that; the
+/// header's title and the notebook button's icon, while the sidebar is open, line up with them.
+const MARGIN: f32 = 4.0;
+const ROW_PAD: f32 = 6.0;
+const ICON: f32 = 16.0;
+/// The Back and Forward buttons' box, with room beside them as the notebook button's square has.
+pub const NAV: f32 = 2.0 * ui::shell::TOOL + 1.0 + (RAIL - ui::shell::TOOL);
 /// How far each level of the tree sits inside its parent.
 const INDENT: f32 = 16.0;
 
@@ -136,7 +143,8 @@ pub fn header() -> Id {
 
 /// The sidebar's header row, as tall as the tab row and dragging the window when `drags`, then
 /// with `rows` the tree of `notebooks` with the open section marked. The notebook button
-/// floats over the header's end at the window's edge, the `right` one or the left.
+/// floats over the header's icon on the left, or its end on the `right`, where the Back and
+/// Forward buttons otherwise do.
 fn sidebar(
     ui: &mut Ui,
     tree: &mut Tree,
@@ -155,36 +163,36 @@ fn sidebar(
                 Flags::default()
             },
             size: [fill(), px(RAIL)],
-            pad: [crate::FRAME, (RAIL - ui::shell::TOOL) / 2.0 + DROP],
-            gap: 6.0,
+            pad: [MARGIN + ROW_PAD, (RAIL - ui::shell::TOOL) / 2.0 + DROP],
+            gap: ROW_PAD,
             ..Spec::default()
         },
     );
-    // The notebook button's square, which floats over this place.
-    let toggle = |ui: &mut Ui| {
-        ui.leaf(
-            "toggle",
-            Spec {
-                size: [px(RAIL - crate::FRAME), px(ui::shell::TOOL)],
-                ..Spec::default()
-            },
-        );
-    };
-    if !right {
-        toggle(ui);
-    }
+    ui.leaf(
+        "icon",
+        Spec {
+            size: [px(ICON), px(ui::shell::TOOL)],
+            ..Spec::default()
+        },
+    );
     ui.leaf(
         "title",
         Spec {
             size: [fill(), px(ui::shell::TOOL)],
-            text: Some("Notebooks"),
+            text: Some("My Notebooks"),
             color: Some(theme.text_dim),
             ..Spec::default()
         },
     );
-    if right {
-        toggle(ui);
-    }
+    // Room for what floats over the header's end.
+    let end = if right { RAIL } else { NAV + MARGIN };
+    ui.leaf(
+        "end",
+        Spec {
+            size: [px(end - MARGIN - 2.0 * ROW_PAD), px(1.0)],
+            ..Spec::default()
+        },
+    );
     ui.close();
     if !rows {
         return;
@@ -195,7 +203,7 @@ fn sidebar(
             flags: Flags::SCROLL | Flags::CLIP,
             axis: Axis::Y,
             size: [fill(), fill()],
-            pad: [4.0, 2.0],
+            pad: [MARGIN, 2.0],
             ..Spec::default()
         },
     );
@@ -248,7 +256,7 @@ fn sidebar(
         Spec {
             axis: Axis::Y,
             size: [fill(), ui::children()],
-            pad: [4.0, 6.0],
+            pad: [MARGIN, 6.0],
             ..Spec::default()
         },
     );
@@ -648,9 +656,13 @@ fn tree_row(ui: &mut Ui, tree: &mut Tree, id: Id, row: Row) -> (Signal, bool) {
             fill: lit,
             hover_fill: Some(ui::mix(lit.unwrap_or(theme.sidebar), theme.hover(), 0.6)),
             radius: 4.0,
-            pad: [6.0 + INDENT * row.depth as f32, 0.0],
+            pad: [ROW_PAD + INDENT * row.depth as f32, 0.0],
             // The field's text stands where the label did.
-            gap: if row.renamed { 6.0 - rename::PAD } else { 6.0 },
+            gap: if row.renamed {
+                ROW_PAD - rename::PAD
+            } else {
+                ROW_PAD
+            },
             role: Some(accesskit::Role::TreeItem),
             ..Spec::default()
         },
@@ -670,7 +682,7 @@ fn tree_row(ui: &mut Ui, tree: &mut Tree, id: Id, row: Row) -> (Signal, bool) {
     ui.leaf(
         "icon",
         Spec {
-            size: [px(16.0), px(ROW)],
+            size: [px(ICON), px(ROW)],
             icon: Some(icon),
             color: Some([red, green, blue, alpha]),
             ..Spec::default()
@@ -764,7 +776,7 @@ impl crate::State {
                 ..Spec::default()
             },
         );
-        crate::name(&mut self.ui, rows_id, "Notebooks");
+        crate::name(&mut self.ui, rows_id, "My Notebooks");
         let shown = match (&self.session, &self.locked) {
             (Some(session), _) => Some((&session.library, session.tabs[session.tab].path.as_str())),
             (None, Some(locked)) => Some((&locked.library, locked.path.as_str())),
@@ -840,42 +852,71 @@ impl crate::State {
         }
     }
 
-    /// The notebook button, floating at the body's corner over the section tabs' row, `height`
-    /// tall as it eases, or over the sidebar's header while that is open.
-    pub(crate) fn sidebar_button(&mut self, height: f32) {
+    /// Back, Forward and the notebook button, floating at the body's corner over the section
+    /// tabs' row, `height` tall as it eases. While the sidebar, `width` wide as it eases, is
+    /// open on the left, the notebook button closes it from its header's icon, and Back and
+    /// Forward ride its end.
+    pub(crate) fn sidebar_button(&mut self, height: f32, width: f32) {
+        use crate::commands::{Choice, Id as Cmd};
         if self.temporary {
             return;
         }
-        // On the right it stands at the body's far edge, as laid out last frame.
-        let x = match self.navigation_bar_right {
-            true => self
+        let (nav, toggle) = if self.navigation_bar_right {
+            // The notebook button stands at the body's far edge, as laid out last frame.
+            let edge = self
                 .ui
                 .rect(self.ui.current())
-                .map_or(0.0, |[left, _, right, _]| right - left - RAIL),
-            false => 0.0,
+                .map_or(0.0, |[left, _, right, _]| right - left - RAIL);
+            (0.0, edge)
+        } else {
+            let open = MARGIN + ROW_PAD - (RAIL - ICON) / 2.0;
+            let toggle = NAV + (open - NAV) * width / WIDTH;
+            ((width - NAV - MARGIN).max(0.0), toggle)
         };
+        let pad = [
+            (RAIL - ui::shell::TOOL) / 2.0,
+            (RAIL - ui::shell::TOOL) / 2.0 + DROP,
+        ];
+        self.ui.open(
+            "back and forward",
+            Spec {
+                flags: Flags::FLOAT | Flags::CLIP,
+                size: [px(NAV), px(height)],
+                position: [nav, 0.0],
+                pad,
+                gap: 1.0,
+                ..Spec::default()
+            },
+        );
+        let format = self.format_state();
+        for id in [Cmd::Back, Cmd::Forward] {
+            let status = self.status(&Choice::Command(id), &format);
+            if let Some(choice) = crate::tool(&mut self.ui, id, status) {
+                self.choose(choice);
+            }
+        }
+        self.ui.close();
         self.ui.open(
             "toggle",
             Spec {
                 flags: Flags::FLOAT | Flags::CLIP,
                 size: [px(RAIL), px(height)],
-                position: [x, 0.0],
-                pad: [
-                    (RAIL - ui::shell::TOOL) / 2.0,
-                    (RAIL - ui::shell::TOOL) / 2.0 + DROP,
-                ],
+                position: [toggle, 0.0],
+                pad,
                 ..Spec::default()
             },
         );
-        let tint = crate::notebook_color(
-            &self.ui.theme,
-            self.notebook().and_then(|library| library.color()),
-        );
-        if ui::shell::tool_button(&mut self.ui, "button", art::NOTEBOOK, tint, None).clicked {
+        let (icon, tint) = if self.sidebar {
+            (art::CLOSE, self.ui.theme.text)
+        } else {
+            let color = self.notebook().and_then(|library| library.color());
+            (art::NOTEBOOK, crate::notebook_color(&self.ui.theme, color))
+        };
+        if ui::shell::tool_button(&mut self.ui, "button", icon, tint, None).clicked {
             self.sidebar = !self.sidebar;
             self.save_settings();
         }
-        crate::tip(&mut self.ui, crate::commands::Id::Sidebar);
+        crate::tip(&mut self.ui, Cmd::Sidebar);
         self.ui.close();
     }
 
