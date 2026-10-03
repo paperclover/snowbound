@@ -12,7 +12,7 @@ use std::{
     fmt,
     ops::Range,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
@@ -113,55 +113,18 @@ pub(crate) const DEFAULT_FONT: &str = "Arial";
 pub(crate) const DEFAULT_FONT_SIZE: f32 = 11.0;
 
 /// Metric-compatible faces for the fonts OneNote pages use most, under the SIL Open Font
-/// Licence files beside them, by the family each stands in for. Each is left out where the
-/// system ships the family it stands in for: Windows ships all four, macOS and iOS all but
-/// Calibri. The browser fetches them beside the module instead (`register_substitute`),
-/// keeping them out of it.
-#[cfg(not(any(windows, target_arch = "wasm32")))]
-const BUNDLED: &[(&str, &[&[u8]])] = &[
-    (
-        "Calibri",
-        &[
-            include_bytes!("../assets/fonts/Carlito-Regular.ttf"),
-            include_bytes!("../assets/fonts/Carlito-Bold.ttf"),
-            include_bytes!("../assets/fonts/Carlito-Italic.ttf"),
-            include_bytes!("../assets/fonts/Carlito-BoldItalic.ttf"),
-        ],
-    ),
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    (
-        "Arial",
-        &[
-            include_bytes!("../assets/fonts/Arimo.ttf"),
-            include_bytes!("../assets/fonts/Arimo-Italic.ttf"),
-        ],
-    ),
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    (
-        "Times New Roman",
-        &[
-            include_bytes!("../assets/fonts/Tinos-Regular.ttf"),
-            include_bytes!("../assets/fonts/Tinos-Bold.ttf"),
-            include_bytes!("../assets/fonts/Tinos-Italic.ttf"),
-            include_bytes!("../assets/fonts/Tinos-BoldItalic.ttf"),
-        ],
-    ),
-    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
-    (
-        "Courier New",
-        &[
-            include_bytes!("../assets/fonts/Cousine-Regular.ttf"),
-            include_bytes!("../assets/fonts/Cousine-Bold.ttf"),
-            include_bytes!("../assets/fonts/Cousine-Italic.ttf"),
-            include_bytes!("../assets/fonts/Cousine-BoldItalic.ttf"),
-        ],
-    ),
-];
+/// Licence files beside them, deflated, by the family each stands in for. The build script
+/// leaves out each whose family the system ships, and every one from the browser's module,
+/// which fetches them beside it instead (`register_substitute`).
+const BUNDLED: &[(&str, &[&[u8]])] = include!(concat!(env!("OUT_DIR"), "/bundled.rs"));
+
+/// Each bundled family's faces, inflated the first time an engine lacks the family.
+static INFLATED: [OnceLock<Vec<Blob<u8>>>; BUNDLED.len()] =
+    [const { OnceLock::new() }; BUNDLED.len()];
 
 impl Default for TextEngine {
     /// An engine that lays out each bundled family in its substitute where it is missing.
     fn default() -> Self {
-        #[cfg_attr(any(windows, target_arch = "wasm32"), allow(unused_mut))]
         let mut engine = Self {
             // Clones share loaded font files, so glyphs one lays out draw from the same cache.
             fonts: FontContext {
@@ -172,14 +135,23 @@ impl Default for TextEngine {
             arial_substitutes: BTreeSet::new(),
             substitutes: BTreeMap::new(),
         };
-        #[cfg(not(any(windows, target_arch = "wasm32")))]
-        for &(family, faces) in BUNDLED {
-            if engine.fonts.collection.family_id(family).is_none() {
-                for face in faces {
-                    engine
-                        .register(Blob::new(Arc::new(*face)), true)
-                        .expect("bundled substitutes register");
-                }
+        for (&(family, faces), inflated) in BUNDLED.iter().zip(&INFLATED) {
+            if engine.fonts.collection.family_id(family).is_some() {
+                continue;
+            }
+            let faces = inflated.get_or_init(|| {
+                faces
+                    .iter()
+                    .map(|face| {
+                        let face = miniz_oxide::inflate::decompress_to_vec(face);
+                        Blob::new(Arc::new(face.expect("bundled substitutes inflate")))
+                    })
+                    .collect()
+            });
+            for face in faces {
+                engine
+                    .register(face.clone(), true)
+                    .expect("bundled substitutes register");
             }
         }
         engine
