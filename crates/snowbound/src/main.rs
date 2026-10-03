@@ -693,10 +693,11 @@ enum Command {
     CloseNotebook(Arc<Library>),
     /// Changes a notebook's sections and groups.
     Structure(Arc<Library>, manage::Structure),
-    /// Adds a page at the end of the open section, or a subpage of a page, and edits its
-    /// title.
+    /// Adds a page at the end of the open section, or a subpage of a page, titled `title`
+    /// or untitled, and edits its title.
     NewPage {
         under: Option<ExGuid>,
+        title: String,
     },
     /// Deletes pages of the open section to the notebook's recycle bin.
     DeletePages(Vec<ExGuid>),
@@ -3414,8 +3415,8 @@ impl State {
                 self.restructure(library, change);
             }
             // The index follows the section's page list.
-            Command::NewPage { under } => {
-                self.new_page(under)?;
+            Command::NewPage { under, title } => {
+                self.new_page(under, &title)?;
                 self.edited(Vec::new());
             }
             Command::DeletePages(pages) => {

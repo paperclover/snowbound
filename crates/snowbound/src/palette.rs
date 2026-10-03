@@ -31,6 +31,8 @@ struct Row {
     disabled: bool,
     /// Repeats a row listed further on, as the recent ones do.
     repeated: bool,
+    /// Offered only when nothing else matches the query.
+    fallback: bool,
     target: Option<Target>,
 }
 
@@ -52,6 +54,7 @@ impl Row {
             heading: self.target.is_none(),
             separated: self.target.is_none(),
             repeated: self.repeated,
+            fallback: self.fallback,
             ..Item::default()
         }
     }
@@ -155,6 +158,22 @@ impl State {
             })
         }));
         drop(index);
+        // Typed text matching nothing becomes the title of a new page here.
+        let typed = ui::popup::query(&self.ui, id())
+            .map(str::trim)
+            .unwrap_or_default();
+        if !typed.is_empty() && !typed.starts_with(COMMANDS) {
+            places.push(Row {
+                text: format!("Create Page “{typed}”"),
+                icon: Some(art::NEW_PAGE),
+                disabled: !self
+                    .status(&Choice::Command(commands::Id::NewPage), &format)
+                    .enabled,
+                fallback: true,
+                target: Some(Target::NewPage(typed.to_owned())),
+                ..Row::default()
+            });
+        }
         let mut items =
             [&commands, &places].map(|rows| rows.iter().map(Row::item).collect::<Vec<_>>());
         // The latest page or section starts highlighted, so Enter goes back to it.
@@ -190,6 +209,17 @@ impl State {
         };
         // Run or Open leads, as Enter on the row does.
         let (keys, first) = match target {
+            Target::NewPage(_) => (
+                String::new(),
+                (
+                    Action::Run,
+                    Item {
+                        text: "Run",
+                        icon: Some(art::NEW_PAGE),
+                        ..Item::default()
+                    },
+                ),
+            ),
             Target::Command(id) => (
                 commands::shortcut(id),
                 (

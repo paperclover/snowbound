@@ -101,13 +101,14 @@ fn unused(taken: &[String], base: &str, numbered: bool) -> String {
 }
 
 impl State {
-    /// A page OneNote 2010 would create now: titled in the Default font's face, with its date
-    /// and time.
+    /// A page OneNote 2010 would create now, titled `title` in the Default font's face, with
+    /// its date and time.
     pub(crate) fn dated_page(
         &self,
         before: Option<ExGuid>,
+        title: &str,
     ) -> Result<PageCreation, Box<dyn Error>> {
-        let creation = PageCreation::new(before, Some(""), &self.author)?.titled_in(
+        let creation = PageCreation::new(before, Some(title), &self.author)?.titled_in(
             &self.view.editor.default_font.face,
             self.view.editor.default_font.color,
         )?;
@@ -115,9 +116,14 @@ impl State {
         Ok(creation.dated(&date, &time)?)
     }
 
-    /// Adds a page at the end of the open section, or a subpage of page `under`, and opens
-    /// it with its title ready for typing, as OneNote's New Page and New Subpage do.
-    pub(crate) fn new_page(&mut self, under: Option<ExGuid>) -> Result<(), Box<dyn Error>> {
+    /// Adds a page titled `title` at the end of the open section, or a subpage of page
+    /// `under`, and opens it with its title ready for typing, as OneNote's New Page and New
+    /// Subpage do.
+    pub(crate) fn new_page(
+        &mut self,
+        under: Option<ExGuid>,
+        title: &str,
+    ) -> Result<(), Box<dyn Error>> {
         self.persist()?;
         let session = self.session.as_ref().ok_or("No section is open")?;
         // A subpage follows its page and the subpages already under it.
@@ -136,7 +142,7 @@ impl State {
         } else {
             (None, 1)
         };
-        let creation = self.dated_page(None)?;
+        let creation = self.dated_page(None, title)?;
         let space = creation.space();
         let mut ops = vec![Op::Section(SectionOp::Create(creation))];
         if under.is_some() {
@@ -430,7 +436,7 @@ impl State {
         &mut self,
         root: std::path::PathBuf,
     ) -> Result<(), Box<dyn Error>> {
-        let page = self.dated_page(None)?;
+        let page = self.dated_page(None, "")?;
         let (cache, notify) = (self.cache.clone(), notify(self.proxy.clone()));
         let theme = self.notebook_theme.clone();
         self.load(move || {
@@ -651,7 +657,7 @@ impl State {
     /// section the change leaves open: a new or moved one, or the one shown before.
     pub(crate) fn restructure(&mut self, library: Arc<Library>, change: Structure) {
         let page = match change {
-            Structure::NewSection { .. } => match self.dated_page(None) {
+            Structure::NewSection { .. } => match self.dated_page(None, "") {
                 Ok(page) => Some(page),
                 Err(error) => {
                     return platform::alert(

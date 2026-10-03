@@ -77,6 +77,8 @@ pub struct Item<'a> {
     pub heading: bool,
     /// Repeats an item listed further on, so shows only while unfiltered.
     pub repeated: bool,
+    /// Offered only when a query leaves nothing else, which it never filters out.
+    pub fallback: bool,
     /// A tag after the text, as `badge` draws one.
     pub badge: Option<&'a str>,
 }
@@ -1509,15 +1511,17 @@ impl<'a> Matches<'a> {
             Normalization::Smart,
             AtomKind::Fuzzy,
         );
-        let order: Vec<usize> = if pattern.atoms.is_empty() {
-            (0..items.len()).collect()
+        let mut order: Vec<usize> = if pattern.atoms.is_empty() {
+            (0..items.len())
+                .filter(|index| !items[*index].fallback)
+                .collect()
         } else {
             let mut chars = Vec::new();
             let mut ranked: Vec<_> = MATCHER.with_borrow_mut(|matcher| {
                 items
                     .iter()
                     .enumerate()
-                    .filter(|(_, item)| !item.heading && !item.repeated)
+                    .filter(|(_, item)| !item.heading && !item.repeated && !item.fallback)
                     .filter_map(|(index, item)| {
                         let text = Utf32Str::new(item.text, &mut chars);
                         Some((pattern.score(text, matcher)?, index))
@@ -1528,6 +1532,9 @@ impl<'a> Matches<'a> {
             ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
             ranked.into_iter().map(|(_, index)| index).collect()
         };
+        if order.is_empty() && !pattern.atoms.is_empty() {
+            order.extend((0..items.len()).filter(|index| items[*index].fallback));
+        }
         let mut rows = vec![None; items.len()];
         for (row, index) in order.iter().enumerate() {
             rows[*index] = Some(row);

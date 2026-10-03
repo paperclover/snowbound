@@ -196,6 +196,36 @@ fn the_palette_lists_recent_pages_and_the_actions_a_context_menu_offers() {
     );
 }
 
+#[test]
+fn the_palette_makes_a_page_of_a_query_matching_nothing() {
+    let scratch = Scratch::new("palette-create");
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
+    let steps = [
+        "modifiers command",
+        "key p",
+        "modifiers",
+        "settle",
+        "type Zebra crossings",
+        "settle",
+        "accessibility offered",
+        "key Enter",
+        "settle",
+        "accessibility made",
+    ];
+    let [offered, made] = replay(&scratch, Some(&notebook), &steps)
+        .try_into()
+        .unwrap();
+    assert!(
+        offered.contains(r#""Create Page “Zebra crossings”""#),
+        "{offered}"
+    );
+    assert!(
+        page_tabs(&made).contains(&"*Zebra crossings".to_owned()),
+        "{made}"
+    );
+}
+
 /// The page tabs listed in `tree`, the selected one marked with `*`.
 fn page_tabs(tree: &str) -> Vec<String> {
     tree.lines()

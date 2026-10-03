@@ -74,6 +74,8 @@ pub enum Target {
     Closed(String),
     /// A server saved to reconnect to, by address.
     Server(String),
+    /// A page to add to the open section, by its title.
+    NewPage(String),
     Command(commands::Id),
 }
 
@@ -531,7 +533,7 @@ impl State {
             Target::Closed(_) | Target::Server(_) => {
                 vec![item(Action::Delete, "Remove from Recent", false, false)]
             }
-            Target::Command(_) => Vec::new(),
+            Target::Command(_) | Target::NewPage(_) => Vec::new(),
         }
     }
 
@@ -673,6 +675,7 @@ impl State {
                 self.choose(Choice::Command(id));
                 None
             }
+            (Target::NewPage(title), _) => Some(Command::NewPage { under: None, title }),
             (
                 Target::Page {
                     library,
@@ -911,8 +914,14 @@ impl State {
                 }
                 None
             }
-            Action::NewPage => Some(Command::NewPage { under: None }),
-            Action::NewSubpage => Some(Command::NewPage { under: Some(space) }),
+            Action::NewPage => Some(Command::NewPage {
+                under: None,
+                title: String::new(),
+            }),
+            Action::NewSubpage => Some(Command::NewPage {
+                under: Some(space),
+                title: String::new(),
+            }),
             Action::Theme => {
                 let session = self.session.as_ref()?;
                 let identity = session.section.page(space).ok()?.identity?;

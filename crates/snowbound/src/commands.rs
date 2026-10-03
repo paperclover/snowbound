@@ -1489,9 +1489,13 @@ impl State {
                     },
                 )
             }
-            Id::NewPage => Work::NewPage { under: None },
+            Id::NewPage => Work::NewPage {
+                under: None,
+                title: String::new(),
+            },
             Id::NewSubpage => Work::NewPage {
                 under: self.session.as_ref().map(|session| session.space),
+                title: String::new(),
             },
             Id::PageVersions => {
                 let session = self.session.as_ref().ok_or("No notebook is open")?;

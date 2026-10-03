@@ -1046,7 +1046,7 @@ impl State {
             replica: Arc::clone(session.section.replica()),
             library: Arc::clone(&session.library),
             author: self.author.clone(),
-            fresh: self.dated_page(None)?,
+            fresh: self.dated_page(None, "")?,
         };
         let shown = session.space;
         let proxy = self.proxy.clone();

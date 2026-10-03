@@ -2275,6 +2275,17 @@ fn fuzzy_matches_rank_whole_words_first_and_ties_keep_their_order() {
 }
 
 #[test]
+fn a_fallback_shows_only_when_a_query_leaves_nothing_else() {
+    let mut items = fonts();
+    let last = items.len() - 1;
+    items[last].fallback = true;
+    let order = |query| popup::Matches::new(&items, query, 9.0).order;
+    assert!(!order("").contains(&last), "unfiltered");
+    assert!(!order("Arial").contains(&last), "others match");
+    assert_eq!(order("Cafe"), [last], "nothing else matches");
+}
+
+#[test]
 fn typing_more_never_reveals_what_a_shorter_query_filtered_out() {
     let fonts = fonts();
     for query in [
