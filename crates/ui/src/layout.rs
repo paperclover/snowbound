@@ -62,7 +62,11 @@ fn resolve(nodes: &mut [Built], popup: &[usize], index: usize, states: &HashMap<
     let around = match anchor {
         Anchor::Point([x, y]) => [x, y, x, y],
         Anchor::Dialog | Anchor::Top => [0.0; 4],
-        Anchor::Below(id) | Anchor::Tip(id) | Anchor::Right(id) | Anchor::Over(id) => {
+        Anchor::Below(id)
+        | Anchor::Tip(id)
+        | Anchor::Right(id)
+        | Anchor::Over(id)
+        | Anchor::Dock(id) => {
             let (rect, holder) = laid_out(id).unwrap_or_default();
             let [left, top, right, bottom] = rect;
             match anchor {
@@ -75,6 +79,7 @@ fn resolve(nodes: &mut [Built], popup: &[usize], index: usize, states: &HashMap<
                     [left, top - pad_y, right, bottom + pad_y]
                 }
                 Anchor::Over(_) => [left - pad_x, top - pad_y, right + pad_x, bottom + pad_y],
+                Anchor::Dock(_) => rect,
                 _ => [left, top - PAD, right, bottom + PAD],
             }
         }

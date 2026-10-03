@@ -27,7 +27,8 @@ it is, and it settles fast. Popups open and close on short timed curves,
 slow enough to follow: a menu swings out of the pointer or its button as it
 fades in, a combo's field widens into its list, and a dialog swings up into
 place near the window's top over a dimmed window, as Windows opens a window; the
-command palette swings in the same way, undimmed. A filtered list shows its new
+command palette swings in the same way, undimmed, as does a dialog docked inside the
+page it changes, such as the backgrounds gallery. A filtered list shows its new
 results at once. On GNOME and KDE, menus instead
 look and move as the desktop's own (see [platforms](platforms.md)). A segmented control
 slides a raised face along a track, as macOS, libadwaita and Windows 11 draw theirs, and on

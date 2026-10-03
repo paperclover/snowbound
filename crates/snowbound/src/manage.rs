@@ -180,23 +180,13 @@ impl State {
         Ok(())
     }
 
-    /// Gives the open page `choice`'s background: a template's art in place of any it
-    /// had, or a page colour instead of art.
-    pub(crate) fn apply_template(
-        &mut self,
-        choice: crate::templates::Choice,
-    ) -> Result<(), Box<dyn Error>> {
-        use crate::templates::Choice;
-        let template = match choice {
-            Choice::Template(name) => {
-                Some(canvas::template::find(name).ok_or("That template is not available")?)
-            }
-            _ => None,
-        };
-        self.with_art(template, move |state, art| {
+    /// Gives the open page template `name`'s art in place of any it had.
+    pub(crate) fn apply_template(&mut self, name: &'static str) -> Result<(), Box<dyn Error>> {
+        let template = canvas::template::find(name).ok_or("That template is not available")?;
+        self.with_art(Some(template), move |state, art| {
             state.persist()?;
             let session = state.session.as_ref().ok_or("No section is open")?;
-            let ops = template_ops(&session.section.page(session.space)?, choice, art)?;
+            let ops = template_ops(&session.section.page(session.space)?, name, art)?;
             state.edit_page(ops)
         })
     }
@@ -561,7 +551,6 @@ impl State {
             self.persist().unwrap_or_else(|error| eprintln!("{error}"));
             self.session = None;
             self.sectionless = None;
-            self.templates = crate::templates::View::Strip;
             match self
                 .notebooks
                 .iter()
@@ -966,35 +955,23 @@ impl State {
     }
 }
 
-/// The ops giving `page` `choice`'s background: its template art or a page colour, in
-/// place of the background it had.
+/// The ops giving `page` template `name`'s art, `art`, in place of the background it had,
+/// and no page colour.
 pub fn template_ops(
     page: &Page,
-    choice: crate::templates::Choice,
+    name: &str,
     art: Vec<Image>,
 ) -> Result<Vec<PageOp>, Box<dyn Error>> {
-    use crate::templates::Choice;
-    let mut ops = match choice {
-        Choice::Template(_) | Choice::Color(_) => art_ops(page, art),
-        Choice::More | Choice::Dismiss | Choice::Colors => return Ok(Vec::new()),
-    };
-    match choice {
-        Choice::Template(name) => {
-            if page.color.is_some() {
-                ops.push(PageOp::Color(None));
-            }
-            // The one template with content worth keeping.
-            if name == "Informal Meeting Notes" {
-                ops.extend(onestore::op::lower_page(
-                    page,
-                    &crate::meeting::content(page)?,
-                )?);
-            }
-        }
-        Choice::Color(index) => {
-            ops.push(PageOp::Color(Some(canvas::template::PAGE_COLORS[index].1)))
-        }
-        Choice::More | Choice::Dismiss | Choice::Colors => {}
+    let mut ops = art_ops(page, art);
+    if page.color.is_some() {
+        ops.push(PageOp::Color(None));
+    }
+    // The one template with content worth keeping.
+    if name == "Informal Meeting Notes" {
+        ops.extend(onestore::op::lower_page(
+            page,
+            &crate::meeting::content(page)?,
+        )?);
     }
     Ok(ops)
 }
@@ -1031,7 +1008,6 @@ fn art_ops(page: &Page, art: Vec<Image>) -> Vec<PageOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::templates::Choice;
     use std::path::Path;
 
     const AUTHOR: &str = "Rust Author";
@@ -1153,27 +1129,27 @@ mod tests {
         let [ivy, teal, subpage, deleted, meeting] = spaces[..] else {
             unreachable!()
         };
-        let background = |space: ExGuid, choice: Choice| {
-            let art = match choice {
-                Choice::Template(name) => canvas::template::find(name).unwrap().pictures().unwrap(),
-                _ => Vec::new(),
-            };
-            template_ops(&page(&file, space), choice, art)
+        let background = |space: ExGuid, name: &str| {
+            let art = canvas::template::find(name).unwrap().pictures().unwrap();
+            template_ops(&page(&file, space), name, art)
                 .unwrap()
                 .into_iter()
                 .map(|op| Op::Page { space, op })
                 .collect::<Vec<_>>()
         };
-        edit(&file, background(ivy, Choice::Template("Ivy")));
+        edit(&file, background(ivy, "Ivy"));
+        edit(&file, background(meeting, "Informal Meeting Notes"));
+        let (_, teal_color) = canvas::template::PAGE_COLORS
+            .iter()
+            .find(|(name, _)| *name == "Teal")
+            .unwrap();
         edit(
             &file,
-            background(meeting, Choice::Template("Informal Meeting Notes")),
+            vec![Op::Page {
+                space: teal,
+                op: PageOp::Color(Some(*teal_color)),
+            }],
         );
-        let teal_index = canvas::template::PAGE_COLORS
-            .iter()
-            .position(|(name, _)| *name == "Teal")
-            .unwrap();
-        edit(&file, background(teal, Choice::Color(teal_index)));
         edit(
             &file,
             vec![Op::Section(SectionOp::Pages(vec![
@@ -1275,10 +1251,7 @@ mod tests {
             ]
         );
         let shown = page(&file, teal);
-        assert_eq!(
-            shown.color,
-            Some(canvas::template::PAGE_COLORS[teal_index].1)
-        );
+        assert_eq!(shown.color, Some(*teal_color));
         assert!(shown.date_text().is_some());
         assert!(
             page(&file, ivy)

@@ -4,7 +4,7 @@
 use crate::{
     art,
     commands::Choice,
-    templates::{TILE, Thumbnails, View},
+    templates::{TILE, Thumbnails},
 };
 use canvas::{
     gpu::{Paper, colorref},
@@ -42,7 +42,8 @@ enum Cell {
 
 /// Builds popup `id` beside `anchor` while it is open, for a page on `paper` (its own colour
 /// aside) coloured `color` and ruled with `rule_lines`, and the custom colour picker it
-/// opens. Show All opens every template's art over the page through `view`. Returns the
+/// opens, or with `colors_only` only its page colours. Show All opens the backgrounds
+/// gallery. Sets `preview` to the page colour highlighted or being picked. Returns the
 /// choice made.
 #[allow(clippy::too_many_arguments)]
 pub fn menu(
@@ -50,10 +51,11 @@ pub fn menu(
     id: Id,
     anchor: Anchor,
     thumbnails: &mut Thumbnails,
-    view: &mut View,
     paper: Paper,
     color: Option<u32>,
     rule_lines: Option<RuleLines>,
+    colors_only: bool,
+    preview: &mut Option<Option<u32>>,
 ) -> Option<Choice> {
     let picker = id.child("custom");
     // A pale blue to start from on a page without a colour.
@@ -73,6 +75,9 @@ pub fn menu(
         return Some(Choice::PageColor(Some(u32::from_le_bytes([
             red, green, blue, 0,
         ]))));
+    }
+    if let Some([red, green, blue]) = ui::popup::picking(ui, picker) {
+        *preview = Some(Some(u32::from_le_bytes([red, green, blue, 0])));
     }
     let custom = color.filter(|color| !PAGE_COLORS.iter().any(|(_, listed)| listed == color));
     let cells: Vec<Cell> = std::iter::once(Cell::Color(None))
@@ -148,7 +153,8 @@ pub fn menu(
             },
         );
     };
-    let chosen = ui::popup::gallery(ui, id, anchor, &groups, &current, |ui, index| {
+    let groups = if colors_only { &groups[..1] } else { &groups };
+    let chosen = ui::popup::gallery(ui, id, anchor, groups, &current, |ui, index| {
         let name = match cells[index] {
             Cell::Color(Some(color)) => PAGE_COLORS
                 .iter()
@@ -236,7 +242,11 @@ pub fn menu(
             }
             Cell::Rules(Some(index)) => rule_thumbnail(ui, paper, RULE_LINES[index]),
         }
-    })?;
+    });
+    if let Some(Cell::Color(color)) = ui::popup::highlight(ui, id).map(|index| cells[index]) {
+        *preview = Some(color);
+    }
+    let chosen = chosen?;
     match cells[chosen] {
         Cell::Color(color) => Some(Choice::PageColor(color)),
         Cell::Custom => {
@@ -245,7 +255,7 @@ pub fn menu(
         }
         Cell::Art(name) => Some(Choice::Art(name)),
         Cell::ShowAll => {
-            *view = View::Art;
+            ui.open_popup(crate::templates::backgrounds());
             None
         }
         Cell::Rules(index) => Some(Choice::RuleLines(index)),

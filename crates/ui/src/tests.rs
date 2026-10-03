@@ -1841,6 +1841,60 @@ fn colour_grids_move_in_two_dimensions_and_choose_a_swatch_or_none() {
 }
 
 #[test]
+fn colour_grids_highlight_the_swatch_pointed_at_until_the_pointer_leaves() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let grid = Id::ROOT.child("colours");
+    let swatches = [([1.0, 0.0, 0.0, 1.0], ""), ([0.0, 1.0, 0.0, 1.0], "")];
+    let build = |ui: &mut Ui| {
+        frame(ui, |ui| {
+            let anchor = below(ui);
+            popup::colors(ui, grid, anchor, "Automatic", &swatches, 2);
+        });
+    };
+    build(&mut ui);
+    ui.open_popup(grid);
+    for _ in 0..40 {
+        build(&mut ui);
+    }
+    let rect = ui.laid_out(grid.child(("cell", 2_usize))).unwrap();
+    ui.event(Event::PointerMoved([rect[0] + 4.0, rect[1] + 4.0]));
+    build(&mut ui);
+    assert_eq!(popup::highlight(&ui, grid), Some(2));
+    ui.event(Event::PointerMoved([399.0, 299.0]));
+    build(&mut ui);
+    assert_eq!(popup::highlight(&ui, grid), None);
+}
+
+#[test]
+fn docked_popups_lie_inside_their_box_along_its_trailing_edge() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let dock = Id::ROOT.child("dock");
+    let build = |ui: &mut Ui| {
+        frame(ui, |ui| {
+            let page = spot(ui, [20.0, 40.0, 380.0, 290.0]);
+            if ui.popup_open(dock) {
+                ui.open_as(
+                    dock,
+                    Spec {
+                        size: [px(100.0), px(200.0)],
+                        anchor: Some(Anchor::Dock(page)),
+                        ..Spec::default()
+                    },
+                );
+                ui.close();
+            }
+        });
+    };
+    build(&mut ui);
+    ui.open_popup(dock);
+    for _ in 0..40 {
+        build(&mut ui);
+    }
+    let [left, top, right, bottom] = ui.laid_out(dock).unwrap();
+    assert_eq!([left, top, right, bottom], [276.0, 44.0, 376.0, 244.0]);
+}
+
+#[test]
 fn table_pickers_choose_columns_and_rows_by_keys_or_a_click() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let grid = Id::ROOT.child("table");

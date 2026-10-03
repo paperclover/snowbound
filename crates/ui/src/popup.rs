@@ -890,7 +890,8 @@ fn highlighted(ui: &mut Ui, id: Id, cell: Option<Id>) {
 }
 
 /// Routes the pointer and keys over open popup `id`'s `count` cells, keeping its highlight,
-/// which `step` moves for each arrow. Returns the highlight and the cell a click or Enter chose.
+/// which `step` moves for each arrow and the pointer leaving the popup clears. Returns the
+/// highlight and the cell a click or Enter chose.
 fn pick_cell(
     ui: &mut Ui,
     id: Id,
@@ -910,6 +911,15 @@ fn pick_cell(
         ],
     );
     let mut highlight = state(ui, id).highlight.map(|cell| cell as usize);
+    let outside =
+        ui.pointer()
+            .zip(ui.laid_out(id))
+            .is_some_and(|([x, y], [left, top, right, bottom])| {
+                x < left || x >= right || y < top || y >= bottom
+            });
+    if outside && ui.moved {
+        highlight = None;
+    }
     let mut chosen = None;
     for index in 0..count {
         let signal = ui.signal(cell(index));
@@ -928,6 +938,13 @@ fn pick_cell(
     }
     state(ui, id).highlight = highlight.map(|cell| cell as u64);
     (highlight, chosen)
+}
+
+/// The cell open popup `id`, a grid or gallery, highlights: under the pointer or reached by
+/// the arrows.
+pub fn highlight(ui: &Ui, id: Id) -> Option<usize> {
+    let popup = ui.popups.iter().find(|popup| popup.id == id)?;
+    popup.highlight.map(|cell| cell as usize)
 }
 
 /// Builds popup `id` as a grid of `size` columns and rows beside `anchor` while it is open,
@@ -1367,6 +1384,12 @@ pub fn color_picker(
     ui.close();
     ui.close();
     None
+}
+
+/// The colour open colour picker `id` shows, sRGB, before it is applied.
+pub fn picking(ui: &Ui, id: Id) -> Option<[u8; 3]> {
+    let popup = ui.popups.iter().find(|popup| popup.id == id)?;
+    popup.picked.map(from_hsl)
 }
 
 /// Hue in degrees, saturation and lightness of an sRGB colour.

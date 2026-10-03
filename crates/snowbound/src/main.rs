@@ -718,8 +718,8 @@ enum Command {
         space: ExGuid,
         path: String,
     },
-    /// Gives the open page a template's background or colour.
-    Template(templates::Choice),
+    /// Gives the open page a template's background.
+    Template(&'static str),
     OpenPage(ExGuid),
     /// Shows a page's conflict pages in the list and opens the newest, or hides them.
     Versions {
@@ -902,8 +902,8 @@ struct State {
     dismissed: HashSet<ExGuid>,
     /// A page just created, whose title takes the caret once it opens.
     title_focus: Option<ExGuid>,
-    /// What the template strip shows over a blank page.
-    templates: templates::View,
+    /// The page colour a menu previews over the open page's own this frame.
+    page_color_preview: Option<Option<u32>>,
     media: recording::Media,
     /// Whether playback highlights the notes linked to the moment playing.
     see_playback: bool,
@@ -1349,7 +1349,7 @@ impl State {
                 .map(|id| notebook::sidecar::themes::successor(&id).to_owned()),
             live_options: stored.live,
             drag: None,
-            templates: templates::View::Strip,
+            page_color_preview: None,
             media: Default::default(),
             see_playback: true,
             thumbnails: templates::Thumbnails::default(),
@@ -1560,7 +1560,12 @@ impl State {
     fn layout(&mut self, size: [f32; 2], scale: f32) -> Result<(), Box<dyn Error>> {
         self.ui.begin(size, scale, Instant::now());
         platform::cover_border_line(&mut self.ui, size[0]);
+        let previewed = self.page_color_preview;
         let (section, open_tab, open_page) = self.build()?;
+        // The page's frame and tab were built with last frame's preview.
+        if self.page_color_preview != previewed {
+            self.ui.wake_after(std::time::Duration::ZERO);
+        }
         self.options_dialog();
         self.themes_dialog();
         self.print_dialog();
@@ -1677,6 +1682,7 @@ impl State {
         // The page, and the open page's tab joined to it, take the page's colour.
         let mut theme = self.ui.theme.clone();
         theme.paper = self.paper().color;
+        self.page_color_preview = None;
         platform::update_menu(|| self.statuses());
         let welcome = self.session.is_none()
             && !self.temporary
@@ -3049,7 +3055,6 @@ impl State {
                     menu,
                     anchor,
                     &mut self.thumbnails,
-                    &mut self.templates,
                     // The page's own colour aside.
                     canvas::gpu::Paper {
                         color: ui.theme.paper,
@@ -3057,6 +3062,8 @@ impl State {
                     },
                     self.view.editor.page_color(),
                     self.view.editor.rule_lines(),
+                    false,
+                    &mut self.page_color_preview,
                 )
             },
             |_| None,
@@ -3624,7 +3631,7 @@ impl State {
                 self.move_page(space, path)?;
                 self.edited(Vec::new());
             }
-            Command::Template(choice) => self.apply_template(choice)?,
+            Command::Template(name) => self.apply_template(name)?,
             Command::Page(Request::EditDate(field)) => self.edit_date(field),
             Command::Page(Request::Copy(clip)) => self.clipboard.set(clip)?,
             Command::Page(Request::Paste) => self.paste()?,
@@ -4557,13 +4564,16 @@ impl State {
         self.window.request_redraw();
     }
 
-    /// The paper the open page lies on: the theme's, in the page's colour.
+    /// The paper the open page lies on: the theme's, in the page's colour or the one previewed.
     fn paper(&self) -> canvas::gpu::Paper {
         canvas::gpu::Paper {
             color: self.ui.theme.paper,
             ink: self.ui.theme.paper_ink,
         }
-        .colored(self.view.editor.page_color())
+        .colored(
+            self.page_color_preview
+                .unwrap_or_else(|| self.view.editor.page_color()),
+        )
     }
 
     /// The colours of what the page area shows in place of a page, which follow the page's:

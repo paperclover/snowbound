@@ -1,19 +1,18 @@
 //! The template strip a new page shows where its body would start until the body is typed
-//! in, and the gallery of every template it leads to.
+//! in, and the galleries of every template docked beside the page.
 
 use crate::art;
 use canvas::{
     gpu::Paper,
-    template::{PAGE_COLORS, TEMPLATES, Template},
+    template::{TEMPLATES, Template},
 };
 use draw::RasterImage;
 use std::collections::HashMap;
-use ui::{Axis, Flags, Spec, Theme, Ui, fill, px};
+use ui::{Anchor, Axis, Flags, Id, Spec, Theme, Ui, fill, px};
 
 /// What a thumbnail shows: the top of a letter page, in points from the page origin.
 const REGION: [f32; 4] = [-72.0, -40.0, 540.0, 419.0];
 pub(crate) const TILE: [f32; 2] = [112.0, 84.0];
-const SWATCH: f32 = 24.0;
 const LABEL: f32 = 22.0;
 const GAP: f32 = 12.0;
 const PAD: f32 = 10.0;
@@ -30,26 +29,28 @@ const STRIP: [(Choice, &str); 5] = [
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Choice {
+enum Choice {
     Template(&'static str),
-    /// An index into `PAGE_COLORS`.
-    Color(usize),
-    /// Shows or hides the page colours.
+    /// Opens the Page Color menu over its tile.
     Colors,
     More,
     Dismiss,
 }
 
-/// What the template strip shows.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub enum View {
-    #[default]
-    Strip,
-    /// The strip with the page colours beneath it.
-    Colors,
-    Gallery,
-    /// Every template's art, from the Page Color menu, to lie behind the open page.
-    Art,
+/// The gallery of every template's art, from the Page Color menu's Show All, to lie behind
+/// the open page.
+pub fn backgrounds() -> Id {
+    Id::ROOT.child("backgrounds")
+}
+
+/// The gallery of every template, from the strip's More templates.
+fn templates() -> Id {
+    Id::ROOT.child("templates")
+}
+
+/// The page colours the strip's Solid Color opens.
+fn colors() -> Id {
+    Id::ROOT.child("strip colors")
 }
 
 /// A thumbnail's art: each raster and where it lies in the tile.
@@ -87,20 +88,17 @@ impl Thumbnails {
     }
 }
 
-/// The strip at `position` in the page box, `room` wide at most, with the page colours
-/// beneath while `colors`. Picks that do not fit give way from the end; More templates
-/// stays.
-#[allow(clippy::too_many_arguments)]
+/// The strip at `position` in the page box, `room` wide at most. Picks that do not fit give
+/// way from the end; More templates stays. Returns the pick and the Solid Color tile, where
+/// shown.
 fn strip(
     ui: &mut Ui,
     theme: &Theme,
     thumbnails: &mut Thumbnails,
     paper: Paper,
-    dark: bool,
     position: [f32; 2],
     room: f32,
-    colors: bool,
-) -> Option<Choice> {
+) -> (Option<Choice>, Option<Id>) {
     let more = (Choice::More, "More templates");
     let mut used = 2.0 * PAD + tile_width(ui, more.1);
     let mut shown = Vec::new();
@@ -117,6 +115,7 @@ fn strip(
         .sum::<f32>()
         - GAP;
     let mut chosen = None;
+    let mut solid = None;
     ui.open(
         "templates",
         Spec {
@@ -128,7 +127,6 @@ fn strip(
             shadow: Some(theme.shadow),
             radius: 8.0,
             pad: [PAD, PAD],
-            gap: 8.0,
             ..Spec::default()
         },
     );
@@ -141,46 +139,16 @@ fn strip(
         },
     );
     for (index, (choice, label)) in shown.into_iter().enumerate() {
-        if tile(ui, theme, thumbnails, paper, dark, index, choice, label) {
+        let width = tile_width(ui, label);
+        let tile = tile(ui, theme, thumbnails, paper, index, choice, label, width);
+        if choice == Choice::Colors {
+            solid = Some(tile);
+        }
+        if ui.signal(tile).clicked {
             chosen = Some(choice);
         }
     }
     ui.close();
-    let per_row = (((room - 2.0 * PAD + 6.0) / (SWATCH + 6.0)).floor() as usize).max(1);
-    for (row, swatches) in PAGE_COLORS.chunks(per_row).enumerate().filter(|_| colors) {
-        ui.open(
-            ("colors", row),
-            Spec {
-                size: [ui::children(), px(SWATCH)],
-                gap: 6.0,
-                ..Spec::default()
-            },
-        );
-        for (index, (name, color)) in swatches
-            .iter()
-            .enumerate()
-            .map(|(index, color)| (row * per_row + index, color))
-        {
-            let swatch = ui.leaf(
-                (index, *name),
-                Spec {
-                    flags: Flags::CLICKABLE,
-                    size: [px(SWATCH), px(SWATCH)],
-                    fill: Some(page_color(*color, paper, dark)),
-                    border: Some(theme.chip),
-                    hover_border: Some(theme.accent),
-                    radius: 4.0,
-                    role: Some(accesskit::Role::Button),
-                    ..Spec::default()
-                },
-            );
-            crate::name(ui, ui.id((index, *name)), name);
-            if swatch.clicked {
-                chosen = Some(Choice::Color(index));
-            }
-        }
-        ui.close();
-    }
     let close = ui.leaf(
         "dismiss",
         Spec {
@@ -203,37 +171,45 @@ fn strip(
         chosen = Some(Choice::Dismiss);
     }
     ui.close();
-    chosen
+    (chosen, solid)
 }
 
-/// Every template, or with `art` only their art, as a scrolling grid over the page box
-/// `size` big.
+/// Dialog `id`, titled `title`, of every template docked inside the page box's trailing edge,
+/// `height` tall, while it is open. Returns the template chosen; it stays open to choose again.
+#[allow(clippy::too_many_arguments)]
 fn gallery(
     ui: &mut Ui,
     theme: &Theme,
     thumbnails: &mut Thumbnails,
     paper: Paper,
-    dark: bool,
-    size: [f32; 2],
-    art: bool,
-) -> Option<Choice> {
+    id: Id,
+    title: &str,
+    height: f32,
+) -> Option<&'static str> {
+    if !ui.popup_open(id) {
+        return None;
+    }
     let mut chosen = None;
-    let margin = 24.0;
-    ui.open(
-        "gallery",
+    let column = TILE[0] + 40.0;
+    ui.open_as(
+        id,
         Spec {
-            flags: Flags::FLOAT | Flags::CLICKABLE,
             axis: Axis::Y,
-            size: [px(size[0] - 2.0 * margin), px(size[1] - 2.0 * margin)],
-            position: [margin, margin],
+            size: [px(2.0 * column + GAP + 2.0 * PAD), px(height)],
             fill: Some(theme.popup),
+            border: Some(theme.chip),
             shadow: Some(theme.shadow),
             radius: 8.0,
             pad: [PAD, PAD],
             gap: 8.0,
+            anchor: Some(Anchor::Dock(crate::page())),
+            role: Some(accesskit::Role::Dialog),
             ..Spec::default()
         },
     );
+    if let Some(node) = ui.access(id) {
+        node.set_label(title);
+    }
     ui.open(
         "header",
         Spec {
@@ -245,12 +221,14 @@ fn gallery(
         "title",
         Spec {
             size: [fill(), px(24.0)],
-            text: Some(if art { "Backgrounds" } else { "Page Templates" }),
+            text: Some(title),
+            bold: true,
+            role: Some(accesskit::Role::Heading),
             ..Spec::default()
         },
     );
     if ui::shell::tool_button(ui, "close", art::CLOSE, theme.text_dim, None).clicked {
-        chosen = Some(Choice::Dismiss);
+        ui.close_popup(id);
     }
     crate::name(ui, ui.id("close"), "Close");
     ui.close();
@@ -264,21 +242,7 @@ fn gallery(
             ..Spec::default()
         },
     );
-    let column = TILE[0] + 40.0;
-    let columns =
-        (((size[0] - 2.0 * margin - 2.0 * PAD + GAP) / (column + GAP)).floor() as usize).max(1);
-    let choices: Vec<(Choice, &str)> = TEMPLATES
-        .iter()
-        .map(|template| (Choice::Template(template.name), template.name))
-        .chain(
-            PAGE_COLORS
-                .iter()
-                .enumerate()
-                .map(|(index, (name, _))| (Choice::Color(index), *name))
-                .filter(|_| !art),
-        )
-        .collect();
-    for (row, choices) in choices.chunks(columns).enumerate() {
+    for (row, templates) in TEMPLATES.chunks(2).enumerate() {
         ui.open(
             row,
             Spec {
@@ -287,9 +251,20 @@ fn gallery(
                 ..Spec::default()
             },
         );
-        for (index, (choice, label)) in choices.iter().enumerate() {
-            if tile(ui, theme, thumbnails, paper, dark, index, *choice, label) {
-                chosen = Some(*choice);
+        for (index, template) in templates.iter().enumerate() {
+            let choice = Choice::Template(template.name);
+            let tile = tile(
+                ui,
+                theme,
+                thumbnails,
+                paper,
+                index,
+                choice,
+                template.name,
+                column,
+            );
+            if ui.signal(tile).clicked {
+                chosen = Some(template.name);
             }
         }
         ui.close();
@@ -299,43 +274,26 @@ fn gallery(
     chosen
 }
 
-/// A page colour as the paper shows it: on dark paper, its hue at the paper's lightness.
-fn page_color(color: u32, paper: Paper, dark: bool) -> [f32; 4] {
-    let color = canvas::gpu::colorref(color);
-    if !dark {
-        return color;
-    }
-    let [lightness, ..] = draw::oklab(paper.color);
-    let [_, a, b] = draw::oklab(color);
-    let [red, green, blue] = draw::from_oklab([lightness + 0.04, 2.0 * a, 2.0 * b]);
-    [red, green, blue, 1.0]
-}
-
 /// How wide a tile labelled `label` stands: its thumbnail, or the label where it is wider.
 fn tile_width(ui: &mut Ui, label: &str) -> f32 {
     TILE[0].max(ui.measure(label)[0] + 4.0)
 }
 
-/// One template's thumbnail over its label, as wide as the thumbnail or the label; true
-/// when clicked.
+/// One template's thumbnail over its label, `width` wide; returns the thumbnail, which takes
+/// the click.
 #[allow(clippy::too_many_arguments)]
 fn tile(
     ui: &mut Ui,
     theme: &Theme,
     thumbnails: &mut Thumbnails,
     paper: Paper,
-    dark: bool,
     part: usize,
     choice: Choice,
     label: &str,
-) -> bool {
+    width: f32,
+) -> Id {
     let scale = ui.scale();
-    let width = tile_width(ui, label);
-    let fill_color = match choice {
-        Choice::Color(index) => page_color(PAGE_COLORS[index].1, paper, dark),
-        Choice::More | Choice::Dismiss => theme.base,
-        Choice::Template(_) | Choice::Colors => paper.color,
-    };
+    let dark = paper.ink[0] > paper.color[0];
     ui.open(
         (part, label),
         Spec {
@@ -350,7 +308,11 @@ fn tile(
         Spec {
             flags: Flags::CLICKABLE | Flags::CLIP,
             size: [px(TILE[0]), px(TILE[1])],
-            fill: Some(fill_color),
+            fill: Some(if choice == Choice::More {
+                theme.base
+            } else {
+                paper.color
+            }),
             border: Some(theme.chip),
             hover_border: Some(theme.accent),
             radius: 4.0,
@@ -383,10 +345,11 @@ fn tile(
                 }
             }
         }
-        // A band of each of the first page colours.
+        // A band of each of the first page colours, as the page shows them.
         Choice::Colors => {
             let bands = 4;
-            for (index, (_, color)) in PAGE_COLORS.iter().take(bands).enumerate() {
+            for (index, (_, color)) in canvas::template::PAGE_COLORS.iter().take(bands).enumerate()
+            {
                 let band = TILE[0] / bands as f32;
                 ui.leaf(
                     ("band", index),
@@ -394,13 +357,13 @@ fn tile(
                         flags: Flags::FLOAT,
                         size: [px(band), px(TILE[1])],
                         position: [band * index as f32, 0.0],
-                        fill: Some(page_color(*color, paper, dark)),
+                        fill: Some(paper.colored(Some(*color)).color),
                         ..Spec::default()
                     },
                 );
             }
         }
-        _ => {}
+        Choice::More | Choice::Dismiss => {}
     }
     ui.close();
     ui.leaf(
@@ -414,121 +377,99 @@ fn tile(
         },
     );
     ui.close();
-    ui.signal(id).clicked
+    id
 }
 
 impl crate::State {
-    /// Over a page with nothing typed in its body: the strip where the body would start,
-    /// or the gallery it opened.
+    /// The template galleries while open, and over a page with nothing typed in its body the
+    /// strip where the body would start.
     pub(crate) fn template_strip(&mut self, theme: &Theme) {
         let Some(session) = &self.session else {
             return;
         };
-        if self.templates == View::Art {
-            return self.art_gallery(theme);
-        }
         let space = session.space;
+        let read_only = session.read_only();
+        let Some(rect) = self.ui.laid_out(crate::page()) else {
+            return;
+        };
+        // Thumbnails show templates on plain paper, not the page's colour.
+        let paper = Paper {
+            color: self.ui.theme.paper,
+            ink: self.ui.theme.paper_ink,
+        };
+        let height = rect[3] - rect[1] - 8.0;
+        if let Some(name) = gallery(
+            &mut self.ui,
+            theme,
+            &mut self.thumbnails,
+            paper,
+            backgrounds(),
+            "Backgrounds",
+            height,
+        ) {
+            self.choose(crate::commands::Choice::Art(Some(name)));
+        }
         let editor = &self.view.editor;
         let blank = editor
             .visible_outlines()
             .chain(editor.caret_outline())
             .filter(|outline| !outline.title)
             .all(canvas::editor::TextOutline::is_empty);
-        if !blank || session.read_only() || self.dismissed.contains(&space) {
-            self.templates = View::Strip;
+        if !blank || read_only || self.dismissed.contains(&space) {
             return;
         }
-        let (Some(rect), Some(start)) = (self.ui.laid_out(crate::page()), editor.body_start())
-        else {
+        let Some(start) = editor.body_start() else {
             return;
         };
+        let (color, rule_lines) = (editor.page_color(), editor.rule_lines());
         let viewport = self.view.viewport;
         let scale = self.ui.scale();
         let position = [
             (viewport.origin[0] + start[0] * viewport.scale) / scale,
             (viewport.origin[1] + (start[1] + LINES_ABOVE) * viewport.scale) / scale,
         ];
-        // Thumbnails show templates on plain paper, not the page's colour.
-        let paper = Paper {
-            color: self.ui.theme.paper,
-            ink: self.ui.theme.paper_ink,
-        };
-        let dark = paper.ink[0] > paper.color[0];
-        let chosen = match self.templates {
-            View::Gallery => {
-                let size = [rect[2] - rect[0], rect[3] - rect[1]];
-                gallery(
-                    &mut self.ui,
-                    theme,
-                    &mut self.thumbnails,
-                    paper,
-                    dark,
-                    size,
-                    false,
-                )
-            }
-            View::Art => unreachable!("The art gallery is built alone"),
-            view => strip(
-                &mut self.ui,
-                theme,
-                &mut self.thumbnails,
-                paper,
-                dark,
-                position,
-                rect[2] - rect[0] - position[0] - 24.0,
-                view == View::Colors,
-            ),
-        };
-        match chosen {
-            Some(Choice::More) => self.templates = View::Gallery,
-            Some(Choice::Colors) => {
-                self.templates = if self.templates == View::Colors {
-                    View::Strip
-                } else {
-                    View::Colors
-                }
-            }
-            Some(Choice::Dismiss) if self.templates == View::Gallery => {
-                self.templates = View::Strip
-            }
-            Some(Choice::Dismiss) => {
-                self.dismissed.insert(space);
-            }
-            Some(choice) => {
-                self.templates = View::Strip;
-                self.commands.push(crate::Command::Template(choice));
-            }
-            None => {}
-        }
-    }
-
-    /// The Page Color menu's Show All: every template's art, one of which goes behind the
-    /// open page.
-    fn art_gallery(&mut self, theme: &Theme) {
-        let Some(rect) = self.ui.laid_out(crate::page()) else {
-            return;
-        };
-        let paper = Paper {
-            color: self.ui.theme.paper,
-            ink: self.ui.theme.paper_ink,
-        };
-        let dark = paper.ink[0] > paper.color[0];
-        let size = [rect[2] - rect[0], rect[3] - rect[1]];
-        match gallery(
+        let (chosen, solid) = strip(
             &mut self.ui,
             theme,
             &mut self.thumbnails,
             paper,
-            dark,
-            size,
-            true,
-        ) {
-            Some(Choice::Template(name)) => {
-                self.templates = View::Strip;
-                self.choose(crate::commands::Choice::Art(Some(name)));
+            position,
+            rect[2] - rect[0] - position[0] - 24.0,
+        );
+        match chosen {
+            Some(Choice::Template(name)) => self.commands.push(crate::Command::Template(name)),
+            Some(Choice::Colors) => self.ui.open_popup(colors()),
+            Some(Choice::More) => self.ui.open_popup(templates()),
+            Some(Choice::Dismiss) => {
+                self.dismissed.insert(space);
             }
-            Some(Choice::Dismiss) => self.templates = View::Strip,
-            _ => {}
+            None => {}
+        }
+        if let Some(name) = gallery(
+            &mut self.ui,
+            theme,
+            &mut self.thumbnails,
+            paper,
+            templates(),
+            "Page Templates",
+            height,
+        ) {
+            self.commands.push(crate::Command::Template(name));
+        }
+        if let Some(choice) = solid.and_then(|tile| {
+            crate::background::menu(
+                &mut self.ui,
+                colors(),
+                Anchor::Below(tile),
+                &mut self.thumbnails,
+                paper,
+                color,
+                rule_lines,
+                true,
+                &mut self.page_color_preview,
+            )
+        }) {
+            self.choose(choice);
         }
     }
 }

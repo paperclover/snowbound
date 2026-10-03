@@ -530,12 +530,15 @@ mod tests {
         };
         let create = |creation| Op::Section(SectionOp::Create(creation));
         (section.apply("Author", edit(vec![create(dated), create(written)]))).unwrap();
-        let meeting = crate::templates::Choice::Template("Informal Meeting Notes");
-        let ops = crate::manage::template_ops(&section.page(space).unwrap(), meeting, Vec::new())
-            .unwrap()
-            .into_iter()
-            .map(|op| Op::Page { space, op })
-            .collect();
+        let ops = crate::manage::template_ops(
+            &section.page(space).unwrap(),
+            "Informal Meeting Notes",
+            Vec::new(),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|op| Op::Page { space, op })
+        .collect();
         section.apply("Author", edit(ops)).unwrap();
         // The template titles the page; its title goes, its text stays.
         let untitled = crate::rename::retitled(&section.page(space).unwrap(), space, String::new());

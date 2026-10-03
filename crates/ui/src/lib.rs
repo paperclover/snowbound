@@ -240,6 +240,9 @@ pub enum Anchor {
     /// Where a dialog opens, swinging in as one does but leaving the interface undimmed, as a
     /// command palette opens.
     Top,
+    /// Inside the box along its trailing edge, a dialog leaving the rest of the box in view and
+    /// the interface undimmed, as a side panel docks.
+    Dock(Id),
 }
 
 impl Anchor {
@@ -262,6 +265,10 @@ impl Anchor {
                 return ((room - size) / 2.0).max(POPUP_MARGIN);
             }
             Anchor::Dialog | Anchor::Top => return (room / 8.0).clamp(POPUP_MARGIN, most),
+            Anchor::Dock(_) if axis == 0 => {
+                return (around[2] - size - POPUP_MARGIN).clamp(POPUP_MARGIN, most);
+            }
+            Anchor::Dock(_) => return (around[1] + POPUP_MARGIN).clamp(POPUP_MARGIN, most),
         };
         let [low, high] = [around[axis], around[axis + 2]];
         let (first, second) = if along == Some(axis) {
@@ -280,7 +287,7 @@ impl Anchor {
 
     /// Seconds the popup takes to open and to close.
     fn durations(self) -> [f32; 2] {
-        if matches!(self, Anchor::Dialog | Anchor::Top) {
+        if matches!(self, Anchor::Dialog | Anchor::Top | Anchor::Dock(_)) {
             DIALOG
         } else {
             POPUP
@@ -603,10 +610,12 @@ impl Placed {
             Anchor::Right(_) => [around[2], around[1]],
             Anchor::Over(_) => [around[0], around[1]],
             Anchor::Dialog | Anchor::Top => [(rect[0] + rect[2]) / 2.0, rect[1]],
+            Anchor::Dock(_) => [rect[2], (rect[1] + rect[3]) / 2.0],
         };
         let (from, tilt) = match anchor {
             _ if !grows => (1.0, 0.0),
             Anchor::Dialog | Anchor::Top => (0.95, 0.2),
+            Anchor::Dock(_) => (0.95, 0.0),
             // Over a box, the popup widens out of it in layout instead of growing.
             Anchor::Over(_) => (1.0, 0.2),
             _ => (0.94, 0.2),
@@ -1573,7 +1582,7 @@ impl Ui {
     /// How popups beside `anchor` open and close; dialogs and the palette always swing as
     /// Snowbound's own.
     fn popup_motion(&self, anchor: Anchor) -> PopupMotion {
-        if matches!(anchor, Anchor::Dialog | Anchor::Top) {
+        if matches!(anchor, Anchor::Dialog | Anchor::Top | Anchor::Dock(_)) {
             PopupMotion::Grow
         } else {
             self.theme.menu().motion
@@ -1650,7 +1659,7 @@ impl Ui {
         if let Some(color) = node.shadow {
             let (own, menu);
             let shadows: &[Shadow] = match node.anchor {
-                Some(Anchor::Dialog) | None => {
+                Some(Anchor::Dialog | Anchor::Dock(_)) | None => {
                     let [blur, drop] = if node.anchor.is_some() {
                         POPUP_SHADOW
                     } else {
