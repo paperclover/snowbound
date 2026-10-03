@@ -156,8 +156,11 @@ impl Canvas {
         page.host_viewport = true;
         let markdown;
         (page.snap_to_grid, page.editor.default_font, markdown) = options().clone();
-        page.editor.markdown =
-            markdown.then(|| notebook::sidecar::themes::built_in().swap_remove(0).sheet());
+        page.editor.markdown = markdown.then(|| {
+            notebook::sidecar::themes::built_in()
+                .swap_remove(0)
+                .sheet(None)
+        });
         Ok(Self {
             page,
             space,
@@ -733,10 +736,7 @@ impl View {
         surface.configure(gpu.renderer.device(), &config);
         let (mut page, read_only) = section.shared.page(space)?;
         // The page wears its theme: style objects it gives otherwise are restyled first.
-        let sheet = section
-            .theme(page.identity)
-            .map(|theme| theme.sheet())
-            .unwrap_or_default();
+        let sheet = section.sheet(page.identity);
         let restyle = onestore::op::restyle(&page, &sheet)?;
         if !read_only && !restyle.is_empty() {
             section.shared.apply(page_edit(space, restyle))?;
@@ -1118,7 +1118,7 @@ pub extern "C" fn sb_view_style(view: &mut View, place: u8) -> bool {
     let editor = &view.canvas.page.editor;
     let style = editor.styles.get(*name).cloned().unwrap_or_else(|| {
         let theme = built_in().swap_remove(0);
-        definition(name, &theme.styles[*name])
+        definition(name, &theme.styles[*name], None)
     });
     let result = view
         .canvas

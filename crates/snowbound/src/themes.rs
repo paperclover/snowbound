@@ -44,6 +44,8 @@ pub struct Dialog {
     selected: usize,
     /// The style the controls edit, by its place in the gallery.
     style: usize,
+    /// The colour of the section the theme is chosen for, which "Theme" colours take.
+    section: Option<u32>,
 }
 
 fn id() -> Id {
@@ -57,29 +59,24 @@ fn popup(name: &str) -> Id {
 /// Spacing the dialog offers above and below a style, in points.
 const SPACING: [f32; 9] = [0.0, 2.0, 3.0, 4.0, 6.0, 8.0, 10.0, 12.0, 18.0];
 
-/// A style's colour as `#rrggbb` from a COLORREF, and back.
-fn hex(colorref: u32) -> String {
-    let [red, green, blue, _] = colorref.to_le_bytes();
-    format!("#{red:02X}{green:02X}{blue:02X}")
-}
-
-fn colorref(hex: &str) -> Option<u32> {
-    let rgb = u32::from_str_radix(hex.strip_prefix('#')?, 16).ok()?;
-    Some((rgb >> 16) | (rgb & 0xff00) | ((rgb & 0xff) << 16))
-}
-
-/// A line of `text` in `style` as a page shows it, scaled down to fit a menu row up to
-/// `largest` pixels, its colour moved onto the popup's paper so it reads in either scheme.
-pub(crate) fn preview(ui: &mut Ui, part: &str, text: &str, style: &ThemeStyle, largest: f32) {
+/// A line of `text` in `style` as a page in a section coloured `section` shows it, scaled
+/// down to fit a menu row up to `largest` pixels, its colour moved onto the popup's paper so
+/// it reads in either scheme.
+pub(crate) fn preview(
+    ui: &mut Ui,
+    part: &str,
+    text: &str,
+    style: &ThemeStyle,
+    section: Option<u32>,
+    largest: f32,
+) {
     let theme = ui.theme.clone();
     let paper = canvas::gpu::Paper {
         color: theme.popup,
         ink: theme.text,
     };
     let color = style
-        .color
-        .as_deref()
-        .and_then(colorref)
+        .colorref(section)
         .map_or(theme.text, |color| paper.tint(canvas::gpu::colorref(color)));
     ui.leaf(
         part,
@@ -113,6 +110,12 @@ impl State {
         Some((Arc::clone(library), target))
     }
 
+    /// The colour of the open section, which "Theme" colours take.
+    pub(crate) fn section_color(&self) -> Option<u32> {
+        let session = self.session.as_ref()?;
+        session.tabs.get(session.tab)?.color
+    }
+
     /// The theme the open page wears, if any scope names one.
     pub(crate) fn page_theme(&self) -> Option<Theme> {
         let session = self.session.as_ref()?;
@@ -134,7 +137,7 @@ impl State {
     /// Stored style `name` as the gallery applies it on the open page.
     pub(crate) fn gallery_style(&self, name: &str) -> Definition {
         let theme = self.gallery_sheet();
-        stored::definition(name, &theme.styles[name])
+        stored::definition(name, &theme.styles[name], self.section_color())
     }
 
     /// Dresses the open page in its theme: new text and Enter take the theme's styles, and
@@ -142,7 +145,9 @@ impl State {
     /// keeps what it holds.
     pub(crate) fn wear_theme(&mut self) -> Result<(), Box<dyn Error>> {
         let theme = self.page_theme();
-        let sheet = theme.as_ref().map(Theme::sheet).unwrap_or_default();
+        let sheet = (theme.as_ref())
+            .map(|theme| theme.sheet(self.section_color()))
+            .unwrap_or_default();
         self.view.editor.styles = sheet.clone();
         let Some(session) = &self.session else {
             return Ok(());
@@ -164,15 +169,18 @@ impl State {
         let Some((library, target)) = self.theme_target(scope) else {
             return;
         };
-        self.show_themes(scope, library, target);
+        let section = self.section_color();
+        self.show_themes(scope, library, target, section);
     }
 
-    /// Opens the Themes dialog choosing a theme for `target`, which `scope` names.
+    /// Opens the Themes dialog choosing a theme for `target`, which `scope` names, in a
+    /// section coloured `section`.
     pub(crate) fn show_themes(
         &mut self,
         scope: Scope,
         library: Arc<Library>,
         target: stored::Scope,
+        section: Option<u32>,
     ) {
         let themes = library.themes();
         let assigned = themes.assigned(&target).map(|theme| theme.id);
@@ -189,6 +197,7 @@ impl State {
             deleted: Vec::new(),
             selected,
             style: 0,
+            section,
         });
         self.ui.open_popup(id());
     }
@@ -274,7 +283,14 @@ impl State {
                     ..Spec::default()
                 },
             );
-            preview(ui, "name", &listed.name, &listed.styles["h2"], 15.0);
+            preview(
+                ui,
+                "name",
+                &listed.name,
+                &listed.styles["h2"],
+                dialog.section,
+                15.0,
+            );
             if let Some(node) = ui.access(item) {
                 node.set_label(listed.name.as_str());
                 node.set_selected(shown);
@@ -449,24 +465,28 @@ impl State {
         });
         field(ui, "Color:", &mut |ui| {
             let button = ui.id("color");
-            let shown = style.color.clone().unwrap_or_else(|| "Automatic".into());
-            ui::shell::combo(ui, "color", "Color", &shown, 120.0, popup("colors"), true);
+            let shown = match (&style.color, style.accent) {
+                (_, true) => "Theme",
+                (Some(color), false) => color,
+                (None, false) => "Automatic",
+            };
+            ui::shell::combo(ui, "color", "Color", shown, 120.0, popup("colors"), true);
             let swatches: Vec<_> = crate::FONT_COLORS
                 .iter()
                 .map(|&(color, name)| (canvas::gpu::colorref(color), name))
                 .collect();
             let anchor = Anchor::Below(ui.rect(button).unwrap_or_default());
-            if let Some(chosen) =
-                ui::popup::colors(ui, popup("colors"), anchor, "Automatic", &swatches, 10)
+            let buttons = ["Automatic", "Theme"];
+            if let Some(picked) =
+                ui::popup::color_grid(ui, popup("colors"), anchor, &buttons, &swatches, 10)
             {
-                let color = chosen.and_then(|chosen| {
-                    crate::FONT_COLORS
-                        .iter()
-                        .zip(&swatches)
-                        .find(|(_, (swatch, _))| *swatch == chosen)
-                        .map(|((color, _), _)| hex(*color))
-                });
-                change = Some(Change::Color(color));
+                change = match picked {
+                    Ok(chosen) => (swatches.iter())
+                        .position(|(swatch, _)| *swatch == chosen)
+                        .map(|at| Change::Color(Some(stored::color_hex(crate::FONT_COLORS[at].0)))),
+                    Err(0) => Some(Change::Color(None)),
+                    Err(_) => Some(Change::Accent),
+                };
             }
         });
         for (part, label, value) in [
@@ -527,7 +547,7 @@ impl State {
                     ..Spec::default()
                 },
             );
-            preview(ui, "text", label, style, 26.0);
+            preview(ui, "text", label, style, dialog.section, 26.0);
             ui.close();
             if ui.signal(line).clicked {
                 dialog.style = at;
@@ -632,6 +652,8 @@ enum Change {
     Bold,
     Italic,
     Color(Option<String>),
+    /// The section's accent, the "Theme" colour.
+    Accent,
     /// Space above (true) or below, in points.
     Spacing(bool, f32),
 }
@@ -643,7 +665,14 @@ impl Change {
             Self::Size(size) => style.size = size,
             Self::Bold => style.bold = !style.bold,
             Self::Italic => style.italic = !style.italic,
-            Self::Color(color) => style.color = color,
+            Self::Color(color) => {
+                style.color = color;
+                style.accent = false;
+            }
+            Self::Accent => {
+                style.color = Some(stored::color_hex(stored::accent(None)));
+                style.accent = true;
+            }
             Self::Spacing(true, points) => style.before = points,
             Self::Spacing(false, points) => style.after = points,
         }
@@ -656,12 +685,13 @@ fn fresh_id(now: u64, count: usize) -> String {
 }
 
 /// The Styles gallery under the toolbar's Styles button: the eleven styles drawn in
-/// `sheet`, the one at the caret outlined, then the theme commands. Returns the command chosen.
+/// `sheet` in a section coloured `section`, the one at the caret outlined, then the theme commands. Returns the command chosen.
 pub(crate) fn gallery(
     ui: &mut Ui,
     menu: Id,
     anchor: Anchor,
     sheet: &Theme,
+    section: Option<u32>,
     current: Option<&str>,
 ) -> Option<crate::commands::Id> {
     use crate::commands::Id as Cmd;
@@ -689,7 +719,7 @@ pub(crate) fn gallery(
         .get(index)
     {
         Some((name, label)) => {
-            preview(ui, "preview", label, &sheet.styles[*name], 24.0);
+            preview(ui, "preview", label, &sheet.styles[*name], section, 24.0);
             if let Some(node) = ui.access(ui.id("preview")) {
                 node.set_label(*label);
             }
@@ -785,7 +815,7 @@ mod tests {
             let source = onestore::create_section(&file, "", "Author").unwrap();
             let (space, before) = page(&source);
             let mut editor = CanvasEditor::from_page(before, &mut engine).unwrap();
-            let sheet = theme.sheet();
+            let sheet = theme.sheet(None);
             editor.styles = sheet.clone();
             let body = editor
                 .outlines()
@@ -864,7 +894,7 @@ mod tests {
             }
             assert!(op::restyle(&stored, &sheet).unwrap().is_empty());
             // Another theme restyles the page whole, keeping the names.
-            let other = built_in().swap_remove(3).sheet();
+            let other = built_in().swap_remove(3).sheet(None);
             let mut copy = onestore::Section::open(&arena, written.clone()).unwrap();
             copy.apply(
                 "Author",

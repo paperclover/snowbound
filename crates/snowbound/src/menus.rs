@@ -709,13 +709,14 @@ impl State {
             (Target::Section { library, path }, Action::Theme) => {
                 if let Some(identity) = library.section_identity(&path) {
                     let scope = notebook::sidecar::themes::Scope::section(identity);
-                    self.show_themes(crate::themes::Scope::Section, library, scope);
+                    let color = library.section_color(&path);
+                    self.show_themes(crate::themes::Scope::Section, library, scope, color);
                 }
                 None
             }
             (Target::Notebook(library), Action::Theme) => {
                 let scope = notebook::sidecar::themes::Scope::Notebook;
-                self.show_themes(crate::themes::Scope::Notebook, library, scope);
+                self.show_themes(crate::themes::Scope::Notebook, library, scope, None);
                 None
             }
             (Target::Section { library, path }, Action::Color(color)) => Some(Command::Structure(
@@ -843,7 +844,8 @@ impl State {
                 let identity = session.section.page(space).ok()?.identity?;
                 let library = Arc::clone(&session.library);
                 let scope = notebook::sidecar::themes::Scope::page(identity);
-                self.show_themes(crate::themes::Scope::Page, library, scope);
+                let color = self.section_color();
+                self.show_themes(crate::themes::Scope::Page, library, scope, color);
                 None
             }
             Action::Versions(show) => Some(Command::History { page: space, show }),

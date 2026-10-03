@@ -810,13 +810,29 @@ impl Section {
         ])
     }
 
-    /// The theme page `identity` of this section wears, if any scope names one.
-    pub(crate) fn theme(
+    /// The paragraph styles page `identity` of this section wears in its theme, in this
+    /// section's colour; none where no scope names a theme.
+    pub(crate) fn sheet(
         &self,
         identity: Option<[u8; 16]>,
-    ) -> Option<notebook::sidecar::themes::Theme> {
+    ) -> std::collections::BTreeMap<String, onestore::page::Definition> {
         let section = self.shared.section.identity().ok();
-        self.themes().effective(section, identity)
+        let Some(theme) = self.themes().effective(section, identity) else {
+            return Default::default();
+        };
+        let color = section.and_then(|section| {
+            let notebook = self.library.notebook();
+            let listed = notebook
+                .as_ref()?
+                .catalog()
+                .sections()
+                .find(|listed| listed.file_id == section)?;
+            match listed.state {
+                SectionState::Readable { color, .. } => color,
+                _ => None,
+            }
+        });
+        theme.sheet(color)
     }
 
     /// The section at catalog `path` of `library`, its edits naming `author`.

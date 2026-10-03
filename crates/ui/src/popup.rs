@@ -752,26 +752,46 @@ pub fn colors(
     swatches: &[([f32; 4], &str)],
     columns: usize,
 ) -> Option<Option<[f32; 4]>> {
+    color_grid(ui, id, anchor, &[none], swatches, columns).map(Result::ok)
+}
+
+/// `colors` under a button for each of `buttons`: returns the swatch chosen, or the place of
+/// the button.
+pub fn color_grid(
+    ui: &mut Ui,
+    id: Id,
+    anchor: Anchor,
+    buttons: &[&str],
+    swatches: &[([f32; 4], &str)],
+    columns: usize,
+) -> Option<Result<[f32; 4], usize>> {
     if !ui.popup_open(id) {
         return None;
     }
-    // The button is cell 0 and the swatches follow it.
+    // The buttons are the first cells and the swatches follow them.
     let cell = |index: usize| id.child(("cell", index));
-    let count = swatches.len() + 1;
+    let first = buttons.len();
+    let count = swatches.len() + first;
     let (highlight, chosen) = pick_cell(ui, id, count, cell, |key, highlight| {
         match (key, highlight) {
             (_, None) => 0,
             (NamedKey::ArrowLeft, Some(at)) => at.saturating_sub(1),
             (NamedKey::ArrowRight, Some(at)) => (at + 1).min(count - 1),
-            (NamedKey::ArrowUp, Some(at)) => at.saturating_sub(columns),
-            (_, Some(0)) => 1,
+            (NamedKey::ArrowUp, Some(at)) if at < first + columns => {
+                at.min(first).saturating_sub(1)
+            }
+            (NamedKey::ArrowUp, Some(at)) => at - columns,
+            (_, Some(at)) if at < first => at + 1,
             (_, Some(at)) if at + columns < count => at + columns,
             (_, Some(at)) => at,
         }
     });
     if let Some(index) = chosen {
         ui.close_popup(id);
-        return Some((index > 0).then(|| swatches[index - 1].0));
+        return Some(match index.checked_sub(first) {
+            Some(swatch) => Ok(swatches[swatch].0),
+            None => Err(index),
+        });
     }
 
     let theme = ui.theme.clone();
@@ -783,20 +803,22 @@ pub fn colors(
         anchor,
         columns as f32 * CELL + 2.0 * ui.theme.menu().pad,
     );
-    ui.open_as(
-        cell(0),
-        Spec {
-            flags: Flags::CLICKABLE,
-            size: [fill(), px(ROW)],
-            text: Some(none),
-            fill: lit(0),
-            radius: 4.0,
-            pad: [8.0, 0.0],
-            role: Some(Role::MenuItem),
-            ..Spec::default()
-        },
-    );
-    ui.close();
+    for (index, button) in buttons.iter().enumerate() {
+        ui.open_as(
+            cell(index),
+            Spec {
+                flags: Flags::CLICKABLE,
+                size: [fill(), px(ROW)],
+                text: Some(button),
+                fill: lit(index),
+                radius: 4.0,
+                pad: [8.0, 0.0],
+                role: Some(Role::MenuItem),
+                ..Spec::default()
+            },
+        );
+        ui.close();
+    }
     for (row, colors) in swatches.chunks(columns).enumerate() {
         ui.open(
             ("row", row),
@@ -806,7 +828,7 @@ pub fn colors(
             },
         );
         for (column, (color, name)) in colors.iter().enumerate() {
-            let index = 1 + row * columns + column;
+            let index = first + row * columns + column;
             ui.open_as(
                 cell(index),
                 Spec {

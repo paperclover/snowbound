@@ -2177,6 +2177,7 @@ impl State {
         let session = self.session.as_ref();
         let update = self.updates.status();
         let sheet = self.gallery_sheet();
+        let section = self.section_color();
         let drawing_pens = self.pens();
         let ui = &mut self.ui;
         let text = theme.text;
@@ -2269,7 +2270,9 @@ impl State {
             .find(|(name, _)| state.style.as_deref() == Some(*name))
             .map_or("Styles".to_owned(), |(_, label)| format!("Styles: {label}"));
         ui::popup::tooltip(ui, &shown, "", None);
-        if let Some(id) = themes::gallery(ui, styles, anchor, &sheet, state.style.as_deref()) {
+        if let Some(id) =
+            themes::gallery(ui, styles, anchor, &sheet, section, state.style.as_deref())
+        {
             choice = Some(Choice::Command(id));
         }
         let combo = ui.id("font");

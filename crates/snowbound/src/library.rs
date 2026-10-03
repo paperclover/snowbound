@@ -1026,6 +1026,18 @@ impl Library {
             .map(|section| section.file_id)
     }
 
+    /// The colour of the section at catalog `path`, COLORREF; none for OneNote's None.
+    pub fn section_color(&self, path: &str) -> Option<u32> {
+        let listed = folders(self.catalog()?, |_| true)
+            .into_iter()
+            .flat_map(|folder| &folder.sections)
+            .find(|section| section.path == path)?;
+        match listed.state {
+            SectionState::Readable { color, .. } => color,
+            _ => None,
+        }
+    }
+
     /// The first readable section, searching groups after sections, as OneNote opens a
     /// notebook.
     pub fn first_section(&self) -> Option<String> {

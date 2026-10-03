@@ -69,7 +69,7 @@ impl Folder {
     }
 
     /// The sections of this folder and every group under it, in catalog order.
-    pub(crate) fn sections(&self) -> impl Iterator<Item = &Section> {
+    pub fn sections(&self) -> impl Iterator<Item = &Section> {
         self.folders().flat_map(|folder| &folder.sections)
     }
 }

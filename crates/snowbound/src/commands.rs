@@ -136,7 +136,11 @@ pub fn offered(id: Id) -> bool {
 
 /// What the editor's Markdown shortcuts take: OneNote 2010's gallery styles when `on`.
 pub fn markdown(on: bool) -> Option<BTreeMap<String, onestore::page::Definition>> {
-    on.then(|| notebook::sidecar::themes::built_in().swap_remove(0).sheet())
+    on.then(|| {
+        notebook::sidecar::themes::built_in()
+            .swap_remove(0)
+            .sheet(None)
+    })
 }
 
 /// What a menu or toolbar offers: a command, or one of a list's entries.

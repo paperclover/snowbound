@@ -38,8 +38,12 @@ pub struct ThemeStyle {
     pub size: f32,
     pub bold: bool,
     pub italic: bool,
-    /// `#rrggbb`, or none for automatic.
+    /// `#rrggbb`, or none for automatic. Under `accent`, the accent of a section without a
+    /// colour, which versions that don't know `accent` take.
     pub color: Option<String>,
+    /// Takes the page's section's accent (the "Theme" colour) in place of `color`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub accent: bool,
     /// Space above and below the paragraph, in points.
     pub before: f32,
     pub after: f32,
@@ -224,16 +228,65 @@ fn is_built_in(id: &str) -> bool {
     built_in().iter().any(|theme| theme.id == id)
 }
 
-/// Stored style `name`'s paragraph style as `style` gives it: every character flag set, as
-/// OneNote 2010 writes its own, headings followed by Normal.
-pub fn definition(name: &str, style: &ThemeStyle) -> Definition {
-    let color = style
-        .color
-        .as_deref()
-        .and_then(|hex| u32::from_str_radix(hex.strip_prefix('#')?, 16).ok())
-        .map_or(0xff00_0000, |rgb| {
-            (rgb >> 16) | (rgb & 0xff00) | ((rgb & 0xff) << 16)
-        });
+/// The accent of a section coloured `section` (a COLORREF; none for OneNote's None), as a
+/// COLORREF: its hue at a fixed saturation and lightness, grey staying grey. Pages store it,
+/// so it never changes: versions resolving it apart would restyle each other's pages.
+pub fn accent(section: Option<u32>) -> u32 {
+    // OneNote's blue for a section without a colour, as Snowbound's tabs show one.
+    let [red, green, blue, _] = section.unwrap_or(0x00E4_A88A).to_le_bytes();
+    let [red, green, blue] = [red, green, blue].map(|byte| f32::from(byte) / 255.0);
+    let (max, min) = (red.max(green).max(blue), red.min(green).min(blue));
+    let range = max - min;
+    let sector = if range == 0.0 {
+        0.0
+    } else if max == red {
+        (green - blue) / range
+    } else if max == green {
+        (blue - red) / range + 2.0
+    } else {
+        (red - green) / range + 4.0
+    };
+    let hue = (sector * 60.0).rem_euclid(360.0);
+    let (saturation, lightness) = (if range == 0.0 { 0.0 } else { 0.60 }, 0.45);
+    let chroma = (1.0 - (2.0 * lightness - 1.0f32).abs()) * saturation;
+    let x = chroma * (1.0 - ((hue / 60.0) % 2.0 - 1.0).abs());
+    let [r, g, b] = match hue {
+        h if h < 60.0 => [chroma, x, 0.0],
+        h if h < 120.0 => [x, chroma, 0.0],
+        h if h < 180.0 => [0.0, chroma, x],
+        h if h < 240.0 => [0.0, x, chroma],
+        h if h < 300.0 => [x, 0.0, chroma],
+        _ => [chroma, 0.0, x],
+    };
+    let byte = |value: f32| {
+        ((value + lightness - chroma / 2.0) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u32
+    };
+    byte(r) | byte(g) << 8 | byte(b) << 16
+}
+
+/// A COLORREF as `#rrggbb`, as themes keep colours.
+pub fn color_hex(colorref: u32) -> String {
+    let [red, green, blue, _] = colorref.to_le_bytes();
+    format!("#{red:02X}{green:02X}{blue:02X}")
+}
+
+impl ThemeStyle {
+    /// The style's colour as a COLORREF in a section coloured `section`; none for automatic.
+    pub fn colorref(&self, section: Option<u32>) -> Option<u32> {
+        if self.accent {
+            return Some(accent(section));
+        }
+        let rgb = u32::from_str_radix(self.color.as_deref()?.strip_prefix('#')?, 16).ok()?;
+        Some((rgb >> 16) | (rgb & 0xff00) | ((rgb & 0xff) << 16))
+    }
+}
+
+/// Stored style `name`'s paragraph style as `style` gives it in a section coloured `section`:
+/// every character flag set, as OneNote 2010 writes its own, headings followed by Normal.
+pub fn definition(name: &str, style: &ThemeStyle, section: Option<u32>) -> Definition {
+    let color = style.colorref(section).unwrap_or(0xff00_0000);
     // Paragraph spacing is stored in half inches.
     let stored = |points: f32| points / 36.0 * 36.0;
     Definition {
@@ -261,11 +314,12 @@ pub fn definition(name: &str, style: &ThemeStyle) -> Definition {
 }
 
 impl Theme {
-    /// The paragraph style definitions the theme gives, by stored name.
-    pub fn sheet(&self) -> BTreeMap<String, Definition> {
+    /// The paragraph style definitions the theme gives in a section coloured `section`, by
+    /// stored name.
+    pub fn sheet(&self, section: Option<u32>) -> BTreeMap<String, Definition> {
         self.styles
             .iter()
-            .map(|(name, style)| (name.clone(), definition(name, style)))
+            .map(|(name, style)| (name.clone(), definition(name, style, section)))
             .collect()
     }
 }
@@ -284,6 +338,7 @@ fn style(
         bold,
         italic,
         color: color.map(Into::into),
+        accent: false,
         before,
         after,
     }
@@ -398,7 +453,7 @@ mod tests {
         let document = onestore::document::Document::parse(&index).unwrap();
         let (space, _) = document.pages().unwrap()[0];
         let page = onestore::page::Page::from_space(&document, space).unwrap();
-        let sheet = built_in()[0].sheet();
+        let sheet = built_in()[0].sheet(None);
         for (name, definition) in &sheet {
             assert!(
                 page.definitions.values().any(|stored| stored == definition),
@@ -432,7 +487,7 @@ mod tests {
             .into_iter()
             .find(|theme| theme.id == "manuscript")
             .unwrap()
-            .sheet();
+            .sheet(None);
         let calibri: Vec<&str> = page
             .definitions
             .values()
@@ -470,10 +525,29 @@ mod tests {
         assert!(onestore::op::restyle(&healed, &sheet).unwrap().is_empty());
     }
 
+    /// The "Theme" colour is the section's hue at the accent's shade, OneNote's blue for a
+    /// section without a colour, and grey for a grey section.
+    #[test]
+    fn a_theme_coloured_style_takes_its_section_s_accent() {
+        assert_eq!(color_hex(accent(None)), "#2E5CB8");
+        assert_eq!(color_hex(accent(Some(0x0000_00FF))), "#B82E2E");
+        assert_eq!(color_hex(accent(Some(0x0080_8080))), "#737373");
+        let style = ThemeStyle {
+            accent: true,
+            ..style("Arial", 16.0, BOLD, Some("#2E5CB8"), NONE)
+        };
+        let red = definition("h1", &style, Some(0x0000_00FF));
+        assert_eq!(red.format.color, Some(0x002E_2EB8));
+        // Versions that don't know the accent read the colour beside it.
+        let json = serde_json::to_value(&style).unwrap();
+        assert_eq!(json["color"], "#2E5CB8");
+        assert_eq!(json["accent"], true);
+    }
+
     #[test]
     fn every_built_in_theme_names_every_gallery_style() {
         for theme in built_in() {
-            let sheet = theme.sheet();
+            let sheet = theme.sheet(None);
             for (name, _) in STYLES {
                 assert!(sheet.contains_key(name), "{} {name}", theme.id);
             }
