@@ -76,7 +76,26 @@ pub enum Target {
     Server(String),
     /// A page to add to the open section, by its title.
     NewPage(String),
+    /// The page's context menu at the caret or the file selected, by an item's text.
+    Text(&'static str),
     Command(commands::Id),
+}
+
+impl Target {
+    /// What it is, as a palette command acting on it names it.
+    fn noun(&self) -> &'static str {
+        match self {
+            Target::Page { .. } => "Page",
+            Target::Section { .. } => "Section",
+            Target::Group { .. } => "Section Group",
+            Target::Notebook(_) => "Notebook",
+            Target::Closed(_)
+            | Target::Server(_)
+            | Target::Command(_)
+            | Target::NewPage(_)
+            | Target::Text(_) => "",
+        }
+    }
 }
 
 /// What can be done to a target, as its context menu and the palette's actions list it.
@@ -190,6 +209,56 @@ pub(crate) const SECTION_COLORS: [(u32, &str); 16] = [
     (0x7575ba, "Red Chalk"),
     (0xaa9595, "Silver"),
 ];
+
+/// Whether a command does `action` to `target` when it is the one shown, so the palette's
+/// commands need no row of their own for it.
+pub(crate) fn covered(target: &Target, action: &Action) -> bool {
+    use Action::*;
+    match target {
+        Target::Page { .. } => matches!(action, CopyLink | NewPage | NewSubpage | Theme),
+        Target::Section { .. } => matches!(
+            action,
+            SaveAs | NewSection | NewGroup | Password | Theme | EmptyRecycleBin
+        ),
+        Target::Group { .. } => matches!(action, NewSection | NewGroup),
+        Target::Notebook(_) => {
+            #[cfg(feature = "live")]
+            if *action == LiveShare {
+                return true;
+            }
+            matches!(
+                action,
+                SaveAs
+                    | Close
+                    | NewSection
+                    | NewGroup
+                    | MarkNotebookRead
+                    | Reveal
+                    | RecycleBin
+                    | Theme
+            )
+        }
+        Target::Closed(_)
+        | Target::Server(_)
+        | Target::Command(_)
+        | Target::NewPage(_)
+        | Target::Text(_) => false,
+    }
+}
+
+/// How the palette's commands name `action` on `target`, shown in its context menu as
+/// `label`: with the target's noun where the label lacks it, as Rename becomes Rename Page.
+pub(crate) fn command_title(target: &Target, action: &Action, label: &str) -> String {
+    let noun = target.noun();
+    if label.to_lowercase().contains(&noun.to_lowercase()) {
+        return label.to_owned();
+    }
+    match label.split_once(' ') {
+        _ if *action == Action::Properties => format!("{noun} {label}"),
+        Some((verb, rest)) => format!("{verb} {noun} {rest}"),
+        None => format!("{label} {noun}"),
+    }
+}
 
 /// A place Move offers.
 struct Destination {
@@ -533,7 +602,7 @@ impl State {
             Target::Closed(_) | Target::Server(_) => {
                 vec![item(Action::Delete, "Remove from Recent", false, false)]
             }
-            Target::Command(_) | Target::NewPage(_) => Vec::new(),
+            Target::Command(_) | Target::NewPage(_) | Target::Text(_) => Vec::new(),
         }
     }
 
@@ -549,37 +618,53 @@ impl State {
     ) -> Option<Action> {
         let items: Vec<Item> = actions.iter().map(|(_, item)| *item).collect();
         let chosen = ui::popup::menu(&mut self.ui, id, anchor, &items, filter);
-        let places = id.child("move");
-        let copies = id.child("copy");
-        let colors = id.child("colors");
-        ui::popup::submenus(&mut self.ui, id, &items, |index| match actions[index].0 {
-            Action::Move => Some(places),
-            Action::Copy => Some(copies),
-            Action::Colors => Some(colors),
+        let submenu = |action: &Action| match action {
+            Action::Move => Some(id.child("move")),
+            Action::Copy => Some(id.child("copy")),
+            Action::Colors => Some(id.child("colors")),
             _ => None,
-        });
-        let mut moved = None;
-        for (submenu, chosen) in [
-            (places, Action::MoveTo as fn(String) -> Action),
-            (copies, Action::CopyTo),
-        ] {
-            if !self.ui.popup_open(submenu) {
-                continue;
+        };
+        ui::popup::submenus(&mut self.ui, id, &items, |index| submenu(&actions[index].0));
+        let mut chosen = chosen.map(|index| actions[index].0.clone());
+        for action in [Action::Move, Action::Copy, Action::Colors] {
+            if let Some(menu) = submenu(&action) {
+                chosen = chosen.or_else(|| self.submenu(menu, &action, target, anchor));
             }
-            let destinations = self.destinations(target);
-            let items: Vec<Item> = (destinations.iter())
-                .map(|place| Item {
-                    text: &place.name,
-                    icon: Some(place.icon),
-                    tint: place.tint,
-                    ..Item::default()
-                })
-                .collect();
-            moved = moved.or(ui::popup::menu(&mut self.ui, submenu, anchor, &items, None)
-                .map(|index| chosen(destinations[index].path.clone())));
         }
-        let colored = match target {
-            Target::Section { library, path } if self.ui.popup_open(colors) => {
+        chosen
+    }
+
+    /// Builds submenu `id` of `action`, Move, Copy or Colors, on `target` while it is open:
+    /// the place or colour chosen, as the action it takes.
+    pub(crate) fn submenu(
+        &mut self,
+        id: Id,
+        action: &Action,
+        target: &Target,
+        anchor: Anchor,
+    ) -> Option<Action> {
+        if !self.ui.popup_open(id) {
+            return None;
+        }
+        match (action, target) {
+            (Action::Move | Action::Copy, _) => {
+                let destinations = self.destinations(target);
+                let items: Vec<Item> = (destinations.iter())
+                    .map(|place| Item {
+                        text: &place.name,
+                        icon: Some(place.icon),
+                        tint: place.tint,
+                        ..Item::default()
+                    })
+                    .collect();
+                let index = ui::popup::menu(&mut self.ui, id, anchor, &items, None)?;
+                let path = destinations[index].path.clone();
+                Some(match action {
+                    Action::Move => Action::MoveTo(path),
+                    _ => Action::CopyTo(path),
+                })
+            }
+            (Action::Colors, Target::Section { library, path }) => {
                 let current = (library.tabs(&folder(path)).into_iter())
                     .find(|tab| tab.path == *path)
                     .and_then(|tab| tab.color);
@@ -599,15 +684,11 @@ impl State {
                     separated: true,
                     ..Item::default()
                 });
-                ui::popup::menu(&mut self.ui, colors, anchor, &items, None)
+                ui::popup::menu(&mut self.ui, id, anchor, &items, None)
                     .map(|index| Action::Color(SECTION_COLORS.get(index).map(|(color, _)| *color)))
             }
             _ => None,
-        };
-        chosen
-            .map(|index| actions[index].0.clone())
-            .or(moved)
-            .or(colored)
+        }
     }
 
     /// Where Move takes `target`: the other sections of a page's folder, or the folders a
@@ -676,6 +757,7 @@ impl State {
                 None
             }
             (Target::NewPage(title), _) => Some(Command::NewPage { under: None, title }),
+            (Target::Text(text), _) => Some(Command::Text(text)),
             (
                 Target::Page {
                     library,

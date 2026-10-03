@@ -3,6 +3,7 @@
 //! of the notebook or with the system's handler.
 
 use crate::{Command, State, art, commands, page, platform};
+use canvas::interaction::Context;
 use onestore::ExGuid;
 use onestore::page::link::{LinkTarget, internal_link};
 use std::error::Error;
@@ -317,85 +318,11 @@ impl State {
             None => Vec::new(),
         };
         let corrections = items.len();
-        let format = self.format_state();
-        let disabled = |id| !self.status(&commands::Choice::Command(id), &format).enabled;
-        // Paste stands for any edit to the text here.
-        let (fixed, unlinkable) = (disabled(commands::Id::Paste), disabled(commands::Id::Link));
-        let lists = [commands::Id::ToDoList, commands::Id::BulletedList]
-            .into_iter()
-            .filter(|id| {
-                let choice = commands::Choice::Command(*id);
-                self.status(&choice, &format).enabled
-            })
-            .collect::<Vec<_>>();
-        items.extend(if context.attachment.is_some() {
-            // OneNote 2010's commands for the file itself; its clipboard holds text alone.
-            vec![drawn("Open", art::OPEN), drawn("Save As", art::SAVE)]
-        } else {
-            let mut items = vec![
-                Item {
-                    disabled: !context.selected || fixed,
-                    separated: corrections > 0,
-                    ..drawn("Cut", art::CUT)
-                },
-                Item {
-                    disabled: !context.selected,
-                    ..drawn("Copy", art::COPY)
-                },
-                Item {
-                    disabled: fixed,
-                    ..drawn("Paste", art::PASTE)
-                },
-            ];
-            match &context.link {
-                Some(_) => items.extend([
-                    Item {
-                        separated: true,
-                        disabled: unlinkable,
-                        ..drawn("Edit Link", art::LINK)
-                    },
-                    drawn("Copy Link to Paragraph", art::COPY_LINK),
-                    Item {
-                        separated: true,
-                        ..drawn("Copy Link", art::COPY_LINK)
-                    },
-                    drawn("Select Link", art::SELECT),
-                    Item {
-                        disabled: unlinkable,
-                        ..drawn("Remove Link", art::REMOVE_LINK)
-                    },
-                ]),
-                None => items.extend([
-                    Item {
-                        separated: true,
-                        disabled: unlinkable,
-                        ..drawn("Link", art::LINK)
-                    },
-                    drawn("Copy Link to Paragraph", art::COPY_LINK),
-                ]),
-            }
-            for (at, id) in lists.iter().enumerate() {
-                items.push(Item {
-                    separated: at == 0,
-                    icon: crate::artwork(*id),
-                    ..item(commands::command(*id).title)
-                });
-            }
-            if context.equation {
-                items.extend([
-                    Item {
-                        separated: true,
-                        disabled: fixed,
-                        ..drawn("Professional", art::EQUATION)
-                    },
-                    Item {
-                        disabled: fixed,
-                        ..drawn("Linear", art::EQUATION)
-                    },
-                ]);
-            }
-            items
-        });
+        let mut rest = self.text_items(context);
+        if let Some((first, _)) = rest.first_mut() {
+            first.separated |= corrections > 0;
+        }
+        items.extend(rest.into_iter().map(|(item, _)| item));
         let Some(chosen) =
             ui::popup::menu(&mut self.ui, menu(), Anchor::Point(*point), &items, None)
         else {
@@ -405,49 +332,157 @@ impl State {
         let Some((context, _)) = self.text_menu.take() else {
             return Ok(());
         };
-        if chosen < corrections {
-            let correction = context.spelling.unwrap();
-            let response = match chosen_text.as_str() {
-                _ if chosen < correction.suggestions.len() => {
-                    self.view.correct(&correction, &chosen_text)?
-                }
-                "Delete Repeated Word" => self.view.correct(&correction, "")?,
-                "Spelling" => {
-                    self.open_spelling_pane();
-                    return Ok(());
-                }
-                text => {
-                    if let Some(spelling) = &self.view.spelling {
-                        if text == "Ignore" {
-                            spelling.ignore(&correction.word);
-                        } else {
-                            spelling.learn(&correction.word);
-                        }
-                    }
-                    self.window.request_redraw();
-                    return Ok(());
-                }
-            };
-            self.respond(response);
-            return Ok(());
+        if chosen >= corrections {
+            return self.text_command(context, &chosen_text);
         }
-        if let Some(id) = lists
-            .into_iter()
-            .find(|id| commands::command(*id).title == chosen_text)
-        {
-            return self.run(commands::Choice::Command(id));
-        }
+        let correction = context.spelling.unwrap();
         let response = match chosen_text.as_str() {
-            "Open" => return self.open_attachment(&context.attachment.unwrap()),
-            "Save As" => return self.save_attachment(&context.attachment.unwrap()),
-            "Cut" => self.view.copy(true)?,
-            "Copy" => self.view.copy(false)?,
-            "Paste" => {
-                self.commands
-                    .push(Command::Page(canvas::interaction::Request::Paste));
+            _ if chosen < correction.suggestions.len() => {
+                self.view.correct(&correction, &chosen_text)?
+            }
+            "Delete Repeated Word" => self.view.correct(&correction, "")?,
+            "Spelling" => {
+                self.open_spelling_pane();
                 return Ok(());
             }
-            "Edit Link" | "Link" => {
+            text => {
+                if let Some(spelling) = &self.view.spelling {
+                    if text == "Ignore" {
+                        spelling.ignore(&correction.word);
+                    } else {
+                        spelling.learn(&correction.word);
+                    }
+                }
+                self.window.request_redraw();
+                return Ok(());
+            }
+        };
+        self.respond(response);
+        Ok(())
+    }
+
+    /// The page's context menu items after any corrections, for text and links at `context`
+    /// or the file it selects, each with how the palette's commands name it.
+    pub(crate) fn text_items(&self, context: &Context) -> Vec<(Item<'static>, &'static str)> {
+        let drawn = |text, icon| Item {
+            text,
+            icon: Some(icon),
+            ..Item::default()
+        };
+        let format = self.format_state();
+        let disabled = |id| !self.status(&commands::Choice::Command(id), &format).enabled;
+        // Paste stands for any edit to the text here.
+        let (fixed, unlinkable) = (disabled(commands::Id::Paste), disabled(commands::Id::Link));
+        if context.attachment.is_some() {
+            // OneNote 2010's commands for the file itself; its clipboard holds text alone.
+            return vec![
+                (drawn("Open", art::OPEN), "Open File"),
+                (drawn("Save As", art::SAVE), "Save File As"),
+            ];
+        }
+        let mut items = vec![
+            Item {
+                disabled: !context.selected || fixed,
+                ..drawn("Cut", art::CUT)
+            },
+            Item {
+                disabled: !context.selected,
+                ..drawn("Copy", art::COPY)
+            },
+            Item {
+                disabled: fixed,
+                ..drawn("Paste", art::PASTE)
+            },
+        ];
+        match &context.link {
+            Some(_) => items.extend([
+                Item {
+                    separated: true,
+                    disabled: unlinkable,
+                    ..drawn("Edit Link", art::LINK)
+                },
+                drawn("Copy Link to Paragraph", art::COPY_LINK),
+                Item {
+                    separated: true,
+                    ..drawn("Copy Link", art::COPY_LINK)
+                },
+                drawn("Select Link", art::SELECT),
+                Item {
+                    disabled: unlinkable,
+                    ..drawn("Remove Link", art::REMOVE_LINK)
+                },
+            ]),
+            None => items.extend([
+                Item {
+                    separated: true,
+                    disabled: unlinkable,
+                    ..drawn("Link", art::LINK)
+                },
+                drawn("Copy Link to Paragraph", art::COPY_LINK),
+            ]),
+        }
+        let lists = [commands::Id::ToDoList, commands::Id::BulletedList];
+        for (at, id) in lists.into_iter().filter(|id| !disabled(*id)).enumerate() {
+            items.push(Item {
+                text: commands::command(id).title,
+                icon: crate::artwork(id),
+                separated: at == 0,
+                ..Item::default()
+            });
+        }
+        // Link names the command editing a link too.
+        let mut items: Vec<_> = (items.into_iter())
+            .map(|item| {
+                (
+                    item,
+                    if item.text == "Edit Link" {
+                        "Link"
+                    } else {
+                        item.text
+                    },
+                )
+            })
+            .collect();
+        if context.equation {
+            items.extend([
+                (
+                    Item {
+                        separated: true,
+                        disabled: fixed,
+                        ..drawn("Professional", art::EQUATION)
+                    },
+                    "Professional Equation",
+                ),
+                (
+                    Item {
+                        disabled: fixed,
+                        ..drawn("Linear", art::EQUATION)
+                    },
+                    "Linear Equation",
+                ),
+            ]);
+        }
+        items
+    }
+
+    /// Does what the page's context menu item `text` does at `context`.
+    pub(crate) fn text_command(
+        &mut self,
+        context: Context,
+        text: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        if let Some(file) = &context.attachment {
+            return match text {
+                "Open" => self.open_attachment(file),
+                _ => self.save_attachment(file),
+            };
+        }
+        // Cut, Copy, Paste, Link and the list conversions are the commands of those names.
+        if let Some(command) = (commands::COMMANDS.iter()).find(|command| command.title == text) {
+            return self.run(commands::Choice::Command(command.id));
+        }
+        let response = match text {
+            "Edit Link" => {
                 self.open_link_dialog();
                 return Ok(());
             }

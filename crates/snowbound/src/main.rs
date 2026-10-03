@@ -701,6 +701,8 @@ enum Command {
     },
     /// Deletes pages of the open section to the notebook's recycle bin.
     DeletePages(Vec<ExGuid>),
+    /// The page's context menu item of this text, at the caret or on the file selected.
+    Text(&'static str),
     /// Restores or deletes for good pages of the recycle bin's open section.
     Recycle(recycle::Request),
     /// Moves or indents pages of the open section.
@@ -3438,6 +3440,11 @@ impl State {
             Command::Page(Request::Play { file, at_ms }) => self.play(&file, at_ms)?,
             Command::Choose(choice) => self.run(choice)?,
             Command::TagPicture => self.pick_tag_picture(),
+            Command::Text(text) => {
+                if let Some(context) = self.view.caret_context() {
+                    self.text_command(context, text)?;
+                }
+            }
         }
         Ok(())
     }

@@ -1618,8 +1618,24 @@ impl PageView {
         if !inside {
             self.editor.select(at)?;
         }
+        let context = self.caret_context().unwrap_or_default();
+        Ok(Some((self.changed()?, context)))
+    }
+
+    /// What a context menu at the caret or the selected file acts on; `None` where neither
+    /// takes one.
+    pub fn caret_context(&self) -> Option<Context> {
+        if let Some(ObjectFocus::File(id)) = self.object_focus {
+            return Some(Context {
+                attachment: self.editor.attachment(id).cloned(),
+                ..Context::default()
+            });
+        }
+        if self.object_focus.is_some() || !self.accepts_text() {
+            return None;
+        }
         let [anchor, focus] = self.editor.selection().positions;
-        let context = Context {
+        Some(Context {
             link: self
                 .editor
                 .link_at(anchor.min(focus))
@@ -1634,8 +1650,7 @@ impl PageView {
                 .map(|(_, _, node)| node.id),
             attachment: None,
             spelling: self.selected_correction(),
-        };
-        Ok(Some((self.changed()?, context)))
+        })
     }
 
     /// The marked word at the caret, or wholly selected, with its corrections.

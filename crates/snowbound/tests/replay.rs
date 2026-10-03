@@ -226,6 +226,74 @@ fn the_palette_makes_a_page_of_a_query_matching_nothing() {
     );
 }
 
+/// The options listed in `tree`'s palette, one a line.
+fn options(tree: &str) -> Vec<&str> {
+    tree.lines()
+        .filter(|line| line.contains("ListBoxOption"))
+        .map(|line| line.split('"').nth(1).unwrap_or_default())
+        .collect()
+}
+
+/// Every item of the context menus of the page's text, the page, the section and the notebook
+/// is a command in the palette: one of the same name, or one naming what it acts on as well.
+#[test]
+fn every_context_menu_action_is_a_palette_command() {
+    let scratch = Scratch::new("palette-commands");
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
+    let menu = |at: &'static str, name: &'static str| {
+        [
+            at,
+            "press right",
+            "release right",
+            "settle",
+            name,
+            "key Escape",
+        ]
+    };
+    let mut steps = Vec::from(menu("move 200 106", "accessibility text"));
+    steps.extend(menu("move 1000 87", "accessibility page"));
+    steps.extend(menu("move 109 50", "accessibility section"));
+    steps.extend(["modifiers command", "key \\", "modifiers", "wait 500"]);
+    steps.extend(menu("move 60 76", "accessibility notebook"));
+    let menus = replay(&scratch, Some(&notebook), &steps);
+    let mut labels = Vec::new();
+    for (noun, tree) in ["", "page", "section", "notebook"].into_iter().zip(&menus) {
+        let items = menu_items(tree);
+        assert!(items.len() > 4, "{tree}");
+        // The sync status heads the notebook's.
+        let skip = usize::from(noun == "notebook");
+        labels.extend(items[skip..].iter().map(|label| (noun, label.to_string())));
+    }
+    let mut steps = Vec::new();
+    for (at, (_, label)) in labels.iter().enumerate() {
+        steps.extend(["modifiers command", "key p", "modifiers", "settle"].map(String::from));
+        steps.extend([format!("type >{label}"), "settle".into()]);
+        steps.extend([format!("accessibility {at}"), "key Escape".into()]);
+    }
+    let steps: Vec<_> = steps.iter().map(String::as_str).collect();
+    let scratch = Scratch::new("palette-commands-found");
+    let found = replay(&scratch, Some(&notebook), &steps);
+    for ((noun, label), tree) in labels.iter().zip(&found) {
+        let words = |text: &str| {
+            text.to_lowercase()
+                .split(' ')
+                .map(String::from)
+                .collect::<Vec<_>>()
+        };
+        let wanted = words(label);
+        assert!(
+            options(tree).iter().any(|option| {
+                let have = words(option);
+                *option == label
+                    || wanted.iter().all(|word| have.contains(word))
+                        && option.to_lowercase().contains(noun)
+            }),
+            "the {noun}'s {label:?} has no palette command:\n{tree}"
+        );
+    }
+}
+
 /// The page tabs listed in `tree`, the selected one marked with `*`.
 fn page_tabs(tree: &str) -> Vec<String> {
     tree.lines()

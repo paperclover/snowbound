@@ -33,7 +33,11 @@ struct Row {
     repeated: bool,
     /// Offered only when nothing else matches the query.
     fallback: bool,
+    /// Opens a submenu of places or colours for `action`.
+    submenu: bool,
     target: Option<Target>,
+    /// What choosing it does to `target`, where not to run or open it.
+    action: Option<Action>,
 }
 
 impl Row {
@@ -55,6 +59,7 @@ impl Row {
             separated: self.target.is_none(),
             repeated: self.repeated,
             fallback: self.fallback,
+            submenu: self.submenu,
             ..Item::default()
         }
     }
@@ -92,6 +97,35 @@ impl State {
                 ..Row::default()
             }
         }));
+        // What a context menu does to the page shown, its section, group and notebook.
+        for target in self.shown() {
+            for (action, item) in self.actions(&target) {
+                if !menus::covered(&target, &action) {
+                    commands.push(Row {
+                        text: menus::command_title(&target, &action, item.text),
+                        icon: item.icon,
+                        disabled: item.disabled,
+                        submenu: item.submenu,
+                        target: Some(target.clone()),
+                        action: Some(action),
+                        ..Row::default()
+                    });
+                }
+            }
+        }
+        // And what the page's context menu does at the caret, or to the file selected.
+        let text = self.view.caret_context();
+        for (item, title) in text.iter().flat_map(|context| self.text_items(context)) {
+            if !(commands::COMMANDS.iter()).any(|command| command.title == title) {
+                commands.push(Row {
+                    text: title.to_owned(),
+                    icon: item.icon,
+                    disabled: item.disabled,
+                    target: Some(Target::Text(item.text)),
+                    ..Row::default()
+                });
+            }
+        }
         let mut places = self.recent();
         places.push(Row::heading("Notebooks"));
         places.extend(
@@ -186,14 +220,29 @@ impl State {
             &[(COMMANDS, &items[0]), ("", &items[1])],
             "Search pages, sections and notebooks (type > for commands)",
         );
+        let submenu = |index: usize| id().child(("submenu", index));
+        ui::popup::submenus(&mut self.ui, id(), &items[0], |index| {
+            commands[index].submenu.then(|| submenu(index))
+        });
+        let anchor = Anchor::Right(self.ui.rect(id()).unwrap_or_default());
+        for (index, row) in commands.iter().enumerate() {
+            if let (Some(target), Some(action)) = (&row.target, &row.action)
+                && let Some(chosen) = self.submenu(submenu(index), action, target, anchor)
+            {
+                self.ui.close_popup(id());
+                self.act_on(target.clone(), chosen);
+                return;
+            }
+        }
         let mut rows = [commands, places];
         match picked {
             Some(Pick::Run(mode, index)) => {
-                if let Some(target) = rows[mode].swap_remove(index).target {
-                    let action = match target {
+                let row = rows[mode].swap_remove(index);
+                if let Some(target) = row.target {
+                    let action = row.action.unwrap_or(match target {
                         Target::Command(_) => Action::Run,
                         _ => Action::Open,
-                    };
+                    });
                     self.act_on(target, action);
                 }
             }
@@ -265,6 +314,41 @@ impl State {
             self.actions = None;
             self.act_on(target, action);
         }
+    }
+
+    /// The page shown, its section, the group holding that and its notebook, which the
+    /// palette's commands act on.
+    fn shown(&self) -> Vec<Target> {
+        let Some(session) = &self.session else {
+            return self
+                .notebook()
+                .map(Arc::clone)
+                .map(Target::Notebook)
+                .into_iter()
+                .collect();
+        };
+        let library = &session.library;
+        let path = session.tabs[session.tab].path.clone();
+        let group = menus::folder(&path);
+        let mut shown = vec![
+            Target::Page {
+                library: Arc::clone(library),
+                path: path.clone(),
+                space: session.space,
+            },
+            Target::Section {
+                library: Arc::clone(library),
+                path,
+            },
+        ];
+        if !group.is_empty() && !crate::recycle::binned(&group) {
+            shown.push(Target::Group {
+                library: Arc::clone(library),
+                path: group,
+            });
+        }
+        shown.push(Target::Notebook(Arc::clone(library)));
+        shown
     }
 
     /// Under a heading, the pages shown lately but the one shown, their sections but the one
