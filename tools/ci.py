@@ -375,8 +375,8 @@ def main():
     parser.add_argument('--jobs', type=int, default=4, help='Lanes at once (default 4)')
     parser.add_argument('--test-jobs', type=int, default=4, help='Test executables at once (default 4)')
     parser.add_argument('--timeout', type=float, metavar='MINUTES', help="Each lane's limit, overriding its own")
-    parser.add_argument('--budget', type=float, default=80, metavar='GB',
-                        help='Prune ../snowbound-ci/target to this size after the run (default 80)')
+    parser.add_argument('--budget', type=float, default=40, metavar='GB',
+                        help='Prune ../snowbound-ci/target to this size after the run (default 40)')
     args = parser.parse_args()
     if ROOT == CI:
         sys.exit(f'Run ci.py from another checkout; {CI} is its own.')
