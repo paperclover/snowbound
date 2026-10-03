@@ -138,7 +138,7 @@ pub fn check_box(ui: &mut Ui, part: impl Hash, label: &str, checked: bool) -> Si
             border: Some(if checked || signal.hovered {
                 theme.accent
             } else {
-                theme.chip
+                crate::mix(theme.chip, theme.text, 0.45)
             }),
             radius: 3.0,
             icon: checked.then_some(crate::popup::CHECK),
@@ -156,6 +156,142 @@ pub fn check_box(ui: &mut Ui, part: impl Hash, label: &str, checked: bool) -> Si
     );
     ui.close();
     signal
+}
+
+/// How a segmented control draws its choice, as the platform draws its own.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Segments {
+    /// A raised face sliding along a sunken track: macOS since 11, libadwaita's toggle
+    /// groups and Windows 11's segmented control.
+    #[default]
+    Track,
+    /// Buttons joined in a row, the chosen one pressed in: Mac OS X 10.6's segmented control
+    /// and Windows 7's toggle groups.
+    Joined,
+}
+
+/// `choices` side by side, equally wide, with `chosen` picked: a radio group named `label`
+/// for assistive technology. Tab enters at the choice, and arrows pick the one beside it.
+/// Returns the choice a click or the keyboard picks.
+pub fn segmented(
+    ui: &mut Ui,
+    part: impl Hash,
+    label: &str,
+    choices: &[&str],
+    chosen: usize,
+) -> Option<usize> {
+    let theme = ui.theme.clone();
+    let joined = ui.segments == Segments::Joined;
+    let dark = draw::oklab(theme.text)[0] > 0.5;
+    let [red, green, blue, _] = theme.text;
+    let ink = |alpha| [red, green, blue, alpha];
+    let height = theme.font_size * 2.0;
+    let widest = (choices.iter()).fold(0.0_f32, |widest, choice| widest.max(ui.measure(choice)[0]));
+    let width = (widest + 2.0 * theme.font_size).round();
+    // A track shows around its face; joined buttons fill their border.
+    let inset = if joined { 1.0 } else { 2.0 };
+    let button = |shade: f32| {
+        if dark {
+            crate::mix(theme.popup, theme.text, shade)
+        } else {
+            crate::mix([1.0; 4], theme.chip, 0.75 - shade * 4.0)
+        }
+    };
+    let group = ui.open(
+        part,
+        Spec {
+            size: [crate::children(), px(height)],
+            fill: Some(if joined {
+                button(0.12)
+            } else {
+                ink(if dark { 0.1 } else { 0.07 })
+            }),
+            gradient: joined.then(|| button(0.06)),
+            border: joined.then_some(theme.chip),
+            radius: if joined { 4.0 } else { 6.0 },
+            pad: [inset, inset],
+            role: Some(Role::RadioGroup),
+            ..Spec::default()
+        },
+    );
+    if let Some(node) = ui.access(group) {
+        node.set_label(label);
+        node.set_orientation(accesskit::Orientation::Horizontal);
+    }
+    let target = chosen as f32 * width;
+    let slid = if joined {
+        ui.hold(group.child("slide"), target)
+    } else {
+        ui.animate(group.child("slide"), target)
+    };
+    ui.leaf(
+        "thumb",
+        Spec {
+            flags: Flags::FLOAT,
+            size: [px(width), px(height - 2.0 * inset)],
+            position: [inset + slid, inset],
+            fill: Some(match (joined, dark) {
+                (true, _) => theme.accent,
+                (false, true) => crate::mix(theme.popup, theme.text, 0.3),
+                (false, false) => [1.0; 4],
+            }),
+            gradient: joined.then(|| crate::mix(theme.accent, [0.0, 0.0, 0.0, 1.0], 0.25)),
+            border: (!joined && !dark).then(|| ink(0.08)),
+            shadow: (!joined && !dark).then_some([0.0, 0.0, 0.0, 0.12]),
+            radius: if joined { 3.0 } else { 4.0 },
+            ..Spec::default()
+        },
+    );
+    // Rules between the choices; a track leaves them out beside its face.
+    for between in 1..choices.len() {
+        if !joined && (between == chosen || between == chosen + 1) {
+            continue;
+        }
+        let length = if joined { height - 2.0 } else { height * 0.5 };
+        ui.leaf(
+            ("rule", between),
+            Spec {
+                flags: Flags::FLOAT,
+                size: [px(1.0), px(length)],
+                position: [
+                    inset + between as f32 * width - 0.5,
+                    (height - length) / 2.0,
+                ],
+                fill: Some(if joined { theme.chip } else { ink(0.15) }),
+                ..Spec::default()
+            },
+        );
+    }
+    let mut picked = None;
+    for (index, choice) in choices.iter().enumerate() {
+        let on = index == chosen;
+        let id = ui.open(
+            index,
+            Spec {
+                flags: Flags::CLICKABLE,
+                size: [px(width), crate::fill()],
+                text: Some(choice),
+                color: Some(if on && joined { [1.0; 4] } else { theme.text }),
+                hover_fill: (!on).then(|| ink(0.06)),
+                radius: if joined { 3.0 } else { 4.0 },
+                center: true,
+                role: Some(Role::RadioButton),
+                ..Spec::default()
+            },
+        );
+        if let Some(node) = ui.access(id) {
+            node.set_toggled(on.into());
+        }
+        ui.close();
+        let signal = ui.signal(id);
+        // The keyboard's arrows pick the segment they move to, as a radio group's do.
+        let arrived = ui.lasted(id.child("focus"), signal.focused) == Duration::ZERO;
+        if !on && (signal.clicked || signal.focused && arrived) {
+            picked = Some(index);
+        }
+    }
+    ui.close();
+    picked
 }
 
 /// Scrollers the platform paints, fixed along the content's edges, as Mac OS X 10.6's are.

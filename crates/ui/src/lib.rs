@@ -15,8 +15,9 @@ mod widgets;
 pub use list::{List, Row, Rows, list};
 pub use theme::{Menu, PopupMotion, Section, Shades, Shadow, Theme};
 pub use widgets::{
-    PaintedScroller, Scroller, ScrollerPart, Scrollers, badge, badge_width, button, check_box,
-    dialog_buttons, edit_key, edit_modifiers, password_field, scrollbar, text_field,
+    PaintedScroller, Scroller, ScrollerPart, Scrollers, Segments, badge, badge_width, button,
+    check_box, dialog_buttons, edit_key, edit_modifiers, password_field, scrollbar, segmented,
+    text_field,
 };
 
 use draw::{
@@ -684,6 +685,7 @@ pub struct Ui {
     /// The platform's scrollers, where it draws fixed ones beside the content; scrollbars
     /// overlay the content otherwise.
     pub scrollers: Option<Scrollers>,
+    pub segments: Segments,
     frame: u64,
     now: Instant,
     scale: f32,
@@ -747,6 +749,7 @@ impl Ui {
             icon_palette: draw::Palette::default(),
             window_focused: true,
             scrollers: None,
+            segments: Segments::default(),
             frame: 0,
             now: Instant::now(),
             scale: 1.0,

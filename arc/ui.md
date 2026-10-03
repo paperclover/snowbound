@@ -29,7 +29,9 @@ fades in, a combo's field widens into its list, and a dialog swings up into
 place near the window's top over a dimmed window, as Windows opens a window; the
 command palette swings in the same way, undimmed. A filtered list shows its new
 results at once. On GNOME and KDE, menus instead
-look and move as the desktop's own (see [platforms](platforms.md)).
+look and move as the desktop's own (see [platforms](platforms.md)). A segmented control
+slides a raised face along a track, as macOS, libadwaita and Windows 11 draw theirs, and on
+Mac OS X 10.6 and Windows 7 presses one of a row of joined buttons.
 
 ## Why not native widgets
 

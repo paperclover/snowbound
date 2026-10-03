@@ -304,7 +304,9 @@ impl Ui {
                         rect: built.rect,
                         group,
                         popup,
-                        selected: access.is_selected() == Some(true),
+                        selected: access.is_selected() == Some(true)
+                            || role == Role::RadioButton
+                                && access.toggled() == Some(accesskit::Toggled::True),
                         typing: built.flags.intersects(Flags::FOCUSABLE | Flags::CUSTOM),
                         custom: built.flags.contains(Flags::CUSTOM),
                     });

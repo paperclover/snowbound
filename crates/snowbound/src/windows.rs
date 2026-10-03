@@ -1057,8 +1057,13 @@ unsafe extern "system" fn fault(
     0
 }
 
-/// The interface keeps its own font, which fontique finds as Segoe UI.
-pub fn system_interface(_: &mut Ui) {}
+/// The interface keeps its own font, which fontique finds as Segoe UI. Windows 7 has no
+/// segmented control, so Office's joined toggle buttons stand in.
+pub fn system_interface(ui: &mut Ui) {
+    if version() < (6, 2, 0) {
+        ui.segments = ui::Segments::Joined;
+    }
+}
 
 /// Resizing takes the window's edges.
 pub fn resize_grip(_: &mut Ui, _: &Window, _: [f32; 2]) {}

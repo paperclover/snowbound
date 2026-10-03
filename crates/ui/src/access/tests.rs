@@ -748,3 +748,55 @@ impl accesskit_consumer::TreeChangeHandler for NoChanges {
     fn focus_moved(&mut self, _: Option<&NodeRef>, _: Option<&NodeRef>) {}
     fn node_removed(&mut self, _: &NodeRef) {}
 }
+
+/// A segmented control of sides with `chosen` picked, which a pick moves.
+fn sides(ui: &mut Ui, chosen: &mut usize) {
+    if let Some(picked) = segmented(ui, "sides", "Page tabs", &["Left", "Right"], *chosen) {
+        *chosen = picked;
+    }
+}
+
+#[test]
+fn a_segmented_control_is_a_radio_group_tab_enters_at_its_choice_and_arrows_pick() {
+    let mut ui = new_ui();
+    let mut chosen = 1;
+    for _ in 0..2 {
+        frame(&mut ui, |ui| sides(ui, &mut chosen));
+    }
+    assert_eq!(
+        snapshot(&tree(&mut ui)),
+        r#"Window "Notes" [focused]
+  RadioGroup "Page tabs"
+    RadioButton "Left" [untoggled] {click focus}
+    RadioButton "Right" [toggled] {click focus}
+"#
+    );
+    let segment = |index: usize| Some(Id::ROOT.child("sides").child(index));
+    key(&mut ui, NamedKey::Tab);
+    frame(&mut ui, |ui| sides(ui, &mut chosen));
+    assert_eq!(ui.focused(), segment(1), "Tab enters at the choice");
+    assert_eq!(chosen, 1);
+    key(&mut ui, NamedKey::ArrowLeft);
+    for _ in 0..2 {
+        frame(&mut ui, |ui| sides(ui, &mut chosen));
+    }
+    assert_eq!((ui.focused(), chosen), (segment(0), 0), "an arrow picks");
+    // A click picks without moving the focus, which stays put on later frames.
+    let [left, top, right, bottom] = ui.rect(segment(1).unwrap()).unwrap();
+    ui.event(Event::PointerMoved([
+        (left + right) / 2.0,
+        (top + bottom) / 2.0,
+    ]));
+    for pressed in [true, false] {
+        ui.event(Event::Button {
+            button: winit::event::MouseButton::Left,
+            pressed,
+            at: Instant::now(),
+        });
+        frame(&mut ui, |ui| sides(ui, &mut chosen));
+    }
+    for _ in 0..2 {
+        frame(&mut ui, |ui| sides(ui, &mut chosen));
+    }
+    assert_eq!(chosen, 1);
+}

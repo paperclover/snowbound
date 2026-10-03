@@ -112,13 +112,14 @@ extern "C" fn yes(_: &AnyObject, _: Sel) -> Bool {
     Bool::YES
 }
 
-/// 10.6's interface font, Lucida Grande, which fontique's system-ui doesn't name, and its
-/// scrollers.
+/// 10.6's interface font, Lucida Grande, which fontique's system-ui doesn't name, its
+/// scrollers and its segmented controls.
 pub fn system_interface(ui: &mut ui::Ui) {
     if !before_lion() {
         return;
     }
     ui.set_system_font("Lucida Grande");
+    ui.segments = ui::Segments::Joined;
     ui.scrollers = Some(if PRETEND.load(Ordering::Relaxed) {
         sampled_scrollers()
     } else {
