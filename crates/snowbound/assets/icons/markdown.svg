@@ -3,7 +3,7 @@
     <linearGradient id="g0" x2="0" y2="1"><stop offset="0" stop-color="#ffffff"/><stop offset="1" stop-color="#e3e9f0"/></linearGradient>
   </defs>
   <path d="M2.5 4.75H13.5A1 1 0 0 1 14.5 5.75V12.25A1 1 0 0 1 13.5 13.25H2.5A1 1 0 0 1 1.5 12.25V5.75A1 1 0 0 1 2.5 4.75Z" fill="#000000" fill-opacity="0.16"/>
-  <path d="M2.5 4H13.5A1 1 0 0 1 14.5 5V11.5A1 1 0 0 1 13.5 12.5H2.5A1 1 0 0 1 1.5 11.5V5A1 1 0 0 1 2.5 4Z" fill="url(#g0)" stroke="#98a4b3" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M2.5 4H13.5A1 1 0 0 1 14.5 5V11.5A1 1 0 0 1 13.5 12.5H2.5A1 1 0 0 1 1.5 11.5V5A1 1 0 0 1 2.5 4Z" fill="url(#g0)" stroke="currentColor" stroke-opacity="0.45" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M3.5 10.25V6.25L5.25 8.25L7 6.25V10.25" fill="none" stroke="#3a4656" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
   <path class="accent" d="M11 6.25V10.25M9.5 8.75L11 10.25L12.5 8.75" fill="none" stroke="#1f7cf0" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

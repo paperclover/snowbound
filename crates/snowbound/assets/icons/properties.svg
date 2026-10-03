@@ -4,7 +4,7 @@
     <linearGradient id="g1" x2="0" y2="1"><stop offset="0" stop-color="#79c2ff"/><stop offset="1" stop-color="#1f7cf0"/></linearGradient>
   </defs>
   <path d="M2.5 2.75H13.5A1 1 0 0 1 14.5 3.75V13.75A1 1 0 0 1 13.5 14.75H2.5A1 1 0 0 1 1.5 13.75V3.75A1 1 0 0 1 2.5 2.75Z" fill="#000000" fill-opacity="0.16"/>
-  <path d="M2.5 2H13.5A1 1 0 0 1 14.5 3V13A1 1 0 0 1 13.5 14H2.5A1 1 0 0 1 1.5 13V3A1 1 0 0 1 2.5 2Z" fill="url(#g0)" stroke="#98a4b3" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M2.5 2H13.5A1 1 0 0 1 14.5 3V13A1 1 0 0 1 13.5 14H2.5A1 1 0 0 1 1.5 13V3A1 1 0 0 1 2.5 2Z" fill="url(#g0)" stroke="currentColor" stroke-opacity="0.45" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
   <path class="accent" d="M2.5 2.5H13.5A0.5 0.5 0 0 1 14 3V4.25H2V3A0.5 0.5 0 0 1 2.5 2.5Z" fill="url(#g1)"/>
   <path d="M3.5 6.75H5.75M3.5 9.25H5.75M3.5 11.75H5.75" fill="none" stroke="#7b8796" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M7.3 6H12.7A0.3 0.3 0 0 1 13 6.3V7.2A0.3 0.3 0 0 1 12.7 7.5H7.3A0.3 0.3 0 0 1 7 7.2V6.3A0.3 0.3 0 0 1 7.3 6Z" fill="#ffffff" stroke="#98a4b3" stroke-width="0.6"/>

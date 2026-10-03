@@ -6,13 +6,13 @@
     <linearGradient id="g3" x2="0" y2="1"><stop offset="0" stop-color="#f1f4f8"/><stop offset="1" stop-color="#c9d3df"/></linearGradient>
   </defs>
   <path d="M1.5 2.25L7 2.25L9.5 4.75L9.5 12.25L1.5 12.25Z" fill="#000000" fill-opacity="0.16"/>
-  <path d="M1.5 1.5L7 1.5L9.5 4L9.5 11.5L1.5 11.5Z" fill="url(#g0)" stroke="#98a4b3" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M1.5 1.5L7 1.5L9.5 4L9.5 11.5L1.5 11.5Z" fill="url(#g0)" stroke="currentColor" stroke-opacity="0.45" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M7 2.25L7 4.75L9.5 4.75Z" fill="#000000" fill-opacity="0.16"/>
-  <path d="M7 1.5L7 4L9.5 4Z" fill="url(#g1)" stroke="#98a4b3" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M7 1.5L7 4L9.5 4Z" fill="url(#g1)" stroke="currentColor" stroke-opacity="0.45" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
   <path class="accent" d="M3 5.5H7M3 7.5H7" fill="none" stroke="#8cc0f5" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M6.5 5.25L12 5.25L14.5 7.75L14.5 15.25L6.5 15.25Z" fill="#000000" fill-opacity="0.16"/>
-  <path d="M6.5 4.5L12 4.5L14.5 7L14.5 14.5L6.5 14.5Z" fill="url(#g2)" stroke="#98a4b3" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M6.5 4.5L12 4.5L14.5 7L14.5 14.5L6.5 14.5Z" fill="url(#g2)" stroke="currentColor" stroke-opacity="0.45" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M12 5.25L12 7.75L14.5 7.75Z" fill="#000000" fill-opacity="0.16"/>
-  <path d="M12 4.5L12 7L14.5 7Z" fill="url(#g3)" stroke="#98a4b3" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M12 4.5L12 7L14.5 7Z" fill="url(#g3)" stroke="currentColor" stroke-opacity="0.45" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
   <path class="accent" d="M8 8.5H12.5M8 10.5H12.5M8 12.5H11" fill="none" stroke="#8cc0f5" stroke-width="1" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

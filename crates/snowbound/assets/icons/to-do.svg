@@ -5,9 +5,9 @@
     <linearGradient id="g2" gradientUnits="userSpaceOnUse" x2="0" y1="1.8" y2="5.9"><stop offset="0" stop-color="#86e88a"/><stop offset="1" stop-color="#28b04a"/></linearGradient>
   </defs>
   <path d="M2.1 2.75H5.9A0.6 0.6 0 0 1 6.5 3.35V7.15A0.6 0.6 0 0 1 5.9 7.75H2.1A0.6 0.6 0 0 1 1.5 7.15V3.35A0.6 0.6 0 0 1 2.1 2.75Z" fill="#000000" fill-opacity="0.16"/>
-  <path d="M2.1 2H5.9A0.6 0.6 0 0 1 6.5 2.6V6.4A0.6 0.6 0 0 1 5.9 7H2.1A0.6 0.6 0 0 1 1.5 6.4V2.6A0.6 0.6 0 0 1 2.1 2Z" fill="url(#g0)" stroke="#98a4b3" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M2.1 2H5.9A0.6 0.6 0 0 1 6.5 2.6V6.4A0.6 0.6 0 0 1 5.9 7H2.1A0.6 0.6 0 0 1 1.5 6.4V2.6A0.6 0.6 0 0 1 2.1 2Z" fill="url(#g0)" stroke="currentColor" stroke-opacity="0.45" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M2.1 9.75H5.9A0.6 0.6 0 0 1 6.5 10.35V14.15A0.6 0.6 0 0 1 5.9 14.75H2.1A0.6 0.6 0 0 1 1.5 14.15V10.35A0.6 0.6 0 0 1 2.1 9.75Z" fill="#000000" fill-opacity="0.16"/>
-  <path d="M2.1 9H5.9A0.6 0.6 0 0 1 6.5 9.6V13.4A0.6 0.6 0 0 1 5.9 14H2.1A0.6 0.6 0 0 1 1.5 13.4V9.6A0.6 0.6 0 0 1 2.1 9Z" fill="url(#g1)" stroke="#98a4b3" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M2.1 9H5.9A0.6 0.6 0 0 1 6.5 9.6V13.4A0.6 0.6 0 0 1 5.9 14H2.1A0.6 0.6 0 0 1 1.5 13.4V9.6A0.6 0.6 0 0 1 2.1 9Z" fill="url(#g1)" stroke="currentColor" stroke-opacity="0.45" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M2.6 4.5L3.9 5.9L7.2 1.8" fill="none" stroke="#1b8a36" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M2.6 4.5L3.9 5.9L7.2 1.8" fill="none" stroke="url(#g2)" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M8.5 4H14.5V5H8.5ZM8.5 11H14.5V12H8.5Z" fill="currentColor"/>

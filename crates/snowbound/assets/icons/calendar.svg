@@ -5,7 +5,7 @@
     <linearGradient id="g2" gradientUnits="userSpaceOnUse" x2="0" y1="0.9" y2="4.6"><stop offset="0" stop-color="#6a7482"/><stop offset="1" stop-color="#3b4350"/></linearGradient>
   </defs>
   <path d="M2.5 3.25L13.5 3.25A1 1 0 0 1 14.5 4.25L14.5 14.25A1 1 0 0 1 13.5 15.25L2.5 15.25A1 1 0 0 1 1.5 14.25L1.5 4.25A1 1 0 0 1 2.5 3.25Z" fill="#000000" fill-opacity="0.16"/>
-  <path d="M2.5 2.5H13.5A1 1 0 0 1 14.5 3.5V13.5A1 1 0 0 1 13.5 14.5H2.5A1 1 0 0 1 1.5 13.5V3.5A1 1 0 0 1 2.5 2.5Z" fill="url(#g0)" stroke="#98a4b3" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M2.5 2.5H13.5A1 1 0 0 1 14.5 3.5V13.5A1 1 0 0 1 13.5 14.5H2.5A1 1 0 0 1 1.5 13.5V3.5A1 1 0 0 1 2.5 2.5Z" fill="url(#g0)" stroke="currentColor" stroke-opacity="0.45" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M1.5 7.25L1.5 4.25A1 1 0 0 1 2.5 3.25L13.5 3.25A1 1 0 0 1 14.5 4.25L14.5 7.25Z" fill="#000000" fill-opacity="0.16"/>
   <path d="M1.5 6.5V3.5A1 1 0 0 1 2.5 2.5H13.5A1 1 0 0 1 14.5 3.5V6.5Z" fill="url(#g1)" stroke="#c42418" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M4 8H6V10H4ZM7 8H9V10H7ZM10 8H12V10H10ZM4 11H6V13H4ZM7 11H9V13H7Z" fill="#b7c5d6"/>

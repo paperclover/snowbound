@@ -1,4 +1,8 @@
 //! Artwork for the window's chrome: tinted interface icons and the toolbar's tag buttons.
+//!
+//! Neutral parts drawn over the row, as arrows and a page's or window's outer edge, paint
+//! `currentColor` at an opacity, so they follow the label's colour on any row or highlight;
+//! coloured parts, and what lies on a sheet, keep their colours.
 
 /// Artwork of one or more files under `assets/`, painted in order, as a badge over its icon.
 macro_rules! art {
