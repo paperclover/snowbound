@@ -1719,6 +1719,8 @@ pub struct StoredPage {
     pub page: Page,
     /// The page's `LastModifiedTime`, Time32 seconds since 1980.
     pub modified: Option<u32>,
+    /// Who changed it last: the `AuthorMostRecent` of its latest modified object.
+    pub author: Option<String>,
 }
 
 /// The pages of the section file `image` holds, in section order; pages the model cannot
@@ -1743,10 +1745,20 @@ fn pages_of(document: &Document<'_>) -> Result<Vec<StoredPage>> {
         .into_iter()
         .filter_map(|(space, id)| {
             let revision = document.active(space).ok()?;
+            let latest = (revision.nodes.values())
+                .filter(|node| node.latest_author.is_some())
+                .max_by_key(|node| node.modified);
+            let author = latest
+                .and_then(|node| revision.nodes.get(&node.latest_author?))
+                .and_then(|node| match &node.kind {
+                    onestore::document::Kind::Author { name } => name.clone(),
+                    _ => None,
+                });
             Some(StoredPage {
                 space,
                 page: Page::from_revision(revision, id).ok()?,
                 modified: revision.nodes.get(&id).and_then(|node| node.modified),
+                author,
             })
         })
         .collect())

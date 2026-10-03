@@ -1393,3 +1393,35 @@ fn walkdir(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     }
     files
 }
+
+/// A stored page names who changed it last, which tells another author's changes from
+/// one's own.
+#[test]
+fn a_stored_page_names_who_changed_it_last() {
+    let image = onestore::create_section("Authors.one", "Body", "Alice").unwrap();
+    let first = &notebook::session::stored_pages(&image).unwrap()[0];
+    assert_eq!(first.author.as_deref(), Some("Alice"));
+    let arena = onestore::Arena::default();
+    let mut section = onestore::Section::open(&arena, image).unwrap();
+    // Enter, which stamps both paragraphs with who pressed it.
+    let new_id = || onestore::page::text::new_id().unwrap();
+    let op = PageOp::Split {
+        text: first_text(&first.page),
+        at: 0,
+        paragraph: new_id(),
+        right: new_id(),
+        lists: Vec::new(),
+    };
+    let edit = Edit {
+        // A minute on, so the edit is the page's latest change.
+        at: model_ops::now() + 600_000_000,
+        ops: vec![Op::Page {
+            space: first.space,
+            op,
+        }],
+    };
+    section.apply("Bob", &edit).unwrap();
+    section.seal().unwrap();
+    let edited = &notebook::session::stored_pages(&section.image()).unwrap()[0];
+    assert_eq!(edited.author.as_deref(), Some("Bob"));
+}

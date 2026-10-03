@@ -5211,7 +5211,7 @@ struct PageTab<'a> {
     conflicted: bool,
     /// A search found the page, which OneNote marks yellow.
     found: bool,
-    /// Another author changed it since it was last viewed, which OneNote sets bold.
+    /// Another author changed it since it was last viewed, which its dot marks.
     unread: bool,
     /// The colours of the others who have it open.
     peers: &'a [[f32; 4]],
@@ -5235,8 +5235,8 @@ fn page_tab(
     selected: bool,
     (rounding, left): (f32, bool),
 ) -> (ui::Signal, Option<bool>) {
-    // A rename field's text stands where the label did.
-    let pad = 10.0 + 16.0 * tab.indent as f32
+    // A rename field's text stands where the label did, past room for the unread dot.
+    let pad = 16.0 + 16.0 * tab.indent as f32
         - if tab.renaming.is_some() {
             rename::PAD
         } else {
@@ -5290,10 +5290,19 @@ fn page_tab(
         };
         (spec, color)
     };
+    // Just before the label, in the tab's leading pad.
+    let dot = ui::shell::DOT;
+    let unread = [
+        (spec.pad[0] - dot - 2.0).max(spec.inset[0]),
+        (ROW - ROW_GAP - dot) / 2.0,
+    ];
     let row = ui.open(id, spec);
     if let Some(node) = ui.access(row) {
         node.set_selected(selected);
         node.set_level(tab.indent as usize + 1);
+    }
+    if tab.unread {
+        ui::shell::unread_dot(ui, "unread", unread);
     }
     let kept = match tab.renaming {
         Some(name) => rename::edit(ui, theme, name, ROW - ROW_GAP),
@@ -5303,7 +5312,6 @@ fn page_tab(
                 Spec {
                     size: [fill(), px(ROW - ROW_GAP)],
                     text: Some(tab.label),
-                    bold: tab.unread,
                     overflow: ui::Overflow::Ellipsis,
                     color: Some(color),
                     ..Spec::default()

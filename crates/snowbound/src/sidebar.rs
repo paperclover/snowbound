@@ -98,7 +98,7 @@ struct Ghost {
     depth: u32,
     dim: bool,
     selected: Option<[f32; 4]>,
-    bold: bool,
+    unread: bool,
 }
 
 impl Ghost {
@@ -109,7 +109,7 @@ impl Ghost {
             depth: row.depth,
             dim: row.dim,
             selected: row.selected,
-            bold: row.bold,
+            unread: row.unread,
         }
     }
 }
@@ -255,7 +255,7 @@ fn sidebar(
             fold: Some(unfolded),
             selected: None,
             renamed,
-            bold: tree.unread.contains(&key),
+            unread: tree.unread.contains(&key),
         };
         if let Some((lifted, slot)) = tree.lifted_notebook {
             if lifted == index {
@@ -362,7 +362,7 @@ fn sidebar(
                 fold: None,
                 selected: None,
                 renamed: false,
-                bold: false,
+                unread: false,
             },
         );
         if row.clicked {
@@ -420,7 +420,7 @@ fn folder(
             fold: None,
             selected: (open == Some(section.path.as_str())).then_some(section_color(color)),
             renamed: renaming,
-            bold: tree.unread.contains(&library.key(&section.path)),
+            unread: tree.unread.contains(&library.key(&section.path)),
         };
         if lifts(tree, notebook, &section.path, &row) {
             continue;
@@ -467,7 +467,7 @@ fn folder(
             fold: Some(unfolded),
             selected: None,
             renamed: renaming,
-            bold: tree.unread.contains(&key),
+            unread: tree.unread.contains(&key),
         };
         // A dragged group's rows fold away beneath it.
         let lifted = lifts(tree, notebook, &group.path, &row);
@@ -529,7 +529,7 @@ fn folder(
                 fold: None,
                 selected: None,
                 renamed: false,
-                bold: false,
+                unread: false,
             },
         );
         if row.clicked {
@@ -726,8 +726,8 @@ struct Row<'a> {
     selected: Option<[f32; 4]>,
     /// The row is being renamed: its label is the tree's rename field.
     renamed: bool,
-    /// It holds unread pages, which OneNote sets bold.
-    bold: bool,
+    /// It holds unread pages, which its dot marks.
+    unread: bool,
 }
 
 /// One row of the tree: its signal, and whether its fold arrow was clicked.
@@ -755,6 +755,12 @@ fn tree_row(ui: &mut Ui, tree: &mut Tree, id: Id, row: Row) -> (Signal, bool) {
             ..Spec::default()
         },
     );
+    // Just before the row's icon, a top row's reaching into the tree's margin.
+    if row.unread {
+        let (icon, dot) = (ROW_PAD + INDENT * row.depth as f32, ui::shell::DOT);
+        let at = [icon - dot - 2.0, (ROW - dot) / 2.0];
+        ui::shell::unread_dot(ui, "unread", at);
+    }
     if let Some(node) = ui.access(id) {
         node.set_label(row.label);
         node.set_level(row.depth as usize + 1);
@@ -788,7 +794,6 @@ fn tree_row(ui: &mut Ui, tree: &mut Tree, id: Id, row: Row) -> (Signal, bool) {
                 Spec {
                     size: [fill(), px(ROW)],
                     text: Some(row.label),
-                    bold: row.bold,
                     color: Some(color),
                     ..Spec::default()
                 },
@@ -1093,7 +1098,7 @@ impl crate::State {
                 fold: None,
                 selected: ghost.selected,
                 renamed: false,
-                bold: ghost.bold,
+                unread: ghost.unread,
             },
         );
         self.ui.close();

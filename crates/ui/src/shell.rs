@@ -22,6 +22,24 @@ const ARROW: f32 = 10.0;
 const MORE: f32 = 14.0;
 /// Where a section tab's label starts inside it.
 pub const TAB_PAD: f32 = 10.0;
+/// Side of the dot marking something unread, as Mail marks unread mail.
+pub const DOT: f32 = 6.0;
+
+/// The dot marking something unread, in the accent, floating in the box being built at
+/// `position`, its top left corner.
+pub fn unread_dot(ui: &mut Ui, part: impl std::hash::Hash, position: [f32; 2]) {
+    ui.leaf(
+        part,
+        Spec {
+            flags: Flags::FLOAT,
+            size: [px(DOT), px(DOT)],
+            position,
+            fill: Some(ui.theme.accent),
+            radius: DOT / 2.0,
+            ..Spec::default()
+        },
+    );
+}
 /// How far section tabs fade out at an end of their row they are cut at, and how near it a
 /// dragged tab scrolls the row on.
 const EDGE: f32 = 20.0;
@@ -36,7 +54,7 @@ const EDGE: f32 = 20.0;
 /// The row is as wide as the tabs, and gives up all of that where its own row lacks room.
 /// Then the tabs scroll sideways under the wheel, either way it turns, fading out at the
 /// ends they are cut at into the row's `fill`, and the open tab scrolls into view as it
-/// opens. A tab given `true` after its colour reads bold, as an unread section's does.
+/// opens. A tab given `true` after its colour shows the unread dot in its leading pad.
 #[allow(clippy::too_many_arguments)]
 pub fn section_tabs(
     ui: &mut Ui,
@@ -54,10 +72,10 @@ pub fn section_tabs(
     let mut left = crate::SHADOW[0];
     let placed: Vec<_> = tabs
         .iter()
-        .map(|&(name, _, bold)| {
+        .map(|&(name, ..)| {
             let label = ui
                 .texts
-                .styled(name, ui.theme.font_size, bold, false, None, ui.frame);
+                .styled(name, ui.theme.font_size, false, false, None, ui.frame);
             let width = TAB_PAD + label.size[0] + 4.0 + lean(height);
             left += width;
             (left - width, width)
@@ -144,7 +162,7 @@ pub fn section_tabs(
         .chain((active < tabs.len() && Some(active) != lifted).then_some(active))
         .chain(lifted);
     for index in order {
-        let (name, color, bold) = tabs[index];
+        let (name, color, unread) = tabs[index];
         let (x, width) = placed[index];
         // Keyed by name, so a tab eases from where it stood when the tabs are reordered.
         let key = ui.id(("x", name));
@@ -179,7 +197,6 @@ pub fn section_tabs(
                 size: [px(width), px(tall)],
                 position: [x - offset, height - tall],
                 text: Some(name),
-                bold,
                 color: Some(mix(mix(theme.ink, fill, 0.2), theme.ink, open)),
                 fill: Some(if lit == Some(index) {
                     mix(colors.frame[0], [1.0; 4], 0.08)
@@ -198,6 +215,13 @@ pub fn section_tabs(
                 ..Spec::default()
             },
         );
+        if unread {
+            let position = [
+                x - offset + (TAB_PAD - DOT) / 2.0,
+                height - tall + (tall - DOT) / 2.0,
+            ];
+            unread_dot(ui, ("unread", index), position);
+        }
         if let Some(node) = ui.access(tab_id(row, index)) {
             node.set_selected(index == active);
         }

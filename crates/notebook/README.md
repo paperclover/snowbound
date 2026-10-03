@@ -352,7 +352,8 @@ targets are `None`.
 
 `Notebook::read_section(path)` reads a section file as stored, without opening a
 replica, and `session::stored_pages(image)` builds its pages with each page's
-`LastModifiedTime`: the app's search indexes the sections it has not opened this way.
+`LastModifiedTime` and the author of its latest change: the app's search indexes the
+sections it has not opened this way, and unread changes leave out the reader's own.
 
 A password-protected section lists as `Locked`. `Notebook::unlock(path, password)` opens
 its key (a wrong password is `Error::Protected(PasswordMismatch)`), and

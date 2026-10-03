@@ -1,6 +1,6 @@
-//! Unread changes, as OneNote 2010 shows them: a page another author changed since it was
-//! last viewed is bold in the page list, and so are its section's tab and row and the groups
-//! and notebook holding it, until the page is viewed and left or marked as read. OneNote keeps
+//! Unread changes, as OneNote 2010 keeps them: a page another author changed since it was
+//! last viewed has a dot in the page list, where OneNote sets it bold, and so do its section's
+//! tab and row and the groups and notebook holding it, until the page is viewed and left or marked as read. OneNote keeps
 //! this, and whether a notebook shows it, per user and machine in its cache, never in the
 //! notebook's files; this keeps it in the cache folder's `read.json`.
 
@@ -121,20 +121,23 @@ impl Reads {
         self.save();
     }
 
-    /// Takes in a section as its file stands, its pages with their `LastModifiedTime`: those
-    /// changed since it was last known are unread.
+    /// Takes in a section as its file stands, its pages with their `LastModifiedTime` and
+    /// whether the reader changed them last: those another author changed since it was last
+    /// known are unread.
     fn arrived(
         &mut self,
         notebook: &str,
         section: [u8; 16],
-        pages: impl IntoIterator<Item = (ExGuid, Option<u32>)>,
+        pages: impl IntoIterator<Item = (ExGuid, Option<u32>, bool)>,
     ) {
         let now = now();
         let kept = self.section_mut(notebook, section);
         let read = kept.read;
         let mut newest = read.max(now);
-        for (space, modified) in pages {
-            if modified.is_some_and(|modified| modified > read) {
+        for (space, modified, mine) in pages {
+            if mine {
+                kept.unread.remove(&space);
+            } else if modified.is_some_and(|modified| modified > read) {
                 kept.unread.insert(space);
             }
             newest = newest.max(modified.unwrap_or(0));
@@ -246,22 +249,56 @@ impl State {
             viewing.map(|(notebook, section, space)| (notebook, section, space, false));
     }
 
-    /// Pages of the open section another author changed, as its sync reports them.
+    /// Pages of the open section another client changed, as its sync reports them: those
+    /// another author changed last are unread, once read on a thread of their own.
     pub(crate) fn changed_elsewhere(&mut self, spaces: &[ExGuid]) {
-        if let Some(session) = &self.session
-            && let Some(section) = session
-                .library
-                .section_identity(&session.tabs[session.tab].path)
-        {
-            self.reads
-                .changed(&session.library.location, section, spaces.iter().copied());
+        let Some(session) = &self.session else {
+            return;
+        };
+        let Some(section) = session
+            .library
+            .section_identity(&session.tabs[session.tab].path)
+        else {
+            return;
+        };
+        let (location, spaces) = (session.library.location.clone(), spaces.to_vec());
+        let (replica, proxy, me) = (
+            Arc::clone(session.section.replica()),
+            self.proxy.clone(),
+            self.me(),
+        );
+        crate::spawn(move || {
+            let pages = (replica.snapshot().ok())
+                .and_then(|image| notebook::session::stored_pages(&image).ok())
+                .unwrap_or_default();
+            let others: Vec<ExGuid> = (spaces.into_iter())
+                .filter(|space| {
+                    !(pages.iter()).any(|page| page.space == *space && me(page.author.as_deref()))
+                })
+                .collect();
+            let _ = proxy.send_event(UserEvent::Then(Box::new(move |state: &mut State| {
+                state.reads.changed(&location, section, others);
+                Ok(())
+            })));
+        });
+    }
+
+    /// Whether an author's name is the reader's: the user name edits are stored under, or the
+    /// account's, as OneNote on another of the reader's computers names them.
+    fn me(&self) -> impl Fn(Option<&str>) -> bool + Send + 'static {
+        let names = [self.author.clone(), crate::platform::user_name()];
+        move |author| {
+            author.map(str::trim).is_some_and(|author| {
+                !author.is_empty()
+                    && (names.iter()).any(|name| name.trim().eq_ignore_ascii_case(author))
+            })
         }
     }
 
     /// Sections of `library` at catalog `paths` whose files another client changed: their
     /// pages are read on a thread of their own, those changed since unread.
     pub(crate) fn sections_changed(&self, library: &Arc<Library>, paths: Vec<String>) {
-        let (library, proxy) = (Arc::clone(library), self.proxy.clone());
+        let (library, proxy, me) = (Arc::clone(library), self.proxy.clone(), self.me());
         crate::spawn(move || {
             let Ok(Some(notebook)) = &library.notebook else {
                 return;
@@ -272,13 +309,15 @@ impl State {
                     let section = library.section_identity(path)?;
                     let image = notebook.read_section(path).ok()?;
                     let pages = notebook::session::stored_pages(&image).ok()?;
+                    let pages: Vec<_> = (pages.into_iter())
+                        .map(|page| (page.space, page.modified, me(page.author.as_deref())))
+                        .collect();
                     Some((section, pages))
                 })
                 .collect();
             let location = library.location.clone();
             let _ = proxy.send_event(UserEvent::Then(Box::new(move |state: &mut State| {
                 for (section, pages) in read {
-                    let pages = pages.iter().map(|page| (page.space, page.modified));
                     state.reads.arrived(&location, section, pages);
                 }
                 Ok(())
@@ -380,13 +419,14 @@ impl State {
 mod tests {
     use super::*;
 
-    fn page(n: u32, modified: Option<u32>) -> (ExGuid, Option<u32>) {
+    fn page(n: u32, modified: Option<u32>) -> (ExGuid, Option<u32>, bool) {
         (
             ExGuid {
                 guid: [n as u8; 16],
                 n,
             },
             modified,
+            false,
         )
     }
 
@@ -434,6 +474,36 @@ mod tests {
         );
         reads.notebooks.get_mut(notebook).unwrap().hidden = true;
         assert!(reads.pages(notebook, section).is_none() && !reads.shown(notebook));
+        notebook::fs::remove_dir_all(&folder).unwrap();
+    }
+
+    /// A page the reader changed last, on this computer or another, is never unread, and
+    /// stops being so once the reader changes it.
+    #[test]
+    fn the_readers_own_changes_are_never_unread() {
+        let folder =
+            std::env::temp_dir().join(format!("snowbound-unread-own-{}", std::process::id()));
+        notebook::fs::create_dir_all(&folder).unwrap();
+        let (notebook, section) = ("/notebook", [3; 16]);
+        let mut reads = Reads::load(&folder);
+        let known = reads.section_mut(notebook, section).read;
+        let mine = |n, modified| {
+            let (space, modified, _) = page(n, Some(modified));
+            (space, modified, true)
+        };
+        reads.arrived(
+            notebook,
+            section,
+            [mine(1, known + 5), page(2, Some(known + 5))],
+        );
+        let unread = |reads: &Reads| -> Vec<u32> {
+            (reads.pages(notebook, section).into_iter().flatten())
+                .map(|space| space.n)
+                .collect()
+        };
+        assert_eq!(unread(&reads), [2]);
+        reads.arrived(notebook, section, [mine(2, known + 9)]);
+        assert!(unread(&reads).is_empty());
         notebook::fs::remove_dir_all(&folder).unwrap();
     }
 }
