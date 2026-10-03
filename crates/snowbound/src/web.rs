@@ -1143,19 +1143,51 @@ fn queue(input: Input) {
 }
 
 /// Whether the page takes the key `key` with modifier bits `held` (Shift, Control, Alt, Meta
-/// from the lowest), rather than leaving it to the browser: the browser keeps its own tab
-/// and window chords, and pastes through its paste event.
+/// from the lowest), rather than leaving it to the browser. Typing and moving about are the
+/// page's, other chords only where Snowbound binds them; developer tools, view source,
+/// reloading, pasting (through the browser's paste event) and the browser's tab and window
+/// chords always stay the browser's.
 #[wasm_bindgen]
 pub fn takes(key: &str, held: u8) -> bool {
-    let command = held & if MAC.get() { 8 } else { 2 } != 0;
-    // The browser's own chords take Ctrl or ⌘ without Alt (see `commands::BROWSER`).
-    if !command || held & 4 != 0 {
+    let [shift, control, alt, meta] = [1, 2, 4, 8].map(|bit| held & bit != 0);
+    let mac = MAC.get();
+    let command = if mac { meta } else { control };
+    let lower = key.to_ascii_lowercase();
+    let tools = if mac {
+        meta && alt && matches!(lower.as_str(), "i" | "j" | "c" | "u" | "k")
+    } else {
+        control && shift && matches!(lower.as_str(), "i" | "j" | "c" | "k")
+            || control && lower == "u"
+    };
+    let browser = command
+        && !alt
+        && matches!(
+            lower.as_str(),
+            "r" | "v" | "w" | "t" | "n" | "q" | "l" | "tab"
+        );
+    if tools || browser || matches!(key, "F5" | "F12") {
+        return false;
+    }
+    let function = key
+        .strip_prefix('F')
+        .is_some_and(|number| number.parse::<u8>().is_ok());
+    // A Mac's Option types characters.
+    if !function && !command && (mac || !alt) {
         return true;
     }
-    !matches!(
-        key.to_ascii_lowercase().as_str(),
-        "v" | "w" | "t" | "n" | "q" | "r" | "l" | "tab"
-    )
+    let pressed = ui::edit_key(&logical_key(key));
+    let modifiers = draw::edit::Modifiers {
+        shift,
+        control: command,
+        option: alt,
+        command,
+    };
+    // F6 steps between the window's groups and the page.
+    key == "F6"
+        || commands::find(&pressed, modifiers).is_some()
+        || draw::edit::Platform::CURRENT
+            .command(&pressed, modifiers)
+            .is_some()
 }
 
 /// Reports modifier bits `held` where they changed.
