@@ -820,3 +820,32 @@ fn switching_renderers_keeps_the_window_as_it_was() {
         "the caret stayed put: {after}"
     );
 }
+
+/// A double click on a sidebar row renames it in place, as the Finder renames a file: the
+/// notebook's folder and the section each take the name typed, and the notebook stays
+/// unfolded through the double click's two clicks.
+#[test]
+fn a_double_click_renames_a_sidebar_row_in_place() {
+    let scratch = Scratch::new("double-click-rename");
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
+    let settings = r#"{"user_name": "Snowbound Test", "sidebar": true}"#;
+    std::fs::write(scratch.0.join("settings.json"), settings).unwrap();
+    let double = |y: &'static str| [y, "press", "release", "press", "release", "settle"];
+    let mut steps = Vec::from(double("move 60 76"));
+    steps.extend(["type Projects", "key Enter", "settle", "wait 500", "settle"]);
+    steps.extend(double("move 80 100"));
+    steps.extend(["type Soups", "key Enter", "settle", "accessibility renamed"]);
+    let [renamed] = replay(&scratch, Some(&notebook), &steps)
+        .try_into()
+        .unwrap();
+    assert!(
+        renamed.contains(r#"TreeItem "Projects" [expanded]"#),
+        "{renamed}"
+    );
+    assert!(
+        renamed.contains(r#"TreeItem "Soups" [selected]"#),
+        "{renamed}"
+    );
+    assert!(scratch.0.join("Projects/Soups.one").exists());
+}

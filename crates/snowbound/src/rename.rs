@@ -30,6 +30,8 @@ pub enum Target {
     },
     /// A page of the open section, by its title in its tab.
     Page(ExGuid),
+    /// A notebook, in its sidebar row, as Notebook Properties renames it.
+    Notebook(Arc<Library>),
 }
 
 impl Renaming {
@@ -37,6 +39,10 @@ impl Renaming {
     pub fn entry(&self, library: &Arc<Library>, path: &str, tab: bool) -> bool {
         matches!(&self.target, Target::Entry { library: renamed, path: at, in_tab }
             if Arc::ptr_eq(renamed, library) && at == path && *in_tab == tab)
+    }
+
+    pub fn notebook(&self, library: &Arc<Library>) -> bool {
+        matches!(&self.target, Target::Notebook(renamed) if Arc::ptr_eq(renamed, library))
     }
 
     pub fn page(&self, space: ExGuid) -> bool {
@@ -89,6 +95,10 @@ impl State {
                 .and_then(|session| session.pages.iter().find(|(page, ..)| page == space))
                 .map(|(_, title, _)| title.clone())
                 .unwrap_or_default(),
+            Target::Notebook(library) => {
+                self.sidebar = true;
+                library.name.clone()
+            }
         };
         self.renaming = Some(Renaming { target, name });
         self.ui.focus_all(field());
@@ -113,6 +123,18 @@ impl State {
                     ));
                 }
             }
+            // As OK in Notebook Properties: the folder takes the name where it can.
+            Target::Notebook(library) if name != library.name => {
+                if library.renamed_location(&name).is_some() {
+                    self.rename_notebook(library, name, None);
+                } else {
+                    self.commands.push(Command::Structure(
+                        library,
+                        Structure::Properties { name, color: None },
+                    ));
+                }
+            }
+            Target::Notebook(_) => {}
             Target::Page(space) => {
                 if let Err(error) = self.retitle(space, name) {
                     crate::platform::alert(

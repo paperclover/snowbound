@@ -46,6 +46,9 @@ pub enum Action {
     Options,
     /// A row's context menu, opened here.
     Menu(Target, [f32; 2]),
+    /// Opens the rename field on a row double-clicked, folding back by `Library::key` the
+    /// row its first click folded.
+    Rename(rename::Target, Option<String>),
     /// Ends renaming, with the name typed or without.
     Renamed(bool),
     /// Explains why a section or group can't be opened: the alert's title and message.
@@ -212,6 +215,7 @@ fn sidebar(
     for (index, library) in notebooks.iter().enumerate() {
         let key = library.key("");
         let unfolded = !folded.contains(&key);
+        let renamed = (tree.renaming.as_ref()).is_some_and(|renaming| renaming.notebook(library));
         let (row, fold) = tree_row(
             ui,
             tree,
@@ -230,7 +234,7 @@ fn sidebar(
                 dim: library.notebook.is_err(),
                 fold: Some(unfolded),
                 selected: None,
-                renamed: false,
+                renamed,
                 bold: tree.unread.contains(&key),
             },
         );
@@ -238,7 +242,10 @@ fn sidebar(
             && crate::library::server_address(&library.location).is_some();
         if row.clicked && unsigned {
             tree.action = Some(Action::SignIn(library.location.clone()));
-        } else if row.clicked || fold {
+        } else if double(&row) && library.catalog().is_some() {
+            let target = rename::Target::Notebook(Arc::clone(library));
+            tree.action = Some(Action::Rename(target, Some(key)));
+        } else if row.clicked && !renamed || fold {
             tree.action = Some(Action::Fold(key));
         }
         if let Some(point) = row.context {
@@ -365,7 +372,14 @@ fn folder(
             continue;
         }
         let (row, _) = tree_row(ui, tree, id, row);
-        if row.clicked && readable && open != Some(section.path.as_str()) {
+        if double(&row) && readable {
+            let target = rename::Target::Entry {
+                library: Arc::clone(library),
+                path: section.path.clone(),
+                in_tab: false,
+            };
+            tree.action = Some(Action::Rename(target, None));
+        } else if row.clicked && readable && open != Some(section.path.as_str()) {
             tree.action = Some(Action::Open {
                 notebook,
                 path: section.path.clone(),
@@ -405,7 +419,14 @@ fn folder(
         let lifted = lifts(tree, notebook, &group.path, &row);
         if !lifted {
             let (row, fold) = tree_row(ui, tree, id, row);
-            if row.clicked || fold {
+            if double(&row) {
+                let target = rename::Target::Entry {
+                    library: Arc::clone(library),
+                    path: group.path.clone(),
+                    in_tab: false,
+                };
+                tree.action = Some(Action::Rename(target, Some(key)));
+            } else if row.clicked && !renaming || fold {
                 tree.action = Some(Action::Fold(key));
             }
             entry(ui, tree, notebook, &group.path, id, true, &row);
@@ -474,6 +495,11 @@ fn folder(
             });
         }
     }
+}
+
+/// Whether `row` was pressed a second time in a double click, which renames it in place.
+fn double(row: &Signal) -> bool {
+    row.pressed && row.unit != draw::edit::SelectionUnit::Grapheme
 }
 
 /// Where the row `lifted` lands with the pointer at height `y` among `rows`: onto a
@@ -848,6 +874,14 @@ impl crate::State {
             Some(Action::Menu(target, point)) => {
                 self.menu = Some((target, point));
                 self.ui.open_popup(crate::menus::id());
+            }
+            Some(Action::Rename(target, refold)) => {
+                if let Some(key) = refold
+                    && !self.folded.remove(&key)
+                {
+                    self.folded.insert(key);
+                }
+                self.rename(target);
             }
             Some(Action::Renamed(keep)) => self.finish_renaming(keep),
             Some(Action::NewNotebook) => self.commands.push(crate::Command::NewNotebook),
