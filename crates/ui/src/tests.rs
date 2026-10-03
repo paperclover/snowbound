@@ -1592,6 +1592,38 @@ fn the_palette_centres_near_the_windows_top_and_chooses_the_best_match() {
 }
 
 #[test]
+fn enter_runs_no_worse_match_past_a_disabled_best_one() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let palette = Id::ROOT.child("palette");
+    let commands = [
+        popup::Item {
+            text: "Hide Spelling Errors",
+            ..popup::Item::default()
+        },
+        popup::Item {
+            text: "Spelling",
+            disabled: true,
+            ..popup::Item::default()
+        },
+    ];
+    let build = |ui: &mut Ui| {
+        let mut chosen = None;
+        frame(ui, |ui| {
+            chosen = popup::palette(ui, palette, &[("", &commands)], "Search commands")
+        });
+        chosen
+    };
+    build(&mut ui);
+    ui.open_popup(palette);
+    build(&mut ui);
+    ui.event(typed("Spelling"));
+    build(&mut ui);
+    ui.event(key(NamedKey::Enter));
+    assert_eq!(build(&mut ui), None);
+    assert!(ui.popup_open(palette));
+}
+
+#[test]
 fn a_prefix_typed_in_the_palette_switches_what_it_lists() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let palette = Id::ROOT.child("palette");

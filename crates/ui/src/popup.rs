@@ -502,12 +502,13 @@ fn choose(
     }
     let typed = &query[prefix.len()..];
     let matches = Matches::new(items, typed, style.rule_band);
-    // Unfiltered, the current item starts highlighted; filtered, the best match.
+    // Unfiltered, the current item starts highlighted; filtered, the best match, unless it
+    // is disabled, so Enter never runs a worse one.
     highlight = highlight.or_else(|| {
         let first = if typed.is_empty() {
             matches.order.iter().position(|index| items[*index].current)
         } else {
-            (0..matches.count()).find(|row| matches.selectable(*row))
+            Some(0).filter(|row| *row < matches.count() && matches.selectable(*row))
         };
         first.map(|row| matches.key(row))
     });
@@ -1532,8 +1533,9 @@ impl<'a> Matches<'a> {
                     })
                     .collect()
             });
-            // Stable, so equal matches keep the items' order.
-            ranked.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
+            // Stable, so equal matches keep the items' order; the text itself typed leads.
+            let typed = |index: usize| items[index].text.eq_ignore_ascii_case(query.trim());
+            ranked.sort_by_key(|(score, index)| (!typed(*index), std::cmp::Reverse(*score)));
             ranked.into_iter().map(|(_, index)| index).collect()
         };
         if order.is_empty() && !pattern.atoms.is_empty() {
