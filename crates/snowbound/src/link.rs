@@ -211,8 +211,8 @@ impl State {
         }
         ui.close();
         crate::buttons(ui);
-        let ok = ui::button(ui, "ok", "OK").clicked || entered;
-        let cancel = ui::button(ui, "cancel", "Cancel").clicked;
+        let [cancel, ok] = ui::dialog_buttons(ui, "OK", true);
+        let ok = ok || entered;
         ui.close();
         ui.close();
         if let Some((space, title)) = picked

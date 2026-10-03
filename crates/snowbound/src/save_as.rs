@@ -134,8 +134,8 @@ impl State {
             dialog.format = at;
         }
         crate::buttons(ui);
-        let cancel = ui::button(ui, "cancel", "Cancel").clicked;
-        let go = ui::button(ui, "go", "Save As").clicked || entered;
+        let [cancel, go] = ui::dialog_buttons(ui, "Save As", true);
+        let go = go || entered;
         ui.close();
         ui.close();
         if !go && !cancel {
@@ -249,7 +249,7 @@ fn choose(ui: &mut ui::Ui, label: &str, names: &[&str], current: usize) -> Optio
         "label",
         Spec {
             size: [px(110.0), px(row)],
-            text: Some(label),
+            text: Some(&format!("{label}:")),
             ..Spec::default()
         },
     );

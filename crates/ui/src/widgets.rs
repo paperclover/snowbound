@@ -32,6 +32,46 @@ pub fn button(ui: &mut Ui, part: impl Hash, text: &str) -> Signal {
     ui.leaf(part, spec)
 }
 
+/// Cancel and a dialog's default button `text`, which takes no clicks while not `enabled`,
+/// in the platform's order: the default last on macOS and GNOME, first on Windows, as their
+/// own dialogs place them. The default wears the accent around it. Whether each was clicked,
+/// Cancel first.
+pub fn dialog_buttons(ui: &mut Ui, text: &str, enabled: bool) -> [bool; 2] {
+    let default = |ui: &mut Ui| {
+        let theme = &ui.theme;
+        let spec = Spec {
+            flags: if enabled {
+                Flags::CLICKABLE
+            } else {
+                Flags::default()
+            },
+            size: [fit(), px(theme.font_size * 2.0)],
+            text: Some(text),
+            color: (!enabled).then_some(theme.text_dim),
+            fill: Some(theme.chip),
+            hover_fill: enabled.then(|| theme.hover()),
+            border: enabled.then_some(theme.accent),
+            radius: 4.0,
+            pad: [theme.font_size * 0.75, 0.0],
+            center: true,
+            role: Some(Role::Button),
+            ..Spec::default()
+        };
+        let clicked = ui.leaf("default", spec).clicked;
+        if !enabled && let Some(node) = ui.access(ui.id("default")) {
+            node.set_disabled();
+        }
+        clicked
+    };
+    let windows = edit::Platform::CURRENT == edit::Platform::Windows;
+    let mut chosen = windows && default(ui);
+    let cancel = button(ui, "cancel", "Cancel").clicked;
+    if !windows {
+        chosen = default(ui);
+    }
+    [cancel, chosen]
+}
+
 /// A short tag in the accent's colour, centred in a box `height` tall, as BETA marks a
 /// feature still settling beside its name.
 pub fn badge(ui: &mut Ui, part: impl Hash, text: &str, height: f32) {

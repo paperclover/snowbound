@@ -168,8 +168,8 @@ impl State {
             },
         );
         crate::buttons(ui);
-        let cancel = ui::button(ui, "cancel", "Cancel").clicked;
-        let create = ui::button(ui, "create", "Create").clicked || entered;
+        let [cancel, create] = ui::dialog_buttons(ui, "Create", true);
+        let create = create || entered;
         ui.close();
         ui.close();
         if browse {

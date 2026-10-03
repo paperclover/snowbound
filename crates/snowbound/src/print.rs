@@ -256,9 +256,9 @@ impl State {
             }
         });
         crate::buttons(ui);
-        let cancel = ui::button(ui, "cancel", "Cancel").clicked;
         let action = if dialog.export { "Export" } else { "Print" };
-        let go = ui::button(ui, "go", action).clicked || entered;
+        let [cancel, go] = ui::dialog_buttons(ui, action, true);
+        let go = go || entered;
         ui.close();
         ui.close();
         if !go && !cancel {

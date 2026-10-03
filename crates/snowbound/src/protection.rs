@@ -262,7 +262,6 @@ impl State {
             dialog,
         });
         self.ui.open_popup(id());
-        self.ui.set_focus(None);
     }
 
     /// Locks every protected section unlocked this run, as Lock All and Ctrl+Alt+L do.
@@ -420,7 +419,8 @@ impl State {
                 },
             );
         };
-        let mut buttons: &[&str] = &["Cancel", "OK"];
+        // Password Protection's own buttons; the others' are Cancel and OK.
+        let mut buttons: &[&str] = &[];
         match &mut asking.dialog {
             Dialog::Unlock(value, wrong) => {
                 text(
@@ -502,12 +502,20 @@ impl State {
                 ..Spec::default()
             },
         );
-        let pressed = buttons
-            .iter()
-            .position(|label| ui::button(ui, *label, label).clicked);
+        let pressed = if buttons.is_empty() {
+            match ui::dialog_buttons(ui, "OK", true) {
+                [true, _] => Some("Cancel"),
+                [_, true] => Some("OK"),
+                _ => None,
+            }
+        } else {
+            (buttons.iter())
+                .find(|label| ui::button(ui, **label, label).clicked)
+                .copied()
+        };
         ui.close();
         ui.close();
-        let chosen = pressed.map(|at| buttons[at]).or(entered.then_some("OK"));
+        let chosen = pressed.or(entered.then_some("OK"));
         let Asking {
             library,
             path,

@@ -825,29 +825,12 @@ impl State {
                 ..Spec::default()
             },
         );
-        let cancel = ui::button(ui, "cancel", "Cancel").clicked;
         let waiting = matches!(connect.status, Status::Waiting(_));
-        let go = match connect.step {
-            Step::Browse if connect.opens().is_none() => {
-                ui.leaf(
-                    "open",
-                    Spec {
-                        size: [ui::fit(), px(row)],
-                        text: Some("Open"),
-                        color: Some(theme.text_dim),
-                        fill: Some(theme.chip),
-                        radius: 4.0,
-                        pad: [theme.font_size * 0.75, 0.0],
-                        center: true,
-                        role: Some(Role::Button),
-                        ..Spec::default()
-                    },
-                );
-                false
-            }
-            Step::Browse => ui::button(ui, "open", "Open").clicked,
-            _ => ui::button(ui, "connect", "Connect").clicked || entered,
+        let [cancel, go] = match connect.step {
+            Step::Browse => ui::dialog_buttons(ui, "Open", connect.opens().is_some()),
+            _ => ui::dialog_buttons(ui, "Connect", true),
         };
+        let go = go || entered && connect.step != Step::Browse;
         ui.close();
         ui.close();
         if cancel {

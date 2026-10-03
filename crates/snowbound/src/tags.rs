@@ -525,8 +525,7 @@ impl State {
         });
         ui.close();
         crate::buttons(ui);
-        let ok = button(ui, "ok", "OK", list.tags != self.tags);
-        let cancel = ui::button(ui, "cancel", "Cancel").clicked;
+        let [cancel, ok] = ui::dialog_buttons(ui, "OK", list.tags != self.tags);
         ui.close();
         if let Some(place) = list.selected {
             if up {
@@ -870,8 +869,8 @@ fn tag_editor(
     );
     crate::buttons(ui);
     let named = !tag.label.trim().is_empty();
-    let ok = button(ui, "ok", "OK", named) || entered && named;
-    let cancel = ui::button(ui, "cancel", "Cancel").clicked;
+    let [cancel, ok] = ui::dialog_buttons(ui, "OK", named);
+    let ok = ok || entered && named;
     ui.close();
     ui.close();
     if ok {

@@ -674,8 +674,8 @@ impl State {
                 ..Spec::default()
             },
         );
-        let cancel = ui::button(ui, "cancel", "Cancel").clicked;
-        let ok = ui::button(ui, "ok", "OK").clicked || entered;
+        let [cancel, ok] = ui::dialog_buttons(ui, "OK", true);
+        let ok = ok || entered;
         ui.close();
         ui.close();
         let name = options.user_name.trim();
