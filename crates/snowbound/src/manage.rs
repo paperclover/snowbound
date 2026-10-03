@@ -71,6 +71,17 @@ pub fn in_icloud_folder(location: &str) -> bool {
     crate::icloud::folder().is_some_and(|root| Path::new(location).parent() == Some(&root))
 }
 
+/// How long a notebook folder a listing of the iCloud folder missed must stay missing to count
+/// as gone.
+const VANISH: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Whether the folder at `path` is still not there `after` it was missed: not found, rather
+/// than unreadable for a moment, as iCloud Drive's coordinated writes can leave it.
+fn vanished(path: &Path, after: std::time::Duration) -> bool {
+    std::thread::sleep(after);
+    notebook::fs::metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+}
+
 /// `current`, the path of a section, after `from` moved to `to`: a section moved itself,
 /// or one inside a moved group.
 fn follow(current: &str, from: &str, to: &str) -> String {
@@ -300,21 +311,18 @@ impl State {
     /// Takes `listed`, the notebook folders at the top of the app's iCloud Drive folder, in
     /// place of those the sidebar lists from it.
     fn listed_icloud(&mut self, listed: Vec<String>) {
-        let gone: Vec<Arc<Library>> = self
-            .notebooks
-            .iter()
-            .filter(|library| {
-                in_icloud_folder(&library.location)
-                    && !listed.contains(&library.location)
-                    && !self.folder_renaming(&library.location)
-                    && !self.trashing.contains(&library.location)
-                    // A listing taken before a rename names the folder by its old name.
-                    && notebook::fs::metadata(&library.location).is_err()
+        let missed: Vec<String> = (self.notebooks.iter())
+            .map(|library| &library.location)
+            .filter(|location| {
+                in_icloud_folder(location)
+                    && !listed.contains(location)
+                    && !self.folder_renaming(location)
+                    && !self.trashing.contains(*location)
             })
             .cloned()
             .collect();
-        for library in gone {
-            self.close_notebook(&library);
+        for location in missed {
+            self.confirm_gone(location);
         }
         for location in listed {
             if self.notebooks.iter().any(|open| open.location == location)
@@ -346,6 +354,36 @@ impl State {
                 })));
             });
         }
+    }
+
+    /// Closes the notebook at `location`, which a listing of the iCloud folder missed, once
+    /// its folder is still not there `VANISH` later: iCloud Drive's own writes and downloads
+    /// can hide a folder from a listing for a moment. The notebook shown stays while edits
+    /// wait in it.
+    fn confirm_gone(&mut self, location: String) {
+        if !self.vanishing.insert(location.clone()) {
+            return;
+        }
+        let proxy = self.proxy.clone();
+        crate::spawn(move || {
+            let gone = vanished(Path::new(&location), VANISH);
+            let _ = proxy.send_event(crate::UserEvent::Then(Box::new(move |state| {
+                state.vanishing.remove(&location);
+                let waiting = (state.session.as_ref())
+                    .filter(|session| session.library.location == location)
+                    .is_some_and(|session| {
+                        session
+                            .section
+                            .pending()
+                            .is_ok_and(|pending| !pending.is_empty())
+                    });
+                let listed = (state.notebooks.iter()).find(|open| open.location == location);
+                if let Some(library) = listed.cloned().filter(|_| gone && !waiting) {
+                    state.close_notebook(&library);
+                }
+                Ok(())
+            })));
+        });
     }
 
     /// Whether a folder rename is taking the notebook from or to `location`.
@@ -1434,6 +1472,32 @@ mod tests {
         if let Some(directory) = std::env::var_os("SNOWBOUND_BACKGROUND_EXPORT") {
             copy(&temporary, Path::new(&directory));
         }
+        notebook::fs::remove_dir_all(&temporary).unwrap();
+    }
+
+    /// A notebook folder that leaves the iCloud folder for a moment, as iCloud Drive's
+    /// writes can take it, is not gone; one that stays away is.
+    #[test]
+    fn a_folder_missing_for_a_moment_is_not_gone() {
+        let temporary =
+            std::env::temp_dir().join(format!("snowbound-vanish-{}", std::process::id()));
+        let (folder, away) = (temporary.join("Cloudy"), temporary.join(".Cloudy-away"));
+        notebook::fs::create_dir_all(&folder).unwrap();
+        notebook::fs::rename(&folder, &away).unwrap();
+        let back = std::thread::spawn({
+            let (folder, away) = (folder.clone(), away.clone());
+            move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                notebook::fs::rename(away, folder).unwrap();
+            }
+        });
+        assert!(!super::vanished(
+            &folder,
+            std::time::Duration::from_millis(600)
+        ));
+        back.join().unwrap();
+        notebook::fs::remove_dir_all(&folder).unwrap();
+        assert!(super::vanished(&folder, std::time::Duration::ZERO));
         notebook::fs::remove_dir_all(&temporary).unwrap();
     }
 }
