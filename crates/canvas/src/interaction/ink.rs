@@ -20,7 +20,11 @@ use onestore::{
 pub fn pens(section: [f32; 4]) -> [Pen; 15] {
     let [red, green, blue] = draw::srgb_bytes({
         let [saturation, lightness] = draw::LIGHT_ACCENT;
-        draw::hsl(draw::hue(section), saturation, lightness)
+        draw::hsl(
+            draw::hue(section),
+            saturation * draw::vividness(section),
+            lightness,
+        )
     });
     let accent = Pen::new(35.0, Some(u32::from_le_bytes([red, green, blue, 0])));
     std::array::from_fn(|place| place.checked_sub(1).map_or(accent, |at| FAVORITES[at]))

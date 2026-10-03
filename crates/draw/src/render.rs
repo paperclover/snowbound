@@ -1762,6 +1762,15 @@ pub fn hue(color: [f32; 4]) -> f32 {
     to_hsl([color[0], color[1], color[2]].map(crate::encode))[0]
 }
 
+/// How much of a shade's saturation a linear colour's hue takes, from 0 to 1: all of it from
+/// a saturation of `VIVID` up, as OneNote 2010's bright section colours have, less as the
+/// colour greys, so its Silver and mists stay grey rather than turn their faint hue vivid.
+pub fn vividness(color: [f32; 4]) -> f32 {
+    const VIVID: f32 = 0.35;
+    let [_, saturation, _] = to_hsl([color[0], color[1], color[2]].map(crate::encode));
+    (saturation / VIVID).min(1.0)
+}
+
 /// Hue in degrees, saturation and lightness of an encoded sRGB colour.
 fn to_hsl([r, g, b]: [f32; 3]) -> [f32; 3] {
     let [max, min] = [r.max(g).max(b), r.min(g).min(b)];

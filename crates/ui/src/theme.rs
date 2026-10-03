@@ -290,10 +290,12 @@ impl Theme {
         }
     }
 
-    /// The colours a section takes from the hue of `color`, linear RGBA.
+    /// The colours a section takes from the hue of `color`, linear RGBA, as grey as it is.
     pub fn section(&self, color: [f32; 4]) -> Section {
-        let hue = hue(color);
-        let shade = |hue: f32, [saturation, lightness]: [f32; 2]| hsl(hue, saturation, lightness);
+        let (hue, vividness) = (hue(color), draw::vividness(color));
+        let shade = |hue: f32, [saturation, lightness]: [f32; 2]| {
+            hsl(hue, saturation * vividness, lightness)
+        };
         let Shades {
             frame,
             tab,
@@ -324,6 +326,32 @@ mod tests {
         assert!((hue(section.frame[1]) - hue(orange) - 10.0).abs() < 3.0);
         assert_eq!(hsl(0.0, 1.0, 0.5), srgb(0xff, 0, 0));
         assert_eq!(hsl(240.0, 0.0, 1.0), srgb(0xff, 0xff, 0xff));
+    }
+
+    /// OneNote 2010's Silver (`corpus/section-color/native/colors.txt`) shades grey, as
+    /// faint in hue as it is, while its Blue takes the theme's full saturation.
+    #[test]
+    fn grey_sections_stay_grey() {
+        // HSL saturation, as sRGB shows it.
+        let saturation = |color: [f32; 4]| {
+            let [r, g, b] = draw::srgb_bytes(color).map(|byte| f32::from(byte) / 255.0);
+            let [max, min] = [r.max(g).max(b), r.min(g).min(b)];
+            (max - min) / (1.0 - (max + min - 1.0).abs())
+        };
+        for theme in [Theme::light(), Theme::dark()] {
+            let silver = theme.section(srgb(0x95, 0x95, 0xaa));
+            let blue = theme.section(srgb(0x8a, 0xa8, 0xe4));
+            for (silver, blue) in [
+                (silver.tab, blue.tab),
+                (silver.accent, blue.accent),
+                (silver.frame[0], blue.frame[0]),
+            ] {
+                assert!(
+                    saturation(silver) < saturation(blue) * 0.4,
+                    "{silver:?} {blue:?}"
+                );
+            }
+        }
     }
 
     #[test]
