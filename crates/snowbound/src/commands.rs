@@ -260,12 +260,12 @@ const NONE: &[Chord] = &[];
 
 /// OneNote 2010's chords off macOS; there, AppKit's and OneNote for Mac's.
 pub const COMMANDS: &[Command] = &[
-    row!(Id::Settings, "Settings…", &[cmd(',')], &[cmd(',')]),
-    row!(Id::NewNotebook, "New Notebook…", NONE, NONE),
-    row!(Id::OpenNotebook, "Open Notebook…", &[cmd('o')], &[cmd('o')]),
-    row!(Id::OpenFromServer, "Open Notebook from Server…", NONE, NONE),
-    row!(Id::OpenShared, "Open Shared Notebook…", NONE, NONE),
-    row!(Id::LiveShare, "Live Share…", NONE, NONE),
+    row!(Id::Settings, "Settings", &[cmd(',')], &[cmd(',')]),
+    row!(Id::NewNotebook, "New Notebook", NONE, NONE),
+    row!(Id::OpenNotebook, "Open Notebook", &[cmd('o')], &[cmd('o')]),
+    row!(Id::OpenFromServer, "Open Notebook from Server", NONE, NONE),
+    row!(Id::OpenShared, "Open Shared Notebook", NONE, NONE),
+    row!(Id::LiveShare, "Live Share", NONE, NONE),
     row!(Id::CloseNotebook, "Close This Notebook", NONE, NONE),
     row!(Id::NewSection, "New Section", &[cmd('t')], &[cmd('t')]),
     row!(Id::NewSectionGroup, "New Section Group", NONE, NONE),
@@ -280,7 +280,7 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::CopyPageLink, "Copy Link to Page", NONE, NONE),
     row!(
         Id::PasswordProtect,
-        "Password Protect This Section…",
+        "Password Protect This Section",
         NONE,
         NONE
     ),
@@ -302,7 +302,7 @@ pub const COMMANDS: &[Command] = &[
     ),
     row!(
         Id::SaveAs,
-        "Save As…",
+        "Save As",
         &[cmd('s').shift()],
         &[cmd('s').shift()]
     ),
@@ -318,11 +318,11 @@ pub const COMMANDS: &[Command] = &[
         NONE
     ),
     row!(Id::NextUnread, "Next Unread", NONE, NONE),
-    row!(Id::ExportPdf, "Export as PDF…", NONE, NONE),
+    row!(Id::ExportPdf, "Export as PDF", NONE, NONE),
     // Go to takes OneNote's Ctrl+P, and Pause its Ctrl+Alt+P.
     row!(
         Id::Print,
-        "Print…",
+        "Print",
         &[cmd('p').option().shift()],
         &[cmd('p').option().shift()]
     ),
@@ -351,10 +351,10 @@ pub const COMMANDS: &[Command] = &[
         &[cmd('f').option()],
         &[key('o').option()],
     ),
-    row!(Id::GoTo, "Go to Page or Section…", &[cmd('p')], &[cmd('p')]),
+    row!(Id::GoTo, "Go to Page or Section", &[cmd('p')], &[cmd('p')]),
     row!(
         Id::CommandPalette,
-        "Command Palette…",
+        "Command Palette",
         &[cmd('p').shift()],
         &[cmd('p').shift()]
     ),
@@ -393,7 +393,7 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::MarkdownShortcuts, "Markdown Shortcuts", NONE, NONE),
     row!(
         Id::Spelling,
-        "Spelling…",
+        "Spelling",
         &[named(NamedKey::F7)],
         &[named(NamedKey::F7)]
     ),
@@ -406,10 +406,10 @@ pub const COMMANDS: &[Command] = &[
     ),
     row!(Id::PageColor, "Page Color", NONE, NONE),
     row!(Id::Table, "Table", NONE, NONE),
-    row!(Id::Picture, "Picture…", NONE, NONE),
+    row!(Id::Picture, "Picture", NONE, NONE),
     row!(Id::ScreenClipping, "Screen Clipping", NONE, NONE),
-    row!(Id::Attachment, "Attach File…", NONE, NONE),
-    row!(Id::Link, "Link…", &[cmd('k')], &[cmd('k')]),
+    row!(Id::Attachment, "Attach File", NONE, NONE),
+    row!(Id::Link, "Link", &[cmd('k')], &[cmd('k')]),
     row!(Id::InsertSpace, "Insert Space", NONE, NONE),
     row!(
         Id::Equation,
@@ -465,7 +465,7 @@ pub const COMMANDS: &[Command] = &[
         NONE,
         NONE
     ),
-    row!(Id::Transport(Transport::SeekTo), "Seek To…", NONE, NONE),
+    row!(Id::Transport(Transport::SeekTo), "Seek To", NONE, NONE),
     row!(
         Id::Transport(Transport::SeePlayback),
         "See Playback",
@@ -596,8 +596,8 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::Style(8), "Quote", NONE, NONE),
     row!(Id::Style(9), "Code", NONE, NONE),
     row!(Id::Style(10), "Normal", NONE, NONE),
-    row!(Id::Themes, "Customize Theme…", NONE, NONE),
-    row!(Id::CustomizeTags, "Customize Tags…", NONE, NONE),
+    row!(Id::Themes, "Customize Theme", NONE, NONE),
+    row!(Id::CustomizeTags, "Customize Tags", NONE, NONE),
     row!(
         Id::RemoveTags,
         "Remove Tag",
@@ -608,7 +608,7 @@ pub const COMMANDS: &[Command] = &[
     row!(Id::ToDoList, "Make To-Do List", NONE, NONE),
     row!(Id::BulletedList, "Make Bulleted List", NONE, NONE),
     row!(Id::Help, "Snowbound Help", NONE, NONE),
-    row!(Id::CheckForUpdates, "Check for Updates…", NONE, NONE),
+    row!(Id::CheckForUpdates, "Check for Updates", NONE, NONE),
 ];
 
 /// The most tags a list holds: MS-ONE's action types 0 to 99 number them.

@@ -202,7 +202,7 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
             ])
         return (Prototype.reading ? [readingAction()] : []) + [
             insert,
-            UIAction(title: "Page Background…", image: UIImage(systemName: "paintpalette"), attributes: editable) {
+            UIAction(title: "Page Background", image: UIImage(systemName: "paintpalette"), attributes: editable) {
                 [weak self] _ in self?.showPaper()
             },
             themeMenu(),
@@ -211,10 +211,10 @@ final class PageViewController: UIViewController, PHPickerViewControllerDelegate
                 scene?.showTags(of: section.notebook, from: self)
             },
             UIMenu(options: .displayInline, children: [
-                UIAction(title: "Print…", image: UIImage(systemName: "printer")) { [weak self] _ in
+                UIAction(title: "Print", image: UIImage(systemName: "printer")) { [weak self] _ in
                     self?.printPage(export: false)
                 },
-                UIAction(title: "Export as PDF…", image: UIImage(systemName: "doc.richtext")) { [weak self] _ in
+                UIAction(title: "Export as PDF", image: UIImage(systemName: "doc.richtext")) { [weak self] _ in
                     self?.printPage(export: true)
                 },
             ]),

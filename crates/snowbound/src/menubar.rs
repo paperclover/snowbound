@@ -102,7 +102,7 @@ const MENUS: &[Item] = &[
             C(Id::Search),
             C(Id::SearchResults),
             S,
-            Item::System("Start Dictation…", "startDictation:", None),
+            Item::System("Start Dictation", "startDictation:", None),
             Item::System(
                 "Emoji & Symbols",
                 "orderFrontCharacterPalette:",

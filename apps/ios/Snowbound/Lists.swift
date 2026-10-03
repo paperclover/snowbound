@@ -94,10 +94,10 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
                     })
                 var actions: [UIMenuElement] = [
                     UIMenu(title: "New Notebook", options: .displayInline, children: places),
-                    UIAction(title: "Open from Server…", image: UIImage(systemName: "server.rack")) { [weak self] _ in
+                    UIAction(title: "Open from Server", image: UIImage(systemName: "server.rack")) { [weak self] _ in
                         self?.connect()
                     },
-                    UIAction(title: "Open Folder…", image: UIImage(systemName: "folder")) { [weak self] _ in
+                    UIAction(title: "Open Folder", image: UIImage(systemName: "folder")) { [weak self] _ in
                         self?.openFolder()
                     },
                 ]
@@ -114,7 +114,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
         let more = UIMenu(children: [
             UIDeferredMenuElement.uncached { [weak self] provide in
                 var actions: [UIMenuElement] = [
-                    UIAction(title: "Sync Status…", image: UIImage(systemName: "arrow.triangle.2.circlepath")) {
+                    UIAction(title: "Sync Status", image: UIImage(systemName: "arrow.triangle.2.circlepath")) {
                         [weak self] _ in self.map(SyncViewController.present)
                     }
                 ]
@@ -125,7 +125,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
                         })
                 }
                 actions.append(
-                    UIAction(title: "Personalize…", image: UIImage(systemName: "person.crop.circle")) { [weak self] _ in
+                    UIAction(title: "Personalize", image: UIImage(systemName: "person.crop.circle")) { [weak self] _ in
                         guard let self else { return }
                         Author.ask(from: self) {}
                     })
@@ -385,7 +385,7 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
                 return [UIMenu(options: .displayInline, children: [details, now])]
             } ?? []
         let actions = [
-            UIAction(title: "New Section…", image: UIImage(systemName: "plus.rectangle.portrait")) {
+            UIAction(title: "New Section", image: UIImage(systemName: "plus.rectangle.portrait")) {
                 [weak self] _ in self?.newSection(in: notebook)
             },
             UIAction(title: "Tags Summary", image: UIImage(systemName: "tag")) { [weak self] _ in
@@ -403,13 +403,13 @@ final class NotebooksViewController: UICollectionViewController, UIDocumentPicke
             return UIMenu(children: status + actions + [close])
         }
         let file = [
-            UIAction(title: "Rename…", image: UIImage(systemName: "pencil")) { [weak self] _ in
+            UIAction(title: "Rename", image: UIImage(systemName: "pencil")) { [weak self] _ in
                 self?.rename(folder, of: notebook)
             },
             UIAction(title: "Duplicate", image: UIImage(systemName: "plus.square.on.square")) { [weak self] _ in
                 self?.duplicate(folder, of: notebook)
             },
-            UIAction(title: "Share…", image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in
+            UIAction(title: "Share", image: UIImage(systemName: "square.and.arrow.up")) { [weak self] _ in
                 self?.share(folder, from: notebook)
             },
             UIAction(title: "Show in Files", image: UIImage(systemName: "folder")) { _ in

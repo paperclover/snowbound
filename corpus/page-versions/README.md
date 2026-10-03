@@ -47,7 +47,7 @@ Versions is chosen. An open version is read-only under a yellow bar (RGB 255, 23
 "This is an earlier version of the page. It will be deleted over time. Click here to restore
 or delete this version." What the version changed since the one before it is banded green
 (RGB 214, 255, 214). The bar's menu (`shots/02-version-menu.png`): Restore Version, Delete
-Version, Copy Page To…; Delete All Versions in Section, Section Group, Notebook; Disable
+Version, Copy Page To; Delete All Versions in Section, Section Group, Notebook; Disable
 History for This Notebook; Hide Page Versions. Share also has Hide Authors, Recent Edits and
 Find by Author (`shots/14`–`16`).
 

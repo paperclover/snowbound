@@ -154,7 +154,7 @@ impl State {
                 ..Spec::default()
             },
         );
-        let browse = ui::button(ui, "browse", "Browse…").clicked;
+        let browse = ui::button(ui, "browse", "Browse").clicked;
         let root = dialog.folder.join(dialog.name.trim());
         let full = format!("Full path: {}", root.display());
         ui.leaf(

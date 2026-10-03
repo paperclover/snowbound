@@ -11,7 +11,7 @@ cd snowbound-linux-x86_64
 ./bin/snowbound
 ```
 
-Choose **Open Notebook…** in the notebook list and pick the notebook folder,
+Choose **Open Notebook** in the notebook list and pick the notebook folder,
 the one holding the `.one` section files and `Open Notebook.onetoc2`.
 Snowbound remembers the notebooks you open. `--notebook FOLDER` opens one
 straight away.

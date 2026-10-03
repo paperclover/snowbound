@@ -515,11 +515,11 @@ impl State {
         let new = button(
             ui,
             "new",
-            "New Tag…",
+            "New Tag",
             list.tags.len() < commands::TAGS && list.editor.is_none(),
         );
         modify = modify.or_else(|| {
-            button(ui, "modify", "Modify Tag…", list.selected.is_some())
+            button(ui, "modify", "Modify Tag", list.selected.is_some())
                 .then_some(list.selected)
                 .flatten()
         });
@@ -1035,7 +1035,7 @@ fn gallery(ui: &mut Ui, id: Id, anchor: Anchor, snowbound: bool) -> Option<Pick>
                 ..Spec::default()
             },
         );
-        if ui::button(ui, "picture", "Custom Image…").clicked {
+        if ui::button(ui, "picture", "Custom Image").clicked {
             picked = Some(Pick::Picture);
         }
     }

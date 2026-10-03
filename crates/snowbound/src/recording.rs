@@ -495,7 +495,7 @@ impl State {
                 let title =
                     crate::commands::command(crate::commands::Id::Transport(Transport::SeekTo))
                         .title;
-                node.set_label(title.trim_end_matches('…'));
+                node.set_label(title);
                 node.set_value(clock_text);
             }
             if clicked {

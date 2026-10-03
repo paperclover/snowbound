@@ -2413,7 +2413,7 @@ impl State {
                     } else if ui::shell::split_button(
                         ui,
                         part,
-                        title(id),
+                        commands::command(id).title,
                         icon,
                         bar,
                         None,
@@ -2496,7 +2496,7 @@ impl State {
                     } else if ui::shell::split_button(
                         ui,
                         part,
-                        title(id),
+                        commands::command(id).title,
                         icon,
                         None,
                         status.checked,
@@ -2798,7 +2798,7 @@ impl State {
                     if ui::shell::split_button(
                         ui,
                         "pen",
-                        title(Cmd::Pen),
+                        commands::command(Cmd::Pen).title,
                         art::PEN,
                         bar,
                         status.checked,
@@ -4724,7 +4724,7 @@ fn conflict_bar(ui: &mut Ui, bar: Bar, sections: &[&str], steps: [bool; 2]) -> O
                     ..Default::default()
                 },
                 ui::popup::Item {
-                    text: "Copy Page To…",
+                    text: "Copy Page To",
                     icon: Some(art::COPY),
                     disabled: sections.is_empty(),
                     ..Default::default()
@@ -5349,7 +5349,9 @@ fn dropdown(
         Head::Split(id) if status_of(id).enabled => {
             let icon = artwork(id).unwrap_or_default();
             let on = status_of(id).checked;
-            if ui::shell::split_button(ui, part, title(id), icon, None, on, menu).clicked {
+            if ui::shell::split_button(ui, part, commands::command(id).title, icon, None, on, menu)
+                .clicked
+            {
                 choice = Some(Choice::Command(id));
             }
             tip(ui, id);
@@ -5368,7 +5370,7 @@ fn dropdown(
         Head::Split(id) => {
             let icon = artwork(id).unwrap_or_default();
             let anchor = ui::shell::menu_button(ui, part, icon, None, menu);
-            name(ui, button, title(id));
+            name(ui, button, commands::command(id).title);
             anchor
         }
         Head::Tag(_, tag) => {
@@ -5422,7 +5424,7 @@ fn dropdown(
     let options: Vec<_> = entries
         .iter()
         .map(|entry| match *entry {
-            Entry::Open(_, id) if runs(id) => format!("{} Options", title(id)),
+            Entry::Open(_, id) if runs(id) => format!("{} Options", commands::command(id).title),
             _ => String::new(),
         })
         .collect();
@@ -5723,12 +5725,12 @@ fn tag_tip(ui: &mut Ui, place: usize, tag: &canvas::editor::NoteTag) {
 
 /// A tooltip naming command `id` and its chord on the box built last.
 fn tip(ui: &mut Ui, id: commands::Id) {
-    ui::popup::tooltip(ui, title(id), &commands::shortcut(id), None);
-}
-
-/// Command `id`'s title without the menu's ellipsis, naming the command, not a dialog it opens.
-fn title(id: commands::Id) -> &'static str {
-    commands::command(id).title.trim_end_matches('…')
+    ui::popup::tooltip(
+        ui,
+        commands::command(id).title,
+        &commands::shortcut(id),
+        None,
+    );
 }
 
 /// Whether each toolbar group stands on a face of its own.

@@ -6,7 +6,7 @@ ends with Section Color, sixteen named colours and None (`section-color-menu.png
 appends a revision to the section's own file setting its metadata's `0x14001cbe`
 (COLORREF; `teal.one`), and None sets `0xFFFFFFFF` (`none.one`); the table of contents is
 left byte for byte. Notebook Properties (`notebook-properties.png`, from the notebook's
-Rename… or Properties…) offers the same sixteen without None (`notebook-colors.png`) and
+Rename or Properties) offers the same sixteen without None (`notebook-colors.png`) and
 appends a revision to the root `Open Notebook.onetoc2` setting its root's `0x14001cbe`
 (`before.onetoc2`, `after.onetoc2`). Its Display name is written to neither file: OneNote
 keeps it in its local `OneNoteOfflineCache.onecache`, so the hierarchy's `nickname`

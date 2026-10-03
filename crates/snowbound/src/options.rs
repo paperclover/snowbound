@@ -992,7 +992,7 @@ fn installed(state: &mut State, _: &mut Options) {
     let ui = &mut state.ui;
     if crate::desktop::uninstallable() {
         path(ui, &crate::desktop::binary().unwrap_or_default());
-        if ui::button(ui, "uninstall", "Uninstall…").clicked {
+        if ui::button(ui, "uninstall", "Uninstall").clicked {
             crate::desktop::uninstall(&state.proxy);
         }
     } else if crate::desktop::installable() {

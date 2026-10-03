@@ -807,7 +807,7 @@ pub(crate) fn gallery(
                 "customize",
                 Spec {
                     size: [fill(), fill()],
-                    text: Some("Customize…"),
+                    text: Some("Customize"),
                     ..Spec::default()
                 },
             );

@@ -105,7 +105,7 @@ pub fn menu(
         drawn("Delete Version", art::DELETE),
         ui::popup::Item {
             disabled: sections.is_empty(),
-            ..drawn("Copy Page To…", art::COPY)
+            ..drawn("Copy Page To", art::COPY)
         },
         ui::popup::Item {
             separated: true,

@@ -442,9 +442,9 @@ impl State {
                 };
                 text(ui, "status", &status, false);
                 buttons = if protected {
-                    &["Change Password…", "Remove Password…", "Lock All", "Close"]
+                    &["Change Password", "Remove Password", "Lock All", "Close"]
                 } else {
-                    &["Set Password…", "Lock All", "Close"]
+                    &["Set Password", "Lock All", "Close"]
                 };
             }
             Dialog::Set([value, confirm], refused) => {
@@ -527,9 +527,9 @@ impl State {
                 self.ui.close_popup(id());
                 return self.lock_all();
             }
-            (Some("Set Password…"), _) => Some(Dialog::Set(Default::default(), None)),
-            (Some("Change Password…"), _) => Some(Dialog::Change(Default::default(), None)),
-            (Some("Remove Password…"), _) => Some(Dialog::Remove(Zeroizing::default(), false)),
+            (Some("Set Password"), _) => Some(Dialog::Set(Default::default(), None)),
+            (Some("Change Password"), _) => Some(Dialog::Change(Default::default(), None)),
+            (Some("Remove Password"), _) => Some(Dialog::Remove(Zeroizing::default(), false)),
             (Some(_), Dialog::Unlock(value, _)) => match library.unlock(&path, &value) {
                 Ok(()) => {
                     self.commands

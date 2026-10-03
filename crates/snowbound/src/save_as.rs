@@ -135,7 +135,7 @@ impl State {
         }
         crate::buttons(ui);
         let cancel = ui::button(ui, "cancel", "Cancel").clicked;
-        let go = ui::button(ui, "go", "Save As…").clicked || entered;
+        let go = ui::button(ui, "go", "Save As").clicked || entered;
         ui.close();
         ui.close();
         if !go && !cancel {

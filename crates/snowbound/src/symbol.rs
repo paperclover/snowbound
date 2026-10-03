@@ -101,7 +101,7 @@ pub fn gallery(ui: &mut Ui, id: Id, anchor: Anchor, symbols: &[char]) -> Option<
                     "more",
                     Spec {
                         size: [fill(), fill()],
-                        text: Some("More Symbols…"),
+                        text: Some("More Symbols"),
                         icon: Some(art::SYMBOL),
                         gap: 6.0,
                         ..Spec::default()

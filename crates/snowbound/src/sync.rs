@@ -739,7 +739,7 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
                 &format!("Using the system’s connection. Snowbound couldn’t sign in: {notice}"),
                 theme.text_dim,
             );
-            picked.sign_in = ui::button(ui, "sign-in", "Sign In…").clicked;
+            picked.sign_in = ui::button(ui, "sign-in", "Sign In").clicked;
         }
         ui.close();
     }

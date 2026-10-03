@@ -342,7 +342,7 @@ extension PagesViewController: UITableViewDragDelegate, UITableViewDropDelegate 
         if indentable(rows, at) { add("Make Subpage") { [weak self] in self?.indent(id, by: 1) } }
         if rows[at].level > 1 { add("Promote Subpage") { [weak self] in self?.indent(id, by: -1) } }
         if !moveActions(item).isEmpty {
-            add("Move to Section…") { [weak self] in
+            add("Move to Section") { [weak self] in
                 guard let self, let row = items.firstIndex(where: { $0.id == id }),
                     let cell = tableView.cellForRow(at: IndexPath(row: row, section: 0))
                 else { return }
@@ -571,7 +571,7 @@ extension NotebooksViewController: UICollectionViewDragDelegate, UICollectionVie
                 if at < order.count - 1 { add("Move Down") { [weak self] in self?.shift(path, of: notebook, by: 1) } }
             }
             if !notebook.destinations(of: path).isEmpty {
-                add("Move…") { [weak self, weak cell] in
+                add("Move") { [weak self, weak cell] in
                     guard let self, let cell else { return }
                     sheet("Move", moveActions(path, of: notebook), from: cell, in: self)
                 }

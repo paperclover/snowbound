@@ -78,7 +78,7 @@ fn label(chord: Chord) -> String {
 fn title(id: Command) -> String {
     match id {
         Command::Tag(place) => format!("Tag {}", place + 1),
-        id => crate::title(id).to_owned(),
+        id => commands::command(id).title.to_owned(),
     }
 }
 

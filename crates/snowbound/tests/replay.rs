@@ -452,7 +452,7 @@ fn a_version_copied_into_its_section_is_listed_and_found() {
     let notebook =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/page-versions/candidate-restore");
     let mut steps = version_menu();
-    // Copy Page To…, then the section itself.
+    // Copy Page To, then the section itself.
     steps.extend(["key Down", "key Down", "key Down", "key Enter", "settle"].map(String::from));
     steps.extend(["key Down", "key Enter", "accessibility copied"].map(String::from));
     steps.extend(search("Second author", "found"));
@@ -674,7 +674,7 @@ fn open_shared_notebook_is_offered_with_notebooks_open() {
     let [sidebar, dialog] = replay_with(&scratch, Some(&notebook), &steps, &variables)
         .try_into()
         .unwrap();
-    assert!(sidebar.contains(r#""Open Shared…""#), "{sidebar}");
+    assert!(sidebar.contains(r#""Open Shared""#), "{sidebar}");
     assert!(
         dialog.contains(r#"Dialog "Open Shared Notebook""#),
         "{dialog}"

@@ -342,7 +342,7 @@ impl State {
                 item(Action::Copy, "Copy To", nowhere(), false),
             ],
             Target::Section { path, .. } if crate::recycle::binned(path) => vec![
-                item(Action::SaveAs, "Save As…", false, false),
+                item(Action::SaveAs, "Save As", false, false),
                 item(Action::Move, "Restore To", nowhere(), false),
                 item(Action::EmptyRecycleBin, "Empty Recycle Bin", false, true),
                 item(Action::Colors, "Section Color", false, true),
@@ -360,7 +360,7 @@ impl State {
                     item(Action::NewPage, "New Page", false, true),
                     // OneNote offers this beside New Page, which is a plain + here.
                     item(Action::NewSubpage, "New Subpage", false, false),
-                    item(Action::Theme, "Theme…", false, true),
+                    item(Action::Theme, "Theme", false, true),
                 ];
                 // Levels and versions are known once the section is open.
                 let Some(session) = self.session.as_ref().filter(|_| self.open(library, path))
@@ -400,7 +400,7 @@ impl State {
                 let section = matches!(target, Target::Section { .. });
                 let mut actions = vec![item(Action::Rename, "Rename", false, false)];
                 if section {
-                    actions.push(item(Action::SaveAs, "Save As…", false, false));
+                    actions.push(item(Action::SaveAs, "Save As", false, false));
                 }
                 actions.extend([
                     item(Action::Delete, "Delete", false, false),
@@ -412,7 +412,7 @@ impl State {
                     actions.extend([
                         item(
                             Action::Password,
-                            "Password Protect This Section…",
+                            "Password Protect This Section",
                             library.catalog().is_none(),
                             true,
                         ),
@@ -423,7 +423,7 @@ impl State {
                             section_file(library, path).is_none(),
                             false,
                         ),
-                        item(Action::Theme, "Theme…", false, false),
+                        item(Action::Theme, "Theme", false, false),
                     ]);
                 }
                 actions
@@ -433,10 +433,10 @@ impl State {
                 let last = self.notebooks.len().saturating_sub(1);
                 let unread = self.unread_notebook(library);
                 vec![
-                    item(Action::Rename, "Rename…", false, false),
+                    item(Action::Rename, "Rename", false, false),
                     item(
                         Action::SaveAs,
-                        "Save As…",
+                        "Save As",
                         library.catalog().is_none(),
                         false,
                     ),
@@ -493,7 +493,7 @@ impl State {
                         library.folder().is_none(),
                         true,
                     ),
-                    item(Action::Theme, "Theme…", false, false),
+                    item(Action::Theme, "Theme", false, false),
                     item(
                         Action::RecycleBin,
                         "Notebook Recycle Bin",
@@ -502,7 +502,7 @@ impl State {
                     ),
                     item(
                         Action::Properties,
-                        "Properties…",
+                        "Properties",
                         library.catalog().is_none(),
                         false,
                     ),

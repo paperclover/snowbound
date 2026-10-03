@@ -52,7 +52,7 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   frame with the window's new size instead of stretching the last one.
 - A notebook on a mounted SMB share is opened through the embedded SMB client,
   signed in with the password the keychain keeps for that mount (see
-  [sync](sync.md) for why the mount itself isn't enough). Open Notebook from Server… reaches one
+  [sync](sync.md) for why the mount itself isn't enough). Open Notebook from Server reaches one
   by address instead, and keeps a password it asks to remember as the Finder does, an
   SMB internet password.
 - The menu bar (`menubar.rs`) is laid out as OneNote for Mac's. Its items are
@@ -147,7 +147,7 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   other writers) and takes OneNote's coordination bytes with byte-range
   locks, so both apps can have a section open on one machine.
   ReadDirectoryChangesW reports changes below a notebook, including other
-  clients' on a share. Open Notebook from Server… still uses the embedded
+  clients' on a share. Open Notebook from Server still uses the embedded
   client, its passwords in the Credential Manager.
 - The common file dialogs, task dialogs, the date and time picker, and the
   Spell Checking API (from Windows 8) are the system's; audio plays and

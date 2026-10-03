@@ -161,7 +161,7 @@ pub fn menu(
         }
         match cells[index] {
             Cell::Color(None) | Cell::Art(None) | Cell::Rules(None) => label(ui, "None"),
-            Cell::ShowAll => label(ui, "Show All…"),
+            Cell::ShowAll => label(ui, "Show All"),
             Cell::Color(Some(color)) => {
                 ui.leaf(
                     "swatch",

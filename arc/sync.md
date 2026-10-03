@@ -192,7 +192,7 @@ client with the account the system keeps for that mount. It falls back to the
 mount only when it can't sign in that way.
 
 A notebook can also be opened from its server's address, with no mount at all (File ▸
-Open Notebook from Server…), which is how Mac OS X 10.6 reaches a server that no longer
+Open Notebook from Server), which is how Mac OS X 10.6 reaches a server that no longer
 speaks SMB1, the only version its Finder has. The notebook is kept by that address
 (`smb://[domain;]user@server/share/folder`), never with a password; the password lives in
 the keychain (the Secret Service on Linux) when the user asks to remember it, and

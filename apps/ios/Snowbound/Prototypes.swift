@@ -52,8 +52,8 @@ extension Prototype {
         open.title = "Open Existing Notebook"
         welcome.secondaryButton = open
         var elsewhere = [
-            UIAction(title: "Open Folder…", image: UIImage(systemName: "folder")) { _ in openFolder() },
-            UIAction(title: "Connect to Server…", image: UIImage(systemName: "server.rack")) { _ in connect() },
+            UIAction(title: "Open Folder", image: UIImage(systemName: "folder")) { _ in openFolder() },
+            UIAction(title: "Connect to Server", image: UIImage(systemName: "server.rack")) { _ in connect() },
         ]
         if !ICloud.signedIn {
             elsewhere.append(

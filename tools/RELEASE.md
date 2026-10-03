@@ -230,7 +230,7 @@ frames from the symbol table.
 
 `update.rs` runs one thread. With automatic checks on (Options, General) and a
 published build, it checks shortly after launch and then daily, skipping while
-Work Offline is on; Check for Updates… (the app menu on macOS, the command
+Work Offline is on; Check for Updates (the app menu on macOS, the command
 palette elsewhere) checks at once and reports what it found. A check reads
 `latest.json`, then the named build's `build.json` and signature, then
 `history.json` and the `build.json` of each build since its own, and
@@ -241,7 +241,7 @@ the app unpacked into `.Snowbound.app.update` next to the bundle on macOS, the
 executable into `.snowbound.update` next to it on Linux (`.snowbound.exe.update` on
 Windows). The sync status icon gets a dot, and its popup says what the update
 changes, unfolding to the titles, and offers Build Folder and Restart to
-Update; Check for Updates… lists them in its dialog.
+Update; Check for Updates lists them in its dialog.
 
 Restart to Update quits the app and starts the old executable with
 `--finish-update`, which waits for the app to exit, renames the old bundle (or

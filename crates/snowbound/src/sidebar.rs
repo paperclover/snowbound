@@ -279,7 +279,7 @@ fn sidebar(
         (
             "shared",
             Leading::Icon(art::LINK),
-            "Open Shared…",
+            "Open Shared",
             Action::OpenShared,
         ),
         (
@@ -1267,13 +1267,13 @@ impl crate::State {
                 (
                     "shared",
                     Leading::Icon(art::LINK),
-                    "Open Shared Notebook…",
+                    "Open Shared Notebook",
                     crate::Command::OpenShared,
                 ),
                 (
                     "server",
                     Leading::Icon(art::SERVER),
-                    "Open Notebook from Server…",
+                    "Open Notebook from Server",
                     crate::Command::OpenFromServer(None),
                 ),
             ]

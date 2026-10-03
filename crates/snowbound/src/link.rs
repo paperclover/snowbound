@@ -303,7 +303,7 @@ impl State {
                 item("Ignore"),
                 Item {
                     separated: true,
-                    ..drawn("Spelling…", art::SPELLING)
+                    ..drawn("Spelling", art::SPELLING)
                 },
             ],
             Some(correction) => {
@@ -326,7 +326,7 @@ impl State {
                     drawn("Add to Dictionary", art::ADD_TO_DICTIONARY),
                     Item {
                         separated: true,
-                        ..drawn("Spelling…", art::SPELLING)
+                        ..drawn("Spelling", art::SPELLING)
                     },
                 ]);
                 items
@@ -344,7 +344,7 @@ impl State {
             .collect::<Vec<_>>();
         items.extend(if context.attachment.is_some() {
             // OneNote 2010's commands for the file itself; its clipboard holds text alone.
-            vec![drawn("Open", art::OPEN), drawn("Save As…", art::SAVE)]
+            vec![drawn("Open", art::OPEN), drawn("Save As", art::SAVE)]
         } else {
             let mut items = vec![
                 Item {
@@ -362,7 +362,7 @@ impl State {
                 Some(_) => items.extend([
                     Item {
                         separated: true,
-                        ..drawn("Edit Link…", art::LINK)
+                        ..drawn("Edit Link", art::LINK)
                     },
                     drawn("Copy Link to Paragraph", art::COPY_LINK),
                     Item {
@@ -375,7 +375,7 @@ impl State {
                 None => items.extend([
                     Item {
                         separated: true,
-                        ..drawn("Link…", art::LINK)
+                        ..drawn("Link", art::LINK)
                     },
                     drawn("Copy Link to Paragraph", art::COPY_LINK),
                 ]),
@@ -414,7 +414,7 @@ impl State {
                     self.view.correct(&correction, &chosen_text)?
                 }
                 "Delete Repeated Word" => self.view.correct(&correction, "")?,
-                "Spelling…" => {
+                "Spelling" => {
                     self.open_spelling_pane();
                     return Ok(());
                 }
@@ -441,7 +441,7 @@ impl State {
         }
         let response = match chosen_text.as_str() {
             "Open" => return self.open_attachment(&context.attachment.unwrap()),
-            "Save As…" => return self.save_attachment(&context.attachment.unwrap()),
+            "Save As" => return self.save_attachment(&context.attachment.unwrap()),
             "Cut" => self.view.copy(true)?,
             "Copy" => self.view.copy(false)?,
             "Paste" => {
@@ -449,7 +449,7 @@ impl State {
                     .push(Command::Page(canvas::interaction::Request::Paste));
                 return Ok(());
             }
-            "Edit Link…" | "Link…" => {
+            "Edit Link" | "Link" => {
                 self.open_link_dialog();
                 return Ok(());
             }
