@@ -497,6 +497,64 @@ impl Transaction {
         &self.base
     }
 
+    /// The transaction as bytes `from_bytes` reads back, to carry it to another machine to
+    /// commit: the base header and length, the new header, the appended bytes' length and
+    /// the bytes, then each patch's offset, length and bytes. Integers are little-endian.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(2064 + self.append.len());
+        bytes.extend_from_slice(&self.base.header);
+        bytes.extend_from_slice(&self.base.length.to_le_bytes());
+        bytes.extend_from_slice(&self.header);
+        bytes.extend_from_slice(&(self.append.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&self.append);
+        for (offset, patch) in &self.patches {
+            bytes.extend_from_slice(&offset.to_le_bytes());
+            bytes.extend_from_slice(&(patch.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(patch);
+        }
+        bytes
+    }
+
+    /// Reads `to_bytes`'s form, refusing a patch outside the base's data area, which no
+    /// transaction writes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::Error> {
+        let malformed = |message| crate::Error { offset: 0, message };
+        fn take<'a>(rest: &mut &'a [u8], length: usize) -> Result<&'a [u8], crate::Error> {
+            let (taken, after) = rest.split_at_checked(length).ok_or(crate::Error {
+                offset: 0,
+                message: "A truncated transaction",
+            })?;
+            *rest = after;
+            Ok(taken)
+        }
+        let rest = &mut &bytes[..];
+        let base_header: [u8; 1024] = take(rest, 1024)?.try_into().expect("1024 bytes");
+        let length = u64::from_le_bytes(take(rest, 8)?.try_into().expect("8 bytes"));
+        let header: [u8; 1024] = take(rest, 1024)?.try_into().expect("1024 bytes");
+        let appended = u64::from_le_bytes(take(rest, 8)?.try_into().expect("8 bytes"));
+        let appended = usize::try_from(appended).map_err(|_| malformed("A huge append"))?;
+        let append = take(rest, appended)?.to_vec();
+        let mut patches = Vec::new();
+        while !rest.is_empty() {
+            let offset = u64::from_le_bytes(take(rest, 8)?.try_into().expect("8 bytes"));
+            let size = u32::from_le_bytes(take(rest, 4)?.try_into().expect("4 bytes"));
+            let patch = take(rest, size as usize)?;
+            if offset < 1024 || offset.saturating_add(u64::from(size)) > length {
+                return Err(malformed("A patch outside the base's data"));
+            }
+            patches.push((offset, patch.to_vec()));
+        }
+        Ok(Self {
+            base: Stamp {
+                header: base_header,
+                length,
+            },
+            append,
+            patches,
+            header,
+        })
+    }
+
     /// The bytes a commit writes, by offset, in the order `apply` writes them; the header,
     /// last, covers bytes 0..1024.
     pub fn writes(&self) -> impl Iterator<Item = (u64, &[u8])> {
@@ -598,6 +656,32 @@ mod tests {
             output[..count].copy_from_slice(&rest[..count]);
             Ok(count)
         }
+    }
+
+    #[test]
+    fn transactions_read_back_from_bytes() {
+        let transaction = Transaction {
+            base: Stamp {
+                header: [1; 1024],
+                length: 4096,
+            },
+            append: vec![2; 300],
+            patches: vec![(1024, vec![3; 8]), (4000, vec![4; 96])],
+            header: [5; 1024],
+        };
+        let bytes = transaction.to_bytes();
+        assert_eq!(Transaction::from_bytes(&bytes).unwrap(), transaction);
+        assert!(Transaction::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+        let outside = Transaction {
+            patches: vec![(4000, vec![4; 97])],
+            ..transaction.clone()
+        };
+        assert!(Transaction::from_bytes(&outside.to_bytes()).is_err());
+        let header = Transaction {
+            patches: vec![(1000, vec![4; 8])],
+            ..transaction
+        };
+        assert!(Transaction::from_bytes(&header.to_bytes()).is_err());
     }
 
     #[test]

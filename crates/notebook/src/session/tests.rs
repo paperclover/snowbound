@@ -28,8 +28,14 @@ impl Storage for Racing {
     fn location(&self) -> String {
         self.inner.location()
     }
+    fn entries(&self, folder: &str) -> io::Result<Vec<discover::Entry>> {
+        self.inner.entries(folder)
+    }
     fn exists(&self, path: &str) -> bool {
         self.inner.exists(path)
+    }
+    fn stamp(&self, path: &str) -> io::Result<Stamp> {
+        self.inner.stamp(path)
     }
     fn read(&self, path: &str) -> Result<Vec<u8>> {
         self.inner.read(path)
@@ -63,6 +69,9 @@ impl Storage for Racing {
     }
     fn commit(&self, path: &str, transaction: &Transaction) -> Result<()> {
         self.inner.commit(path, transaction)
+    }
+    fn confirm(&self, path: &str, base: &Stamp) -> std::result::Result<(), CommitError> {
+        self.inner.confirm(path, base)
     }
     fn supersede(&self, path: &str, base: &Stamp, with: &str) -> Result<()> {
         self.race(path);

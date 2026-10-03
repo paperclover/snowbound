@@ -51,7 +51,7 @@ impl State {
             None => Some(DEFAULT_RELAY.to_owned()),
         };
         let room = match std::env::var("SNOWBOUND_LIVE_CODE") {
-            Ok(code) => Some(Room::Code(code)),
+            Ok(code) => Some(Room::join(&code, "")),
             Err(_) => self
                 .session
                 .as_ref()
@@ -67,7 +67,7 @@ impl State {
                     .flatten();
                 let live = Hello::new(self.author.clone(), picture)
                     .and_then(|me| {
-                        live::Live::start(me, &room, reach, relay.as_deref(), move || {
+                        live::Live::start(me, &room, reach, relay.as_deref(), move |_| {
                             redraw.wake_by_ref()
                         })
                     })

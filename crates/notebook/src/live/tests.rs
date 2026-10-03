@@ -43,9 +43,9 @@ fn caret(offset: u32) -> Presence {
 /// caret, and see the other leave.
 #[test]
 fn peers_meet_and_follow_presence() {
-    let room = Room::Code("7-violet-otter".into());
-    let ada = Live::start(hello("Ada"), &room, None, None, || {}).unwrap();
-    let grace = Live::start(hello("Grace"), &room, None, None, || {}).unwrap();
+    let room = Room::join("7-violet-otter", "");
+    let ada = Live::start(hello("Ada"), &room, None, None, |_| {}).unwrap();
+    let grace = Live::start(hello("Grace"), &room, None, None, |_| {}).unwrap();
     ada.set_presence(caret(1));
     ada.connect(grace.address());
     let seen = until(&grace, |peers| {
@@ -70,18 +70,18 @@ fn peers_meet_and_follow_presence() {
 fn another_code_never_meets() {
     let ada = Live::start(
         hello("Ada"),
-        &Room::Code("7-violet-otter".into()),
+        &Room::join("7-violet-otter", ""),
         None,
         None,
-        || {},
+        |_| {},
     )
     .unwrap();
     let mallory = Live::start(
         hello("Mallory"),
-        &Room::Code("7-violet-ocelot".into()),
+        &Room::join("7-violet-ocelot", ""),
         None,
         None,
-        || {},
+        |_| {},
     )
     .unwrap();
     mallory.connect(ada.address());
@@ -115,8 +115,8 @@ fn later_fields_and_kinds_are_skipped() {
         }
     );
 
-    let room = Room::Code("4-quiet-heron".into());
-    let grace = Live::start(hello("Grace"), &room, None, None, || {}).unwrap();
+    let room = Room::join("4-quiet-heron", "");
+    let grace = Live::start(hello("Grace"), &room, None, None, |_| {}).unwrap();
     // A later version: it greets, says something new, then where it is.
     let later = thread::spawn(move || {
         let mut stream = TcpStream::connect(grace.address()).unwrap();
@@ -146,8 +146,8 @@ fn later_fields_and_kinds_are_skipped() {
 #[ignore = "multicasts mDNS on the loopback interface"]
 fn peers_find_each_other_on_loopback() {
     let room = Room::Notebook([9; 16]);
-    let ada = Live::start(hello("Ada"), &room, Some(Reach::Loopback), None, || {}).unwrap();
-    let grace = Live::start(hello("Grace"), &room, Some(Reach::Loopback), None, || {}).unwrap();
+    let ada = Live::start(hello("Ada"), &room, Some(Reach::Loopback), None, |_| {}).unwrap();
+    let grace = Live::start(hello("Grace"), &room, Some(Reach::Loopback), None, |_| {}).unwrap();
     until(&ada, |peers| peers.len() == 1);
     until(&grace, |peers| peers.len() == 1);
 }
@@ -272,9 +272,9 @@ fn status(address: SocketAddr, path: &str) -> String {
 fn peers_meet_through_a_relay() {
     let (url, _) = relay(Default::default());
     let room = Room::Notebook([3; 16]);
-    let ada = Live::start(hello("Ada"), &room, None, Some(&url), || {}).unwrap();
+    let ada = Live::start(hello("Ada"), &room, None, Some(&url), |_| {}).unwrap();
     ada.set_presence(caret(1));
-    let grace = Live::start(hello("Grace"), &room, None, Some(&url), || {}).unwrap();
+    let grace = Live::start(hello("Grace"), &room, None, Some(&url), |_| {}).unwrap();
     until(&grace, |peers| {
         peers.len() == 1 && peers[0].presence == Some(caret(1))
     });
@@ -298,10 +298,10 @@ fn a_relay_numbers_a_code_and_burns_it_after_wrong_tries() {
     });
     let host = Live::start(
         hello("Ada"),
-        &Room::Code("violet-otter".into()),
+        &Room::share("violet-otter", ""),
         None,
         Some(&url),
-        || {},
+        |_| {},
     )
     .unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -316,23 +316,30 @@ fn a_relay_numbers_a_code_and_burns_it_after_wrong_tries() {
     assert_eq!(words, "violet-otter");
     let guest = Live::start(
         hello("Grace"),
-        &Room::Code(code.clone()),
+        &Room::join(&code, ""),
         None,
         Some(&url),
-        || {},
+        |_| {},
     )
     .unwrap();
     until(&host, |peers| peers.len() == 1);
     until(&guest, |peers| peers.len() == 1);
 
     let path = format!("/v1/room/code-{number}");
-    let wrong = Room::Code(format!("{number}-violet-ocelot"));
-    let mallory = Live::start(hello("Mallory"), &wrong, None, Some(&url), || {}).unwrap();
-    // Mallory tries again a second later, and the second wrong try burns the code. Asking
-    // sooner would count as a try itself.
-    thread::sleep(Duration::from_secs(5));
+    let wrong = Room::join(&format!("{number}-violet-ocelot"), "");
+    // An end that typed a wrong code gives up at once; Mallory tries twice, and the second
+    // wrong try burns the code.
+    for _ in 0..2 {
+        let mallory = Live::start(hello("Mallory"), &wrong, None, Some(&url), |_| {}).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while mallory.failed() == 0 {
+            assert!(Instant::now() < deadline, "Mallory never tried");
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(mallory.peers().is_empty());
+    }
+    until(&host, |_| host.burned());
     assert_eq!(status(address, &path), "HTTP/1.1 410 Gone");
-    assert!(mallory.peers().is_empty());
     assert_eq!(host.peers().len(), 1, "Grace stays");
 }
 
@@ -441,7 +448,10 @@ fn recording(name: &str, room: &Room, relay: &str) -> (Live, Arc<Mutex<Vec<Optio
     let heard = Arc::new(Mutex::new(Vec::new()));
     let shared: Arc<std::sync::OnceLock<std::sync::Weak<Shared>>> = Arc::default();
     let (recorded, watched) = (Arc::clone(&heard), Arc::clone(&shared));
-    let live = Live::start(hello(name), room, None, Some(relay), move || {
+    let live = Live::start(hello(name), room, None, Some(relay), move |event| {
+        if !matches!(event, Event::Changed) {
+            return;
+        }
         let Some(shared) = watched.get().and_then(std::sync::Weak::upgrade) else {
             return;
         };
@@ -470,7 +480,7 @@ fn a_malicious_relay_is_caught() {
         Tamper::Inject,
     ] {
         let (url, address) = relay(Default::default());
-        let ada = Live::start(hello("Ada"), &room, None, Some(&url), || {}).unwrap();
+        let ada = Live::start(hello("Ada"), &room, None, Some(&url), |_| {}).unwrap();
         ada.set_presence(caret(1));
         // Ada's opening, hello and first presence reach Grace; the next is tampered with.
         let relay = malicious(address, tamper, 3);

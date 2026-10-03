@@ -1,16 +1,19 @@
-//! Live presence: who else has the notebook open, the page they are on and their caret,
-//! straight from one Snowbound to another, or through a relay (`crates/relay`) where they
-//! aren't on one network. Peers find each other with mDNS (`_snowbound._tcp`) or in the
-//! relay's room, and meet through a secret both hold, a notebook's identity or a code typed
-//! on both, which SPAKE2 turns into the keys every frame after the opening is sealed with.
-//! Each connection has a thread reading and one writing. A connection whose frames arrive
-//! out of order is dropped and met again from scratch.
+//! Live presence and Live Share: who else has the notebook open, the page they are on and
+//! their caret, straight from one Snowbound to another, or through a relay (`crates/relay`)
+//! where they aren't on one network; and a notebook one machine holds opened on another
+//! (`share`). Peers find each other with mDNS (`_snowbound._tcp`) or in the relay's room, and
+//! meet through a secret both hold, a room's or a code typed on both, which SPAKE2 turns into
+//! the keys every frame after the opening is sealed with. Each connection has a thread reading
+//! and one writing. A connection whose frames arrive out of order is dropped and met again
+//! from scratch.
 
 mod relay;
+pub mod share;
 pub mod wire;
 pub use wire::{Caret, Guid, Hello, Presence, Spot};
 
 use mdns_sd::{IfKind, ServiceDaemon, ServiceEvent, ServiceInfo};
+use minicbor::Encode;
 use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
@@ -22,7 +25,7 @@ use std::{
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use wire::{Sealer, Side, kind};
 
@@ -33,36 +36,72 @@ const GONE: Duration = Duration::from_secs(45);
 const OPENING: Duration = Duration::from_secs(5);
 /// The longest wait before meeting again.
 const PATIENCE: Duration = Duration::from_secs(30);
+/// Wrong tries of a code met off any relay before it admits no one new, as a relay burns one.
+const TRIES: u32 = 5;
 
 /// The secret peers meet through.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Room {
-    /// Everyone with the notebook: its table of contents' file identity, which only its files
-    /// hold.
+    /// A notebook's room, or a share's: a random secret only its members hold.
     Notebook([u8; 16]),
-    /// A code typed on both: `7-violet-otter`, whose number names it on the network and whose
-    /// words only the two people know. Its words alone (`violet-otter`) ask the relay for a
-    /// free number, and `Live::code` then has the whole code.
-    Code(String),
+    /// A code typed on both ends, `412-violet-otter`, with a password where one is set: its
+    /// number names it on the network, and its words and password only the two people know.
+    /// Its `owner`, the end sharing it, takes the number from a relay (the one the code has,
+    /// coming back; any free one for words alone) or picks one where it has no relay, and
+    /// judges every try, burning the code after too many wrong ones.
+    Code {
+        code: String,
+        password: String,
+        owner: bool,
+    },
 }
 
 impl Room {
-    /// What names the room in the clear: a hash of a notebook's identity, a code's number;
-    /// none for a code the relay hasn't numbered.
+    /// The room a code typed on this end leads to.
+    pub fn join(code: &str, password: &str) -> Self {
+        Self::Code {
+            code: code.trim().to_lowercase(),
+            password: password.to_owned(),
+            owner: false,
+        }
+    }
+
+    /// The room of a code this end shares: its words, or a whole code to keep its number.
+    pub fn share(code: &str, password: &str) -> Self {
+        Self::Code {
+            code: code.trim().to_lowercase(),
+            password: password.to_owned(),
+            owner: true,
+        }
+    }
+
+    /// What names the room in the clear: a hash of a room's secret, a code's number; none for
+    /// a code without one yet.
     fn tag(&self) -> Option<String> {
         match self {
             Room::Notebook(id) => Some(hex(&Sha256::digest(
                 [&b"Snowbound room "[..], id].concat(),
             )[..8])),
-            Room::Code(code) => code_parts(code).0.map(|number| format!("code-{number}")),
+            Room::Code { code, .. } => code_parts(code).0.map(|number| format!("code-{number}")),
         }
     }
 
     fn secret(&self) -> Vec<u8> {
         match self {
             Room::Notebook(id) => id.to_vec(),
-            Room::Code(code) => code_parts(code).1.to_lowercase().into_bytes(),
+            Room::Code { code, password, .. } => {
+                let mut secret = code_parts(code).1.to_lowercase().into_bytes();
+                if !password.is_empty() {
+                    secret.push(b'\n');
+                    secret.extend_from_slice(password.as_bytes());
+                }
+                secret
+            }
         }
+    }
+
+    fn owner(&self) -> bool {
+        matches!(self, Room::Code { owner: true, .. })
     }
 }
 
@@ -91,19 +130,49 @@ pub struct Peer {
     pub presence: Option<Presence>,
 }
 
+/// What happened, as `Live::start`'s `events` hears it on a network thread.
+pub enum Event<'a> {
+    /// The peers, their presence, the code or the relay's answer changed.
+    Changed,
+    /// A peer was met, with the line to it.
+    Met(&'a Arc<Hello>, &'a Line),
+    /// A peer's connection ended.
+    Left(&'a Arc<Hello>),
+    /// A frame of a kind presence doesn't read itself, with the line to answer on.
+    Frame {
+        from: &'a Arc<Hello>,
+        kind: u16,
+        body: &'a [u8],
+        line: &'a Line,
+    },
+}
+
+/// How the relay last answered.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Relayed {
+    /// Not asked yet, or no relay.
+    Unknown,
+    /// In the room.
+    Joined,
+    /// Answered with this HTTP status, and how long it asked to wait.
+    Refused(u16, Option<Duration>),
+    /// Not reached.
+    Unreachable,
+}
+
 /// Presence on the network while it lives; dropping it leaves.
 pub struct Live {
     shared: Arc<Shared>,
     address: SocketAddr,
-    daemon: Option<ServiceDaemon>,
 }
 
 struct Shared {
     me: Hello,
     room: Room,
     secret: Vec<u8>,
+    reach: Option<Reach>,
     state: Mutex<State>,
-    notify: Box<dyn Fn() + Send + Sync>,
+    events: Box<dyn Fn(Event) + Send + Sync>,
     stopped: AtomicBool,
     connections: AtomicU64,
 }
@@ -118,13 +187,41 @@ struct State {
     code: Option<String>,
     /// The relay connection open now, to hang up on leaving.
     relay: Option<Arc<relay::Socket>>,
+    relayed: Option<Relayed>,
+    /// Meetings that failed on the secret: wrong codes tried here, or this end's.
+    failed: u32,
+    /// The code admits no one new.
+    burned: bool,
+    daemon: Option<ServiceDaemon>,
 }
 
 struct Link {
     connection: u64,
     peer: Peer,
-    wake: mpsc::Sender<()>,
+    line: Line,
     pipe: Arc<dyn Pipe>,
+}
+
+/// What a connection's writer sends next.
+enum Out {
+    /// The newest presence.
+    Presence,
+    Frame(u16, Vec<u8>),
+    /// A `Bye`, after which it hangs up.
+    Bye(Vec<u8>),
+}
+
+/// The way to one connected peer: frames sent on it go after those sent before.
+#[derive(Clone)]
+pub struct Line(mpsc::Sender<Out>);
+
+impl Line {
+    pub fn send(&self, kind: u16, body: &impl Encode<()>) -> io::Result<()> {
+        let body = minicbor::to_vec(body).map_err(io::Error::other)?;
+        self.0
+            .send(Out::Frame(kind, body))
+            .map_err(|_| io::ErrorKind::NotConnected.into())
+    }
 }
 
 /// A stream to one peer, read by one thread and written by another: a TCP connection, or
@@ -185,22 +282,14 @@ impl Write for &dyn Pipe {
 impl Live {
     /// Starts listening as `me` in `room`, advertised and looked for where `reach` says, or
     /// not at all with `None`, leaving peers to `connect`, and in the room at `relay`
-    /// (`wss://live.example.net`) where given. `notify` runs on a network thread whenever
-    /// `peers` or `code` changes.
+    /// (`wss://live.example.net`) where given. `events` runs on a network thread.
     pub fn start(
         me: Hello,
         room: &Room,
         reach: Option<Reach>,
         relay: Option<&str>,
-        notify: impl Fn() + Send + Sync + 'static,
+        events: impl Fn(Event) + Send + Sync + 'static,
     ) -> io::Result<Live> {
-        let tag = room.tag();
-        if tag.is_none() && relay.is_none() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "Only a relay can number a code",
-            ));
-        }
         let host = match reach {
             Some(Reach::Network) => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
             Some(Reach::Loopback) | None => IpAddr::V4(Ipv4Addr::LOCALHOST),
@@ -211,26 +300,36 @@ impl Live {
             address.set_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
         }
         let code = match room {
-            Room::Code(code) if tag.is_some() => Some(code.trim().to_owned()),
+            Room::Code { code, .. } if room.tag().is_some() => Some(code.clone()),
+            // Off any relay, the end sharing words alone numbers them itself.
+            Room::Code { code, .. } if relay.is_none() => {
+                let mut number = [0; 2];
+                getrandom::fill(&mut number)
+                    .map_err(|_| io::Error::other("System random source failed"))?;
+                Some(format!(
+                    "{}-{code}",
+                    1000 + u16::from_le_bytes(number) % 9000
+                ))
+            }
             _ => None,
         };
         let shared = Arc::new(Shared {
             me,
             room: room.clone(),
             secret: room.secret(),
+            reach,
             state: Mutex::new(State {
                 code,
                 ..State::default()
             }),
-            notify: Box::new(notify),
+            events: Box::new(events),
             stopped: AtomicBool::new(false),
             connections: AtomicU64::new(0),
         });
         if let Some(relay) = relay {
-            relay::join(&shared, relay)?;
+            relay::join(&shared, relay, address.port())?;
         }
         let accepting = Arc::clone(&shared);
-        let accepted = tag.clone();
         thread::Builder::new()
             .name("live accept".into())
             .spawn(move || {
@@ -238,23 +337,14 @@ impl Live {
                     if accepting.stopped.load(Ordering::Acquire) {
                         return;
                     }
-                    if let (Ok(stream), Some(tag)) = (stream, accepted.clone()) {
+                    if let (Ok(stream), Some(tag)) = (stream, accepting.tag()) {
                         let shared = Arc::clone(&accepting);
                         thread::spawn(move || shared.run(Arc::new(stream), Side::Responder, &tag));
                     }
                 }
             })?;
-        let daemon = match (reach, tag) {
-            (Some(reach), Some(tag)) => {
-                Some(advertise(&shared, reach, tag, address.port()).map_err(io::Error::other)?)
-            }
-            _ => None,
-        };
-        Ok(Live {
-            shared,
-            address,
-            daemon,
-        })
+        shared.advertise(address.port());
+        Ok(Live { shared, address })
     }
 
     /// Where this end listens.
@@ -263,9 +353,26 @@ impl Live {
     }
 
     /// The code others type to meet this end: the one it was given, or the one the relay
-    /// numbered.
+    /// or this end numbered.
     pub fn code(&self) -> Option<String> {
         self.shared.state.lock().unwrap().code.clone()
+    }
+
+    /// How the relay last answered.
+    pub fn relayed(&self) -> Relayed {
+        let state = self.shared.state.lock().unwrap();
+        state.relayed.clone().unwrap_or(Relayed::Unknown)
+    }
+
+    /// Meetings that failed on the secret: wrong tries of this end's code, or this end's own
+    /// wrong code.
+    pub fn failed(&self) -> u32 {
+        self.shared.state.lock().unwrap().failed
+    }
+
+    /// Whether this end's code had too many wrong tries and admits no one new.
+    pub fn burned(&self) -> bool {
+        self.shared.state.lock().unwrap().burned
     }
 
     /// Connects to a peer at `address` that discovery did not find.
@@ -283,7 +390,7 @@ impl Live {
         state.presence = presence;
         state.generation += 1;
         for link in state.peers.values() {
-            let _ = link.wake.send(());
+            let _ = link.line.0.send(Out::Presence);
         }
     }
 
@@ -292,17 +399,38 @@ impl Live {
         let state = self.shared.state.lock().unwrap();
         state.peers.values().map(|link| link.peer.clone()).collect()
     }
+
+    /// The line to `peer`, while it is connected.
+    pub fn line(&self, peer: &[u8; 16]) -> Option<Line> {
+        let state = self.shared.state.lock().unwrap();
+        state.peers.get(peer).map(|link| link.line.clone())
+    }
+
+    /// Says `reason` to every peer and leaves, waiting a moment for them to hear it.
+    pub fn leave(self, reason: &str) {
+        let bye = minicbor::to_vec(wire::Bye {
+            reason: reason.into(),
+        })
+        .unwrap_or_default();
+        for link in self.shared.state.lock().unwrap().peers.values() {
+            let _ = link.line.0.send(Out::Bye(bye.clone()));
+        }
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !self.shared.state.lock().unwrap().peers.is_empty() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
 }
 
 impl Drop for Live {
     fn drop(&mut self) {
         self.shared.stopped.store(true, Ordering::Release);
-        if let Some(daemon) = &self.daemon {
-            let _ = daemon.shutdown();
-        }
         // Wakes the accepting thread to see it has stopped.
         let _ = TcpStream::connect_timeout(&self.address, OPENING);
-        let state = self.shared.state.lock().unwrap();
+        let mut state = self.shared.state.lock().unwrap();
+        if let Some(daemon) = state.daemon.take() {
+            let _ = daemon.shutdown();
+        }
         for link in state.peers.values() {
             link.pipe.shutdown();
         }
@@ -312,9 +440,227 @@ impl Drop for Live {
     }
 }
 
+impl Shared {
+    /// The room's tag as it stands: a code's, once numbered.
+    fn tag(&self) -> Option<String> {
+        match &self.room {
+            Room::Code { .. } => code_parts(self.state.lock().unwrap().code.as_deref()?)
+                .0
+                .map(|number| format!("code-{number}")),
+            room => room.tag(),
+        }
+    }
+
+    /// Advertises this end on `port` once its room has a tag, where its reach says, and
+    /// connects to the peers in its room that discovery finds with a higher id than its own,
+    /// which leave the connecting to it.
+    fn advertise(self: &Arc<Self>, port: u16) {
+        let (Some(reach), Some(tag)) = (self.reach, self.tag()) else {
+            return;
+        };
+        let mut state = self.state.lock().unwrap();
+        if state.daemon.is_some() || self.stopped.load(Ordering::Acquire) {
+            return;
+        }
+        match discover(self, reach, tag, port) {
+            Ok(daemon) => state.daemon = Some(daemon),
+            Err(error) => eprintln!("Live: no discovery: {error}"),
+        }
+    }
+
+    fn knows(&self, peer: &str) -> bool {
+        let state = self.state.lock().unwrap();
+        state.peers.keys().any(|id| hex(id) == peer)
+    }
+
+    /// Connects to `address`, and again while the peer is there and the connection was the
+    /// one this end kept.
+    fn dial(self: Arc<Self>, address: SocketAddr) {
+        let mut wait = Duration::from_secs(1);
+        while let Ok(stream) = TcpStream::connect_timeout(&address, OPENING) {
+            let Some(tag) = self.tag() else {
+                return;
+            };
+            if !Arc::clone(&self).run(Arc::new(stream), Side::Initiator, &tag)
+                || self.stopped.load(Ordering::Acquire)
+            {
+                return;
+            }
+            thread::sleep(wait);
+            wait = (wait * 2).min(PATIENCE);
+        }
+    }
+
+    /// Counts a meeting that failed on the secret: the end sharing a code burns it after too
+    /// many, and an end that typed one gives up at once.
+    fn failed(&self) {
+        let mut state = self.state.lock().unwrap();
+        state.failed += 1;
+        match &self.room {
+            Room::Code { owner: true, .. } if state.failed >= TRIES => state.burned = true,
+            Room::Code { owner: false, .. } => self.stopped.store(true, Ordering::Release),
+            _ => {}
+        }
+        drop(state);
+        (self.events)(Event::Changed);
+    }
+
+    /// Meets the peer at the other end of `pipe` in room `tag`, then reads from it until it
+    /// goes: whether it was the connection kept to that peer.
+    fn run(self: Arc<Self>, pipe: Arc<dyn Pipe>, side: Side, tag: &str) -> bool {
+        if self.stopped.load(Ordering::Acquire) || self.state.lock().unwrap().burned {
+            pipe.shutdown();
+            return false;
+        }
+        let mut stream: &dyn Pipe = &*pipe;
+        let met = (|| {
+            stream.set_read_timeout(OPENING)?;
+            let (mut send, mut receive) = wire::open(&mut stream, side, tag, &self.secret)?;
+            send.send(&mut stream, kind::HELLO, &self.me)?;
+            let (first, body) = receive.receive(&mut stream)?;
+            if first != kind::HELLO {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "No hello"));
+            }
+            let hello: Hello = minicbor::decode(&body)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "A malformed hello"))?;
+            stream.set_read_timeout(GONE)?;
+            Ok((send, receive, hello))
+        })();
+        pipe.met(met.is_ok());
+        let (send, mut receive, hello) = match met {
+            Ok(met) => met,
+            Err(error) => {
+                eprintln!("Live: no meeting in {tag}: {error}");
+                if error.kind() == io::ErrorKind::InvalidData {
+                    self.failed();
+                }
+                pipe.shutdown();
+                return false;
+            }
+        };
+        let peer = hello.peer;
+        let name = hello.name.clone();
+        let hello = Arc::new(hello);
+        let connection = self.connections.fetch_add(1, Ordering::Relaxed);
+        let (out, outgoing) = mpsc::channel();
+        let line = Line(out);
+        {
+            let mut state = self.state.lock().unwrap();
+            // A peer met both directly and through a relay keeps the direct connection, as
+            // both ends then agree.
+            let kept = match state.peers.get(&peer) {
+                _ if peer == self.me.peer => false,
+                Some(link) if link.pipe.direct() || !pipe.direct() => false,
+                Some(link) => {
+                    link.pipe.shutdown();
+                    true
+                }
+                None => true,
+            };
+            if !kept {
+                drop(state);
+                pipe.shutdown();
+                return false;
+            }
+            let _ = line.0.send(Out::Presence);
+            state.peers.insert(
+                peer,
+                Link {
+                    connection,
+                    peer: Peer {
+                        hello: Arc::clone(&hello),
+                        presence: None,
+                    },
+                    line: line.clone(),
+                    pipe: Arc::clone(&pipe),
+                },
+            );
+        }
+        let writing = Arc::clone(&pipe);
+        let shared = Arc::clone(&self);
+        thread::spawn(move || shared.write(&*writing, send, outgoing));
+        (self.events)(Event::Met(&hello, &line));
+        (self.events)(Event::Changed);
+        let ended = loop {
+            let (message, body) = match receive.receive(&mut stream) {
+                Ok(frame) => frame,
+                Err(error) => break Some(error),
+            };
+            match message {
+                kind::HELLO | kind::PING => {}
+                kind::PRESENCE => {
+                    let Ok(presence) = minicbor::decode::<Presence>(&body) else {
+                        break None;
+                    };
+                    if let Some(link) = self.state.lock().unwrap().peers.get_mut(&peer) {
+                        link.peer.presence = Some(presence);
+                    }
+                    (self.events)(Event::Changed);
+                }
+                kind => (self.events)(Event::Frame {
+                    from: &hello,
+                    kind,
+                    body: &body,
+                    line: &line,
+                }),
+            }
+        };
+        if let Some(error) = ended.filter(|error| error.kind() == io::ErrorKind::InvalidData) {
+            eprintln!("Live: the connection to {name} broke ({error}); meeting again");
+            pipe.broken();
+        }
+        pipe.shutdown();
+        let mut state = self.state.lock().unwrap();
+        if state
+            .peers
+            .get(&peer)
+            .is_some_and(|link| link.connection == connection)
+        {
+            state.peers.remove(&peer);
+            drop(state);
+            (self.events)(Event::Left(&hello));
+            (self.events)(Event::Changed);
+        }
+        true
+    }
+
+    /// Sends the newest presence whenever woken, frames as they come, and a ping when quiet.
+    fn write(&self, pipe: &dyn Pipe, mut send: Sealer, outgoing: mpsc::Receiver<Out>) {
+        let mut stream = pipe;
+        let mut sent = None;
+        loop {
+            let result = match outgoing.recv_timeout(PING) {
+                Ok(Out::Presence) => {
+                    let presence = {
+                        let state = self.state.lock().unwrap();
+                        if sent == Some(state.generation) {
+                            continue;
+                        }
+                        sent = Some(state.generation);
+                        state.presence.clone()
+                    };
+                    send.send(&mut stream, kind::PRESENCE, &presence)
+                }
+                Ok(Out::Frame(kind, body)) => send.send_encoded(&mut stream, kind, &body),
+                Ok(Out::Bye(body)) => {
+                    let _ = send.send_encoded(&mut stream, kind::BYE, &body);
+                    pipe.shutdown();
+                    return;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => send.send(&mut stream, kind::PING, &()),
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            };
+            if result.is_err() {
+                pipe.shutdown();
+                return;
+            }
+        }
+    }
+}
+
 /// Advertises `shared` as in room `tag` on `port` and connects to the peers in its room that
-/// discovery finds with a higher id than its own, which leave the connecting to it.
-fn advertise(
+/// discovery finds with a higher id than its own.
+fn discover(
     shared: &Arc<Shared>,
     reach: Reach,
     tag: String,
@@ -343,13 +689,16 @@ fn advertise(
     };
     daemon.register(info)?;
     let found = daemon.browse(SERVICE)?;
-    let shared = Arc::clone(shared);
+    let shared = Arc::downgrade(shared);
     thread::Builder::new()
         .name("live discovery".into())
         .spawn(move || {
             while let Ok(event) = found.recv() {
                 let ServiceEvent::ServiceResolved(service) = event else {
                     continue;
+                };
+                let Some(shared) = shared.upgrade() else {
+                    return;
                 };
                 let (Some(room), Some(peer)) = (
                     service.get_property_val_str("room"),
@@ -365,169 +714,12 @@ fn advertise(
                 addresses.sort_by_key(|ip| (!ip.is_ipv4(), !ip.is_loopback()));
                 if let Some(ip) = addresses.first() {
                     let address = SocketAddr::new(*ip, service.port);
-                    let shared = Arc::clone(&shared);
                     thread::spawn(move || shared.dial(address));
                 }
             }
         })
         .map_err(|error| mdns_sd::Error::Msg(error.to_string()))?;
     Ok(daemon)
-}
-
-impl Shared {
-    fn knows(&self, peer: &str) -> bool {
-        let state = self.state.lock().unwrap();
-        state.peers.keys().any(|id| hex(id) == peer)
-    }
-
-    /// Connects to `address`, and again while the peer is there and the connection was the
-    /// one this end kept.
-    fn dial(self: Arc<Self>, address: SocketAddr) {
-        let Some(tag) = self.room.tag() else {
-            return;
-        };
-        let mut wait = Duration::from_secs(1);
-        while let Ok(stream) = TcpStream::connect_timeout(&address, OPENING) {
-            if !Arc::clone(&self).run(Arc::new(stream), Side::Initiator, &tag)
-                || self.stopped.load(Ordering::Acquire)
-            {
-                return;
-            }
-            thread::sleep(wait);
-            wait = (wait * 2).min(PATIENCE);
-        }
-    }
-
-    /// Meets the peer at the other end of `pipe` in room `tag`, then reads from it until it
-    /// goes: whether it was the connection kept to that peer.
-    fn run(self: Arc<Self>, pipe: Arc<dyn Pipe>, side: Side, tag: &str) -> bool {
-        if self.stopped.load(Ordering::Acquire) {
-            pipe.shutdown();
-            return false;
-        }
-        let mut stream: &dyn Pipe = &*pipe;
-        let met = (|| {
-            stream.set_read_timeout(OPENING)?;
-            let (mut send, mut receive) = wire::open(&mut stream, side, tag, &self.secret)?;
-            send.send(&mut stream, kind::HELLO, &self.me)?;
-            let (first, body) = receive.receive(&mut stream)?;
-            if first != kind::HELLO {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "No hello"));
-            }
-            let hello: Hello = minicbor::decode(&body)
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "A malformed hello"))?;
-            stream.set_read_timeout(GONE)?;
-            Ok((send, receive, hello))
-        })();
-        pipe.met(met.is_ok());
-        let (send, mut receive, hello) = match met {
-            Ok(met) => met,
-            Err(error) => {
-                eprintln!("Live: no meeting in {tag}: {error}");
-                pipe.shutdown();
-                return false;
-            }
-        };
-        let peer = hello.peer;
-        let name = hello.name.clone();
-        let connection = self.connections.fetch_add(1, Ordering::Relaxed);
-        let (wake, woken) = mpsc::channel();
-        {
-            let mut state = self.state.lock().unwrap();
-            // A peer met both directly and through a relay keeps the direct connection, as
-            // both ends then agree.
-            let kept = match state.peers.get(&peer) {
-                _ if peer == self.me.peer => false,
-                Some(link) if link.pipe.direct() || !pipe.direct() => false,
-                Some(link) => {
-                    link.pipe.shutdown();
-                    true
-                }
-                None => true,
-            };
-            if !kept {
-                drop(state);
-                pipe.shutdown();
-                return false;
-            }
-            let _ = wake.send(());
-            state.peers.insert(
-                peer,
-                Link {
-                    connection,
-                    peer: Peer {
-                        hello: Arc::new(hello),
-                        presence: None,
-                    },
-                    wake,
-                    pipe: Arc::clone(&pipe),
-                },
-            );
-        }
-        (self.notify)();
-        let writing = Arc::clone(&pipe);
-        let shared = Arc::clone(&self);
-        thread::spawn(move || shared.write(&*writing, send, woken));
-        let ended = loop {
-            let (message, body) = match receive.receive(&mut stream) {
-                Ok(frame) => frame,
-                Err(error) => break Some(error),
-            };
-            if message != kind::PRESENCE {
-                continue;
-            }
-            let Ok(presence) = minicbor::decode::<Presence>(&body) else {
-                break None;
-            };
-            if let Some(link) = self.state.lock().unwrap().peers.get_mut(&peer) {
-                link.peer.presence = Some(presence);
-            }
-            (self.notify)();
-        };
-        if let Some(error) = ended.filter(|error| error.kind() == io::ErrorKind::InvalidData) {
-            eprintln!("Live: the connection to {name} broke ({error}); meeting again");
-            pipe.broken();
-        }
-        pipe.shutdown();
-        let mut state = self.state.lock().unwrap();
-        if state
-            .peers
-            .get(&peer)
-            .is_some_and(|link| link.connection == connection)
-        {
-            state.peers.remove(&peer);
-            drop(state);
-            (self.notify)();
-        }
-        true
-    }
-
-    /// Sends the newest presence whenever woken, and a ping when quiet.
-    fn write(&self, pipe: &dyn Pipe, mut send: Sealer, woken: mpsc::Receiver<()>) {
-        let mut stream = pipe;
-        let mut sent = None;
-        loop {
-            let result = match woken.recv_timeout(PING) {
-                Ok(()) => {
-                    let presence = {
-                        let state = self.state.lock().unwrap();
-                        if sent == Some(state.generation) {
-                            continue;
-                        }
-                        sent = Some(state.generation);
-                        state.presence.clone()
-                    };
-                    send.send(&mut stream, kind::PRESENCE, &presence)
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => send.send(&mut stream, kind::PING, &()),
-                Err(mpsc::RecvTimeoutError::Disconnected) => return,
-            };
-            if result.is_err() {
-                pipe.shutdown();
-                return;
-            }
-        }
-    }
 }
 
 fn hex(bytes: &[u8]) -> String {

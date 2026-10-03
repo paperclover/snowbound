@@ -1,7 +1,7 @@
 //! The application's view of a notebook: sections opened through a local replica that
 //! publishes their edits to the section file in the background.
 
-pub use crate::background::{Background, Known};
+pub use crate::background::{Background, Known, Listener};
 use crate::{
     EditStatus, Error, PendingEdit, Remote, Replica, Resolution, Result, SyncWorker, discover, fs,
 };
@@ -81,7 +81,11 @@ pub trait Storage: Send + Sync {
     ) -> Result<discover::Folder>;
     /// Where the notebook lives, which names its catalog's cache.
     fn location(&self) -> String;
+    /// A folder's entries, as discovery lists them.
+    fn entries(&self, folder: &str) -> io::Result<Vec<discover::Entry>>;
     fn exists(&self, path: &str) -> bool;
+    /// A section's or TOC's stamp, without reading its body or coordinating with writers.
+    fn stamp(&self, path: &str) -> io::Result<Stamp>;
     fn read(&self, path: &str) -> Result<Vec<u8>>;
     /// Reads a file of at most `limit` bytes as it stands, whatever it holds.
     fn read_file(&self, path: &str, limit: usize) -> Result<Vec<u8>>;
@@ -103,6 +107,8 @@ pub trait Storage: Send + Sync {
     fn place(&self, path: &str, ancestor: [u8; 16], name: &str) -> Result<()>;
     /// Publishes a transaction made on the file's current image.
     fn commit(&self, path: &str, transaction: &Transaction) -> Result<()>;
+    /// Confirms that the file still has `base`'s stamp and is durable (`onestore::confirm`).
+    fn confirm(&self, path: &str, base: &Stamp) -> std::result::Result<(), CommitError>;
     /// Puts the file `with` in the place of the section or TOC at `path` under the coordination
     /// its writers take, provided `path` still has `base`'s stamp.
     fn supersede(&self, path: &str, base: &Stamp, with: &str) -> Result<()>;
@@ -134,8 +140,17 @@ impl Storage for Directory {
         self.0.to_string_lossy().into_owned()
     }
 
+    fn entries(&self, folder: &str) -> io::Result<Vec<discover::Entry>> {
+        use discover::Source;
+        discover::Local::open(&self.0)?.entries(folder, LIMITS.entries)
+    }
+
     fn exists(&self, path: &str) -> bool {
         fs::metadata(self.path(path)).is_ok()
+    }
+
+    fn stamp(&self, path: &str) -> io::Result<Stamp> {
+        FileRemote(self.path(path)).stamp()
     }
 
     fn read(&self, path: &str) -> Result<Vec<u8>> {
@@ -248,6 +263,10 @@ impl Storage for Directory {
         Ok(fs::commit_file(transaction, self.path(path))?)
     }
 
+    fn confirm(&self, path: &str, base: &Stamp) -> std::result::Result<(), CommitError> {
+        fs::confirm_file(self.path(path), base)
+    }
+
     fn supersede(&self, path: &str, base: &Stamp, with: &str) -> Result<()> {
         Ok(fs::supersede_file(self.path(path), base, self.path(with))?)
     }
@@ -286,6 +305,15 @@ impl Storage for Share {
 
     fn location(&self) -> String {
         self.client.location(&self.root)
+    }
+
+    fn entries(&self, folder: &str) -> io::Result<Vec<discover::Entry>> {
+        use discover::Source;
+        discover::Smb::new(&self.client, &self.root)?.entries(folder, LIMITS.entries)
+    }
+
+    fn stamp(&self, path: &str) -> io::Result<Stamp> {
+        self.client.stamp(&self.path(path))
     }
 
     fn exists(&self, path: &str) -> bool {
@@ -360,6 +388,10 @@ impl Storage for Share {
         Ok(self
             .client
             .commit_transaction(&self.path(path), transaction)?)
+    }
+
+    fn confirm(&self, path: &str, base: &Stamp) -> std::result::Result<(), CommitError> {
+        self.client.confirm(&self.path(path), base)
     }
 
     fn supersede(&self, path: &str, base: &Stamp, with: &str) -> Result<()> {
@@ -440,6 +472,27 @@ impl Notebook {
         )
     }
 
+    /// Opens the notebook a Live Share host serves to `guest`. Sections open through
+    /// `Section::resume_hosted` with the catalog's paths; while the host can't be reached,
+    /// the notebook opens as its folders were last listed.
+    #[cfg(feature = "live")]
+    pub fn open_hosted(
+        guest: Arc<crate::live::share::Guest>,
+        cache: impl AsRef<Path>,
+    ) -> Result<Self> {
+        let listed = listing(cache.as_ref(), &guest.location()).with_extension("entries.json");
+        Self::with(
+            Box::new(crate::live::share::Hosted::new(guest, listed)),
+            None,
+            cache,
+        )
+    }
+
+    /// The storage the notebook's files are in, for a Live Share host to serve.
+    pub fn into_storage(self) -> Box<dyn Storage> {
+        self.storage
+    }
+
     fn with(
         storage: Box<dyn Storage>,
         root: Option<PathBuf>,
@@ -507,6 +560,11 @@ impl Notebook {
     /// maps none.
     pub fn tag_art(&self) -> Result<Vec<crate::sidecar::TagMapping>> {
         crate::sidecar::mappings(&*self.storage)
+    }
+
+    /// The secret of the notebook's live presence room, made where it has none.
+    pub fn presence_room(&self) -> Result<[u8; 16]> {
+        crate::sidecar::room(&*self.storage)
     }
 
     /// The picture a mapping names, once its bytes match its name.
@@ -2019,6 +2077,22 @@ impl Section {
             PathBuf::from(&path),
             replica,
             move || Ok(crate::SmbRemote::new(connect()?, path.clone(), limit)),
+            notify,
+        )
+    }
+
+    /// Resumes a replica against a section a Live Share host serves at catalog `path`.
+    #[cfg(feature = "live")]
+    pub fn resume_hosted(
+        path: String,
+        replica: Replica,
+        guest: Arc<crate::live::share::Guest>,
+        notify: impl Fn() + Send + 'static,
+    ) -> Result<Self> {
+        Self::start(
+            PathBuf::from(&path),
+            replica,
+            move || Ok(crate::live::share::HostedRemote::new(&guest, &path)),
             notify,
         )
     }

@@ -3,7 +3,7 @@
 //! the relay sees only who talks to whom, when, and how much. A stream that breaks makes this
 //! end join the room again, which ends every stream it had there; peers then meet afresh.
 
-use super::{OPENING, PATIENCE, Pipe, Shared, Side, code_parts};
+use super::{Event, OPENING, PATIENCE, Pipe, Relayed as Answer, Shared, Side, code_parts};
 use ::relay::{Notice, SLOT, Verdict, ws};
 use base64::Engine;
 use rustls::{ClientConfig, ClientConnection, RootCertStore, pki_types::ServerName};
@@ -29,13 +29,14 @@ const MOST: usize = 1 << 20;
 
 type Reader = ws::Reader<BufReader<Box<dyn Read + Send>>>;
 
-/// Joins `shared`'s room at the relay at `url`, and keeps joining whenever it falls out.
-pub(super) fn join(shared: &Arc<Shared>, url: &str) -> io::Result<()> {
+/// Joins `shared`'s room at the relay at `url`, and keeps joining whenever it falls out;
+/// `port` is where it listens, to advertise once the relay numbers its code.
+pub(super) fn join(shared: &Arc<Shared>, url: &str, port: u16) -> io::Result<()> {
     let address = parse(url)?;
     let shared = Arc::clone(shared);
     thread::Builder::new()
         .name("live relay".into())
-        .spawn(move || keep(&shared, &address))?;
+        .spawn(move || keep(&shared, &address, port))?;
     Ok(())
 }
 
@@ -87,41 +88,56 @@ impl From<io::Error> for Failure {
     }
 }
 
+/// Records how the relay answered, telling `shared`'s events where it changed.
+fn answered(shared: &Shared, answer: Answer) {
+    let mut state = shared.state.lock().unwrap();
+    if state.relayed.as_ref() != Some(&answer) {
+        state.relayed = Some(answer);
+        drop(state);
+        (shared.events)(Event::Changed);
+    }
+}
+
 /// Stays in the room at `address`, joining again whenever the connection ends, until
 /// `shared` stops.
-fn keep(shared: &Arc<Shared>, address: &Address) {
+fn keep(shared: &Arc<Shared>, address: &Address, port: u16) {
     let mut wait = Duration::from_secs(1);
-    // The number the relay gave this end's code, asked for again on joining again.
-    let mut nameplate = None;
+    let owner = shared.room.owner();
+    // The number of this end's code, asked for again on joining again.
+    let mut nameplate = owner
+        .then(|| code_parts(shared.state.lock().unwrap().code.as_deref()?).0)
+        .flatten();
     while !shared.stopped.load(Ordering::Acquire) {
         let began = Instant::now();
-        let tag = shared.room.tag();
-        let path = match &tag {
-            Some(tag) => format!("{}/v1/room/{tag}", address.path),
-            None => match nameplate {
+        let path = match (owner, shared.tag()) {
+            (false, Some(tag)) => format!("{}/v1/room/{tag}", address.path),
+            (false, None) => return,
+            (true, _) => match nameplate {
                 Some(number) => format!("{}/v1/claim?nameplate={number}", address.path),
                 None => format!("{}/v1/claim", address.path),
             },
         };
-        match connect(address, &path, tag.is_none()) {
+        match connect(address, &path, owner) {
             Ok((socket, reader)) => {
                 shared.state.lock().unwrap().relay = Some(Arc::clone(&socket));
+                answered(shared, Answer::Joined);
                 if !shared.stopped.load(Ordering::Acquire) {
-                    session(shared, &socket, reader, &mut nameplate);
+                    session(shared, &socket, reader, &mut nameplate, port);
                 }
                 shared.state.lock().unwrap().relay = None;
                 socket.hang_up();
             }
-            Err(Failure::Refused(410, _)) => {
-                eprintln!("Live: the code has expired; ask for a new one");
-                return;
-            }
             Err(Failure::Refused(status, retry)) => {
                 eprintln!("Live: the relay refused to let this end in ({status})");
+                answered(shared, Answer::Refused(status, retry));
+                if status == 410 {
+                    return;
+                }
                 wait = wait.max(retry.unwrap_or_default());
             }
             Err(Failure::Network(error)) => {
                 eprintln!("Live: no relay at {}: {error}", address.authority);
+                answered(shared, Answer::Unreachable);
             }
         }
         if began.elapsed() >= STEADY {
@@ -337,8 +353,9 @@ fn session(
     socket: &Arc<Socket>,
     mut reader: Reader,
     nameplate: &mut Option<u32>,
+    port: u16,
 ) {
-    let mut tag = shared.room.tag();
+    let mut tag = shared.tag();
     // Pings while the session lasts: dropping `_beat` at its end stops them.
     let (_beat, beats) = mpsc::channel::<()>();
     let pinging = Arc::clone(socket);
@@ -355,16 +372,16 @@ fn session(
                 Ok(Notice::Nameplate(number)) => {
                     *nameplate = Some(number);
                     tag = Some(format!("code-{number}"));
-                    let super::Room::Code(words) = &shared.room else {
+                    let super::Room::Code { code: words, .. } = &shared.room else {
                         continue;
                     };
                     let code = format!("{number}-{}", code_parts(words).1);
                     let mut state = shared.state.lock().unwrap();
                     if state.code.as_ref() != Some(&code) {
-                        eprintln!("Live: the code is {code}");
                         state.code = Some(code);
                         drop(state);
-                        (shared.notify)();
+                        shared.advertise(port);
+                        (shared.events)(Event::Changed);
                     }
                 }
                 Ok(Notice::Welcome { you, members }) => {
@@ -378,7 +395,8 @@ fn session(
                 Ok(Notice::Burned) => {
                     // Coming back, ask for another number.
                     *nameplate = None;
-                    eprintln!("Live: too many wrong tries; the code admits no one new");
+                    shared.state.lock().unwrap().burned = true;
+                    (shared.events)(Event::Changed);
                 }
                 Err(()) => {}
             },

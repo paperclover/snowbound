@@ -20,11 +20,60 @@ pub mod kind {
     pub const HELLO: u16 = 1;
     /// Keeps a quiet connection open; it says nothing else.
     pub const PING: u16 = 2;
+    pub const BYE: u16 = 3;
     pub const PRESENCE: u16 = 16;
+    /// A host's files changed: `Touched`.
+    pub const TOUCHED: u16 = 18;
+    pub const WELCOME: u16 = 32;
+    /// Storage requests to a host, each a `Request` answered by a `Reply`.
+    pub const LIST: u16 = 257;
+    pub const STAMP: u16 = 258;
+    /// A section's consistent image, a chunk at a time.
+    pub const READ: u16 = 259;
+    pub const COMMIT: u16 = 260;
+    pub const CONFIRM: u16 = 261;
+    pub const CREATE: u16 = 262;
+    pub const CREATE_DIRECTORY: u16 = 263;
+    pub const HIDE: u16 = 264;
+    pub const RENAME: u16 = 265;
+    pub const REPLACE: u16 = 266;
+    pub const DELETE: u16 = 267;
+    pub const PLACE: u16 = 268;
+    pub const SUPERSEDE: u16 = 269;
+    /// Any other file as it stands, a chunk at a time.
+    pub const READ_FILE: u16 = 270;
+    pub const EXISTS: u16 = 271;
+    /// A chunk of the bytes a later request carries.
+    pub const PUT: u16 = 272;
+    pub const REPLY: u16 = 511;
 }
 
 /// The kinds this version reads, as `Hello::kinds` lists them.
-pub const KNOWN: &[u16] = &[kind::HELLO, kind::PING, kind::PRESENCE];
+pub const KNOWN: &[u16] = &[
+    kind::HELLO,
+    kind::PING,
+    kind::BYE,
+    kind::PRESENCE,
+    kind::TOUCHED,
+    kind::WELCOME,
+    kind::LIST,
+    kind::STAMP,
+    kind::READ,
+    kind::COMMIT,
+    kind::CONFIRM,
+    kind::CREATE,
+    kind::CREATE_DIRECTORY,
+    kind::HIDE,
+    kind::RENAME,
+    kind::REPLACE,
+    kind::DELETE,
+    kind::PLACE,
+    kind::SUPERSEDE,
+    kind::READ_FILE,
+    kind::EXISTS,
+    kind::PUT,
+    kind::REPLY,
+];
 
 /// The first message each way, and the only one with a name and a picture.
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
@@ -44,6 +93,9 @@ pub struct Hello {
     /// The message kinds the sender reads; a request waits for its kind to be listed.
     #[n(4)]
     pub kinds: Vec<u16>,
+    /// The share this peer hosts, whose storage requests it answers.
+    #[cbor(n(5), with = "minicbor::bytes")]
+    pub serves: Option<[u8; 16]>,
 }
 
 impl Hello {
@@ -57,6 +109,7 @@ impl Hello {
             picture,
             app: format!("Snowbound {}", env!("CARGO_PKG_VERSION")),
             kinds: KNOWN.to_vec(),
+            serves: None,
         })
     }
 }
@@ -123,6 +176,194 @@ impl From<Guid> for onestore::ExGuid {
     }
 }
 
+/// Why a peer leaves: `left`, or `stopped` for a host that stopped sharing.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+#[cbor(map)]
+pub struct Bye {
+    #[n(0)]
+    pub reason: String,
+}
+
+/// What the host of a share gives a peer that knew its code: the share's room, and names to
+/// show it by.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+#[cbor(map)]
+pub struct Welcome {
+    #[cbor(n(0), with = "minicbor::bytes")]
+    pub share: [u8; 16],
+    #[cbor(n(1), with = "minicbor::bytes")]
+    pub secret: [u8; 16],
+    #[n(2)]
+    pub notebook: String,
+    /// The host's name for itself, as `Hello::name`.
+    #[n(3)]
+    pub host: String,
+}
+
+/// Paths a host's files changed at, by catalog path; `""` is the notebook's folder.
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
+#[cbor(map)]
+pub struct Touched {
+    #[n(0)]
+    pub paths: Vec<String>,
+}
+
+/// A storage request; its kind names the verb, and the verb what it carries.
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
+#[cbor(map)]
+pub struct Request {
+    /// Names the reply; a `PUT`'s names the bytes a later request carries.
+    #[n(0)]
+    pub id: u64,
+    /// A catalog path.
+    #[n(1)]
+    pub path: String,
+    /// A rename's or replacement's target, or the file a supersession puts in place.
+    #[n(2)]
+    pub to: Option<String>,
+    #[n(3)]
+    pub offset: Option<u64>,
+    #[n(4)]
+    pub limit: Option<u64>,
+    #[cbor(n(5), with = "minicbor::bytes")]
+    pub bytes: Option<Vec<u8>>,
+    /// A confirmation's or supersession's base.
+    #[n(6)]
+    pub stamp: Option<WireStamp>,
+    #[cbor(n(7), with = "minicbor::bytes")]
+    pub ancestor: Option<[u8; 16]>,
+    #[n(8)]
+    pub name: Option<String>,
+    /// The `PUT`s, by id, whose bytes this request carries in place of `bytes`; a read's
+    /// snapshot after its first chunk.
+    #[n(9)]
+    pub handle: Option<u64>,
+}
+
+/// A request's answer: a failure, or what the verb gives.
+#[derive(Clone, Debug, Default, PartialEq, Encode, Decode)]
+#[cbor(map)]
+pub struct Reply {
+    #[n(0)]
+    pub id: u64,
+    #[n(1)]
+    pub failure: Option<Failure>,
+    #[cbor(n(2), with = "minicbor::bytes")]
+    pub bytes: Option<Vec<u8>>,
+    /// A read's whole length.
+    #[n(3)]
+    pub length: Option<u64>,
+    #[n(4)]
+    pub stamp: Option<WireStamp>,
+    #[n(5)]
+    pub entries: Option<Vec<WireEntry>>,
+    #[n(6)]
+    pub exists: Option<bool>,
+    /// The snapshot a read's later chunks come from.
+    #[n(7)]
+    pub handle: Option<u64>,
+}
+
+/// Why a request failed: an `io::ErrorKind` as `error_kind` numbers it, and for a commit,
+/// how far it got (`commit_state`).
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+#[cbor(map)]
+pub struct Failure {
+    #[n(0)]
+    pub kind: u16,
+    #[n(1)]
+    pub message: String,
+    #[n(2)]
+    pub state: Option<u8>,
+}
+
+/// An `onestore::Stamp`.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+#[cbor(map)]
+pub struct WireStamp {
+    #[cbor(n(0), with = "minicbor::bytes")]
+    pub header: Vec<u8>,
+    #[n(1)]
+    pub length: u64,
+}
+
+impl From<&onestore::Stamp> for WireStamp {
+    fn from(stamp: &onestore::Stamp) -> Self {
+        Self {
+            header: stamp.header.to_vec(),
+            length: stamp.length,
+        }
+    }
+}
+
+impl TryFrom<&WireStamp> for onestore::Stamp {
+    type Error = io::Error;
+
+    fn try_from(stamp: &WireStamp) -> io::Result<Self> {
+        Ok(Self {
+            header: stamp
+                .header
+                .as_slice()
+                .try_into()
+                .map_err(|_| invalid("A stamp's header is 1024 bytes"))?,
+            length: stamp.length,
+        })
+    }
+}
+
+/// A folder's entry, as `discover::Entry`.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+#[cbor(map)]
+pub struct WireEntry {
+    #[n(0)]
+    pub name: String,
+    /// 0 a file, 1 a folder, 2 anything else, 3 a file kept elsewhere.
+    #[n(1)]
+    pub kind: u8,
+    #[n(2)]
+    pub size: u64,
+    #[n(3)]
+    pub modified: u64,
+}
+
+/// The `io::ErrorKind`s a failure names, by number; any other is `Other`.
+const ERROR_KINDS: [io::ErrorKind; 20] = [
+    io::ErrorKind::Other,
+    io::ErrorKind::NotFound,
+    io::ErrorKind::PermissionDenied,
+    io::ErrorKind::AlreadyExists,
+    io::ErrorKind::InvalidInput,
+    io::ErrorKind::InvalidData,
+    io::ErrorKind::TimedOut,
+    io::ErrorKind::WouldBlock,
+    io::ErrorKind::ResourceBusy,
+    io::ErrorKind::Unsupported,
+    io::ErrorKind::FileTooLarge,
+    io::ErrorKind::NotConnected,
+    io::ErrorKind::ReadOnlyFilesystem,
+    io::ErrorKind::DirectoryNotEmpty,
+    io::ErrorKind::NotADirectory,
+    io::ErrorKind::IsADirectory,
+    io::ErrorKind::StorageFull,
+    io::ErrorKind::UnexpectedEof,
+    io::ErrorKind::Interrupted,
+    io::ErrorKind::BrokenPipe,
+];
+
+pub fn error_number(kind: io::ErrorKind) -> u16 {
+    ERROR_KINDS
+        .iter()
+        .position(|known| *known == kind)
+        .unwrap_or(0) as u16
+}
+
+pub fn error_kind(number: u16) -> io::ErrorKind {
+    ERROR_KINDS
+        .get(usize::from(number))
+        .copied()
+        .unwrap_or(io::ErrorKind::Other)
+}
+
 /// The opening, sent in the clear by the side that connected and answered by the other.
 #[derive(Encode, Decode)]
 #[cbor(map)]
@@ -161,8 +402,13 @@ impl Sealer {
         kind: u16,
         body: &impl Encode<()>,
     ) -> io::Result<()> {
-        let mut clear = kind.to_be_bytes().to_vec();
-        minicbor::encode(body, &mut clear).map_err(io::Error::other)?;
+        let body = minicbor::to_vec(body).map_err(io::Error::other)?;
+        self.send_encoded(to, kind, &body)
+    }
+
+    /// `send` for a body already encoded.
+    pub fn send_encoded(&mut self, to: &mut impl Write, kind: u16, body: &[u8]) -> io::Result<()> {
+        let clear = [&kind.to_be_bytes()[..], body].concat();
         let number = self.count.to_be_bytes();
         let sealed = self
             .cipher

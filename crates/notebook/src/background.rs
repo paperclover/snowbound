@@ -62,10 +62,15 @@ pub(crate) struct Shared {
     watched: Mutex<Watched>,
     /// Asked for by `discard`, once the thread stops.
     discard: AtomicBool,
+    /// Hears every report of changed paths (`on_touched`).
+    listener: Mutex<Option<Listener>>,
 }
 
+/// Hears the catalog paths a report names.
+pub type Listener = Box<dyn Fn(&[String]) + Send + Sync>;
+
 /// A connection's report of its notebook folder's changes, from a watch armed on connecting.
-#[cfg_attr(not(feature = "smb"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "smb", feature = "live")), allow(dead_code))]
 pub(crate) struct Reports {
     shared: Weak<Shared>,
     connection: u64,
@@ -135,6 +140,7 @@ impl Background {
             signal,
             watched: Mutex::default(),
             discard: AtomicBool::new(false),
+            listener: Mutex::default(),
         });
         let weak = Arc::downgrade(&shared);
         let owner = Arc::clone(&shared);
@@ -342,6 +348,35 @@ impl Background {
         )
     }
 
+    /// Keeps the sections of a notebook a Live Share host serves in sync while they are not
+    /// open, with an offline copy of each; the host reports what changed. Paths are catalog
+    /// paths.
+    #[cfg(feature = "live")]
+    pub fn hosted(
+        guest: Arc<crate::live::share::Guest>,
+        notify: impl Fn() + Send + 'static,
+    ) -> Result<Self> {
+        Self::start(
+            true,
+            move |reports| {
+                guest.watch(reports)?;
+                let (bound, listing) = (Arc::clone(&guest), Arc::clone(&guest));
+                let bind = move |path: &str| crate::live::share::HostedRemote::new(&bound, path);
+                let list = move |folder: &str| listing.entries(folder);
+                Ok(((bind, list), true))
+            },
+            notify,
+        )
+    }
+
+    /// Has `listener` hear every report of changed paths from now on, as a Live Share host
+    /// passes them to its guests; `None` stops.
+    pub fn on_touched(&self, listener: Option<Listener>) {
+        if let Ok(mut held) = self.0.listener.lock() {
+            *held = listener;
+        }
+    }
+
     /// Watches these sections (`Notebook::replicas`); a section not watched before is first
     /// checked soon after, the next one a little later.
     pub fn watch(&self, sections: Vec<Known>) {
@@ -484,6 +519,11 @@ impl Shared {
             watched.touched(paths, Instant::now());
         }
         self.signal.wake();
+        if let Ok(listener) = self.listener.lock()
+            && let Some(listener) = &*listener
+        {
+            listener(paths);
+        }
     }
 
     /// The session holding the section at `path` let it go: it is checked now.
@@ -499,7 +539,7 @@ impl Shared {
     }
 }
 
-#[cfg_attr(not(feature = "smb"), allow(dead_code))]
+#[cfg_attr(not(any(feature = "smb", feature = "live")), allow(dead_code))]
 impl Reports {
     /// The sections at or below these paths changed.
     pub(crate) fn touched(&self, paths: &[String]) {

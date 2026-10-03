@@ -83,6 +83,22 @@ impl Storage for Folder {
         "memory".into()
     }
 
+    fn entries(&self, _: &str) -> io::Result<Vec<discover::Entry>> {
+        unimplemented!()
+    }
+
+    fn stamp(&self, _: &str) -> io::Result<onestore::Stamp> {
+        unimplemented!()
+    }
+
+    fn confirm(
+        &self,
+        _: &str,
+        _: &onestore::Stamp,
+    ) -> std::result::Result<(), onestore::CommitError> {
+        unimplemented!()
+    }
+
     fn exists(&self, path: &str) -> bool {
         self.files.lock().unwrap().contains_key(path) || self.folders.lock().unwrap().contains(path)
     }
@@ -340,4 +356,25 @@ fn themes_merge_into_the_hidden_folder() {
         ..Default::default()
     };
     assert!(themes::write(&folder, built_in).is_err());
+}
+
+/// The presence room's secret is made once, in the hidden folder, and every reader after
+/// takes it; a writer that finds one made meanwhile takes that one.
+#[test]
+fn the_presence_room_is_made_once() {
+    let folder = Folder::default();
+    let secret = room(&folder).unwrap();
+    assert_eq!(room(&folder).unwrap(), secret);
+    assert!(folder.hidden.lock().unwrap().contains(FOLDER));
+    let files: Vec<_> = folder.files.lock().unwrap().keys().cloned().collect();
+    assert_eq!(files, [ROOM]);
+    let theirs = br#"{"room":"000102030405060708090a0b0c0d0e0f"}"#;
+    let other = Folder::default();
+    other.folders.lock().unwrap().insert(FOLDER.into());
+    other
+        .files
+        .lock()
+        .unwrap()
+        .insert(ROOM.into(), theirs.to_vec());
+    assert_eq!(room(&other).unwrap(), std::array::from_fn(|at| at as u8));
 }

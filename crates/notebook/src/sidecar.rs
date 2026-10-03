@@ -17,6 +17,9 @@ use std::io;
 
 const FOLDER: &str = ".snowbound";
 const MAPPING: &str = ".snowbound/tags.json";
+/// Live presence's room secret: whoever reads the notebook's files may see who else has it
+/// open. Live Share never serves it to guests, who meet in the share's own room.
+const ROOM: &str = ".snowbound/live.json";
 const ART: &str = ".snowbound/tags";
 /// The most bytes read of a mapping or a picture.
 pub const LIMIT: usize = 1 << 20;
@@ -153,6 +156,55 @@ pub(crate) fn map(
         }
     }
     Err(io::Error::from(io::ErrorKind::ResourceBusy).into())
+}
+
+/// The secret of the notebook's presence room (`live::Room::Notebook`), made where it has none.
+/// The first writer's stays: a writer that finds one made meanwhile takes it.
+pub(crate) fn room(storage: &dyn Storage) -> Result<[u8; 16]> {
+    #[derive(Serialize, Deserialize)]
+    struct Room {
+        room: String,
+    }
+    let read = || -> Result<Option<[u8; 16]>> {
+        let bytes = match storage.read_file(ROOM, LIMIT) {
+            Err(crate::Error::Io(error)) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            bytes => bytes?,
+        };
+        let room: Room = serde_json::from_slice(&bytes).map_err(io::Error::from)?;
+        let secret: Option<Vec<u8>> = (0..room.room.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(room.room.get(at..at + 2)?, 16).ok())
+            .collect();
+        Ok(Some(
+            secret
+                .and_then(|secret| secret.try_into().ok())
+                .ok_or(io::Error::from(io::ErrorKind::InvalidData))?,
+        ))
+    };
+    if let Some(secret) = read()? {
+        return Ok(secret);
+    }
+    match storage.create_directory(FOLDER) {
+        Err(crate::Error::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        created => created?,
+    }
+    storage.hide(FOLDER)?;
+    let mut secret = [0; 16];
+    getrandom::fill(&mut secret).map_err(|_| io::Error::other("System random source failed"))?;
+    let room = Room {
+        room: secret.iter().map(|byte| format!("{byte:02x}")).collect(),
+    };
+    let written = temporary(ROOM);
+    storage.create(
+        &written,
+        &serde_json::to_vec(&room).map_err(io::Error::from)?,
+    )?;
+    if storage.rename(&written, ROOM).is_err() {
+        storage.delete(&written)?;
+    }
+    read()?.ok_or_else(|| io::Error::from(io::ErrorKind::NotFound).into())
 }
 
 /// A name beside `path` no other writer picks.

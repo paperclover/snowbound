@@ -533,24 +533,38 @@ Device and simulator builds link for iOS. Native acceptance uses disposable
 OneNote 2010 clients and Samba; it does not establish on-device execution or
 physical power-loss durability.
 
-## Live presence (feature `live`)
+## Live presence and Live Share (feature `live`)
 
-`live::Live::start(hello, room, reach, relay, notify)` listens on a TCP port and, with a
+`live::Live::start(hello, room, reach, relay, events)` listens on a TCP port and, with a
 `Reach`, advertises `_snowbound._tcp` by mDNS on every network or on loopback alone,
-connecting to the peers in the same `Room` that it finds: a notebook's identity, or a code
-typed on both (`Room::Code("4-violet-otter")`). With a `relay` (`wss://live.example.net`,
-`crates/relay`) it also joins the room there and meets its peers through it; a code's words
-alone (`Room::Code("violet-otter")`) ask the relay for a number, and `code()` then has the
-whole code. `connect(address)` meets a peer discovery did not find. Peers meet through
-SPAKE2 on the room's secret, then every frame is AES-256-GCM under the keys it agreed: its
-number, which is also its nonce, then a message kind and a CBOR map (`live::wire`). A frame
-lost, repeated, reordered or forged on the way fails where it lands; the connection is
-dropped as broken, nothing from it after the fault is applied, and the ends meet again from
-scratch. A reader skips kinds and map keys it doesn't know, so later versions add both
-freely. `set_presence` says which section, page and caret this end has (text object and
-UTF-16 offset, as ops address text); a connection sends only the newest. `peers()` lists
-each connected peer's `Hello` (name, picture) and presence, and `notify` runs whenever that
-changes. Dropping the `Live` leaves.
+connecting to the peers in the same `Room` that it finds: a notebook's or a share's random
+secret (`Room::Notebook`), or a code typed on both (`Room::join("4-violet-otter", password)`).
+With a `relay` (`wss://live.example.net`, `crates/relay`) it also joins the room there and
+meets its peers through it; the end sharing a code (`Room::share`) has the relay number its
+words, `code()` then has the whole code, and it burns a code after too many wrong tries.
+`connect(address)` meets a peer discovery did not find. Peers meet through SPAKE2 on the
+room's secret, then every frame is AES-256-GCM under the keys it agreed: its number, which is
+also its nonce, then a message kind and a CBOR map (`live::wire`). A frame lost, repeated,
+reordered or forged on the way fails where it lands; the connection is dropped as broken,
+nothing from it after the fault is applied, and the ends meet again from scratch. A reader
+skips kinds and map keys it doesn't know, so later versions add both freely.
+`set_presence` says which section, page and caret this end has (text object and UTF-16
+offset, as ops address text); a connection sends only the newest. `peers()` lists each
+connected peer's `Hello` (name, picture) and presence; `events` hears when they change, who
+was met and left, and every other frame with the `Line` to answer on. `leave(reason)` says
+`Bye` first; dropping the `Live` leaves at once. `Notebook::presence_room()` is the secret of
+a notebook's presence room, kept in `.snowbound/live.json` and made where it has none.
+
+`live::share` is Live Share. `Host::start(storage, hello, sharing, name, reach, relay, events)`
+serves `Notebook::into_storage()` to the peers in the share's room and welcomes whoever knows
+`Sharing::code` (and its password) from the code's room; `code()` replaces a burned code with
+new words, `guests()` lists who is connected, `touched(paths)` passes the host's own changes
+on, and `stop()` lets every guest go. `join(hello, code, password, reach, relay)` returns the
+`Welcome` (the share and its secret), or a `Refusal` saying why not: a wrong code, no one
+sharing it, an expired code, too many wrong tries, or no relay. `Guest::start` joins the share;
+`Notebook::open_hosted(guest, cache)`, `Background::hosted(guest, notify)` and
+`Section::resume_hosted(path, replica, guest, notify)` then work as on a share, with
+`Guest::host()` and `stopped()` for whether the host is there and still sharing.
 
 ## Queue measurement
 
