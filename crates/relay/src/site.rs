@@ -173,6 +173,9 @@ fn keep_crash(
     else {
         return "411 Length Required";
     };
+    if length == 0 {
+        return "400 Bad Request";
+    }
     if length > REPORT {
         return "413 Content Too Large";
     }

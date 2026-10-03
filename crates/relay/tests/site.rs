@@ -170,6 +170,9 @@ fn crash_reports_are_kept_small_and_few_and_never_echoed() {
         b"POST /crash HTTP/1.1\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n\xff\xfe",
     );
     assert!(invalid.starts_with("HTTP/1.1 400"), "{invalid}");
+    let empty =
+        site.send(b"POST /crash HTTP/1.1\r\nContent-Type: text/plain\r\nContent-Length: 0\r\n\r\n");
+    assert!(empty.starts_with("HTTP/1.1 400"), "{empty}");
 
     // One sender is held to a few an hour; another, by the proxy's word, still gets in.
     let sent = (0..relay::site::PER_ADDRESS)
