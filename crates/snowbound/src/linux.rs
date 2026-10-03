@@ -1231,7 +1231,24 @@ fn innermost(value: OwnedValue) -> Option<OwnedValue> {
     value.try_into_owned().ok()
 }
 
+/// Where deleted files go, as the file manager names it.
+pub const TRASH: &str = "Trash";
+
 pub const SHOW_FILE: &str = "Show in Files";
+
+/// Moves the file or folder at `path` to the desktop's trash, through GIO, as the file
+/// manager's Move to Trash does.
+pub fn trash(path: &std::path::Path) -> Result<(), String> {
+    let output = std::process::Command::new("gio")
+        .arg("trash")
+        .arg(path)
+        .output()
+        .map_err(|error| format!("Couldn’t run gio to move it to the trash: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+}
 
 /// Selects `file` in the desktop's file manager, or opens its folder where none answers
 /// `org.freedesktop.FileManager1`.

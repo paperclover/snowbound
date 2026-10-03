@@ -99,6 +99,14 @@ impl Reads {
         }
     }
 
+    /// Forgets what was read in the notebook at `notebook`, which is gone.
+    pub fn forget(&mut self, notebook: &str) {
+        self.viewing = (self.viewing.take()).filter(|(viewing, ..)| viewing != notebook);
+        if self.notebooks.remove(notebook).is_some() {
+            self.save();
+        }
+    }
+
     /// Whether Show Unread Changes is on for the notebook at `notebook`.
     pub fn shown(&self, notebook: &str) -> bool {
         self.notebooks.get(notebook).is_none_or(|kept| !kept.hidden)

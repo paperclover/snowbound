@@ -549,7 +549,7 @@ impl State {
                 let listed = (self.notebooks.iter()).position(|open| Arc::ptr_eq(open, library));
                 let last = self.notebooks.len().saturating_sub(1);
                 let unread = self.unread_notebook(library);
-                vec![
+                let mut actions = vec![
                     item(Action::Rename, "Rename", false, false),
                     item(
                         Action::SaveAs,
@@ -570,6 +570,16 @@ impl State {
                         crate::manage::in_icloud_folder(&library.location),
                         false,
                     ),
+                ];
+                // Its folder to the Trash, as the Finder deletes it; a server's stays there.
+                if cfg!(not(target_arch = "wasm32"))
+                    && library.folder().is_some()
+                    && !library.on_smb()
+                    && !matches!(library.notebook, Ok(None))
+                {
+                    actions.push(item(Action::Delete, "Delete Notebook", false, false));
+                }
+                actions.extend([
                     item(Action::CopyLink, "Copy Link to Notebook", false, true),
                     #[cfg(feature = "live")]
                     item(
@@ -627,7 +637,8 @@ impl State {
                         false,
                     ),
                     styles(library),
-                ]
+                ]);
+                actions
             }
             Target::Closed(_) | Target::Server(_) => {
                 vec![item(Action::Delete, "Remove from Recent", false, false)]
@@ -931,6 +942,11 @@ impl State {
                 None
             }
             (Target::Notebook(library), Action::Close) => Some(Command::CloseNotebook(library)),
+            #[cfg(not(target_arch = "wasm32"))]
+            (Target::Notebook(library), Action::Delete) => {
+                self.delete_notebook(library);
+                None
+            }
             #[cfg(feature = "live")]
             (Target::Notebook(library), Action::LiveShare) => {
                 self.open_live_share(library);

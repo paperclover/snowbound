@@ -1854,7 +1854,7 @@ pub(crate) fn lists(image: &[u8], file: [u8; 16]) -> Result<bool> {
 }
 
 /// Where the cache keeps what reading the catalog of the notebook at `location` took.
-fn listing(cache: &Path, location: &str) -> PathBuf {
+pub(crate) fn listing(cache: &Path, location: &str) -> PathBuf {
     let name: String = <sha2::Sha256 as sha2::Digest>::digest(location)[..16]
         .iter()
         .map(|byte| format!("{byte:02x}"))

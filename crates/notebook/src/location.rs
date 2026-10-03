@@ -62,6 +62,27 @@ pub fn moved(cache: &Path, from: &str, to: &str) -> io::Result<()> {
     Ok(())
 }
 
+/// Deletes what the cache keeps of the notebook at `location`, as when the app deletes the
+/// notebook: its replicas, edits waiting in them included, its sections' copies' and its
+/// listing. Every replica must be closed.
+pub fn forget(cache: &Path, location: &str) -> io::Result<()> {
+    let within = format!("{location}/");
+    if let Ok(entries) = fs::read_dir(cache.join("replicas")) {
+        for entry in entries {
+            let folder = entry?.path();
+            let ours = fs::read_to_string(folder.join(LOCATION))
+                .is_ok_and(|label| label == location || label.starts_with(&within));
+            if ours {
+                fs::remove_dir_all(&folder)?;
+            }
+        }
+    }
+    match fs::remove_file(crate::session::listing(cache, location)) {
+        Err(error) if error.kind() != io::ErrorKind::NotFound => Err(error),
+        _ => Ok(()),
+    }
+}
+
 /// The folder for `location`, made and labelled with it where it was not.
 fn claimed(cache: &Path, location: &str) -> io::Result<PathBuf> {
     let folder = folder(cache, location);

@@ -512,6 +512,9 @@ pub fn resize_direction(_: &Window, _: [f32; 2]) -> Option<winit::window::Resize
     None
 }
 
+/// Where deleted files go, as the file manager names it.
+pub const TRASH: &str = "Trash";
+
 pub const SHOW_FILE: &str = "Show in Finder";
 
 /// Opens a Finder window with `file` selected.
@@ -1617,6 +1620,24 @@ pub fn update_tag_menu(tags: &[canvas::editor::NoteTag]) {
 /// The table's statuses, in `commands::choices` order, which the menu bar's items show.
 pub fn update_menu(statuses: impl FnOnce() -> Vec<commands::Status>) {
     STATUSES.set(statuses());
+}
+
+/// Moves the file or folder at `path` to the Trash, as the Finder's Move to Trash does, where
+/// Put Back restores it; in iCloud Drive, to the Trash of every device signed in to it.
+/// Refused before 10.8, whose file manager can't.
+pub fn trash(path: &std::path::Path) -> Result<(), String> {
+    let manager = unsafe { objc2_foundation::NSFileManager::defaultManager() };
+    let can: bool = unsafe {
+        msg_send![&manager, respondsToSelector: sel!(trashItemAtURL:resultingItemURL:error:)]
+    };
+    if !can {
+        return Err("This version of macOS can’t move folders to the Trash.".into());
+    }
+    let url = unsafe {
+        objc2_foundation::NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()))
+    };
+    unsafe { manager.trashItemAtURL_resultingItemURL_error(&url, None) }
+        .map_err(|error| error.localizedDescription().to_string())
 }
 
 /// Opens `target`, a folder or a link's URL, as Finder would.

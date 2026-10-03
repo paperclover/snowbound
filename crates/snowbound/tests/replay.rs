@@ -876,3 +876,46 @@ fn dragging_a_notebook_row_reorders_the_notebooks() {
     assert_eq!(notebooks(&before), ["notebook", "Cloudy"], "{before}");
     assert_eq!(notebooks(&after), ["Cloudy", "notebook"], "{after}");
 }
+
+/// A notebook at the top of the iCloud folder, which Close can't take from the sidebar, offers
+/// Delete Notebook in its menu instead.
+#[test]
+fn an_icloud_notebook_offers_delete_in_place_of_close() {
+    let scratch = Scratch::new("icloud-delete");
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
+    let cloudy = scratch.0.join("icloud/Cloudy");
+    copy_notebook(&notebook, &cloudy);
+    let settings = serde_json::json!({
+        "user_name": "Snowbound Test",
+        "sidebar": true,
+        "notebooks": [cloudy],
+    });
+    std::fs::write(scratch.0.join("settings.json"), settings.to_string()).unwrap();
+    let steps = [
+        "wait 500",
+        "settle",
+        "move 60 76",
+        "press right",
+        "release right",
+    ];
+    let [menu] = replay(
+        &scratch,
+        Some(&notebook),
+        &[&steps[..], &["accessibility menu"]].concat(),
+    )
+    .try_into()
+    .unwrap();
+    let items = menu_items(&menu);
+    let close = items.iter().position(|item| *item == "Close This Notebook");
+    assert_eq!(
+        close.map(|at| items[at + 1]),
+        Some("Delete Notebook"),
+        "{menu}"
+    );
+    assert!(
+        menu.lines()
+            .any(|line| line.contains(r#""Close This Notebook""#) && line.contains("[disabled]")),
+        "{menu}"
+    );
+}

@@ -307,6 +307,7 @@ impl State {
                 in_icloud_folder(&library.location)
                     && !listed.contains(&library.location)
                     && !self.folder_renaming(&library.location)
+                    && !self.trashing.contains(&library.location)
                     // A listing taken before a rename names the folder by its old name.
                     && notebook::fs::metadata(&library.location).is_err()
             })
@@ -318,6 +319,7 @@ impl State {
         for location in listed {
             if self.notebooks.iter().any(|open| open.location == location)
                 || self.folder_renaming(&location)
+                || self.trashing.contains(&location)
                 || !self.icloud_reading.insert(location.clone())
             {
                 continue;
@@ -331,6 +333,8 @@ impl State {
                     if gone
                         || state.notebooks.iter().any(|open| open.location == location)
                         || state.folder_renaming(&location)
+                        || state.trashing.contains(&location)
+                        || notebook::fs::metadata(&location).is_err()
                     {
                         return Ok(());
                     }
@@ -533,6 +537,82 @@ impl State {
             }
         }
         self.save_settings();
+    }
+
+    /// Asks whether to move `library`'s folder to the Trash, telling of changes not yet in its
+    /// files, which go with it, then does.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn delete_notebook(&mut self, library: Arc<Library>) {
+        // What was typed last counts too.
+        self.persist().unwrap_or_else(|error| eprintln!("{error}"));
+        let open = (self.session.as_ref())
+            .filter(|session| Arc::ptr_eq(&session.library, &library))
+            .and_then(|session| session.section.pending().ok())
+            .map_or(0, |pending| pending.len() as u64);
+        let waiting = (library.background.iter())
+            .flat_map(|background| background.status())
+            .map(|(_, sync)| sync.queued)
+            .sum::<u64>()
+            .max(open);
+        let mut detail = if in_icloud_folder(&library.location) {
+            "It moves to the Trash on every device signed in to this iCloud account.".to_owned()
+        } else {
+            format!("It moves to the {}.", platform::TRASH)
+        };
+        if waiting > 0 {
+            let changes = match waiting {
+                1 => "1 change".to_owned(),
+                count => format!("{count} changes"),
+            };
+            detail += &format!(" {changes} not yet saved to its files will be lost.");
+        }
+        platform::confirm(
+            &format!("Delete “{}”?", library.name),
+            &detail,
+            "Cancel",
+            "Delete",
+            self.reply(move |state, ()| {
+                state.trash_notebook(library);
+                Ok(())
+            }),
+        );
+    }
+
+    /// Closes `library` and moves its folder to the Trash on a thread of its own, forgetting
+    /// what this computer and the next launch keep of it. Refused, it opens again.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn trash_notebook(&mut self, library: Arc<Library>) {
+        let location = library.location.clone();
+        if let Some(session) =
+            (self.session).take_if(|session| Arc::ptr_eq(&session.library, &library))
+        {
+            // Its replica goes with it, so nothing may hold it.
+            let _ = self.view.editor.take_ops();
+            if let Err(error) = session.section.close() {
+                eprintln!("{location}: {error}");
+            }
+            self.sectionless = Some(Arc::clone(&library));
+        }
+        self.trashing.insert(location.clone());
+        self.close_notebook(&library);
+        self.trail.forget(&location);
+        self.reads.forget(&location);
+        let ours = crate::library::key(&location, "");
+        self.folded.retain(|key| !key.starts_with(&ours));
+        self.last_pages.retain(|key, _| !key.starts_with(&ours));
+        self.save_settings();
+        let proxy = self.proxy.clone();
+        crate::spawn(move || {
+            let trashed = library.trash();
+            let _ = proxy.send_event(crate::UserEvent::Then(Box::new(move |state| {
+                state.trashing.remove(&location);
+                if let Err(problem) = trashed {
+                    platform::alert("Couldn’t delete the notebook", &problem);
+                    state.open_notebook(location, None);
+                }
+                Ok(())
+            })));
+        });
     }
 
     /// Renames `library`'s folder to `name` on a thread of its own, the notebook closed

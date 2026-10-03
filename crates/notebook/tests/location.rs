@@ -348,3 +348,21 @@ fn renaming_reordering_or_deleting_a_copy_leaves_the_originals_toc_entry() {
     assert_eq!(std::fs::read(root.join("G.one")).unwrap(), original);
     assert_eq!(std::fs::read(root.join("First.one")).unwrap(), original);
 }
+
+#[test]
+fn forgetting_a_deleted_notebook_drops_its_replicas_and_queue_alone() {
+    let directory = tempfile::tempdir().unwrap();
+    let cache = directory.path().join("cache");
+    let root = notebook(directory.path(), "Notebook");
+    let other = notebook(directory.path(), "Other");
+    queued(&root, &cache, "Queued ");
+    queued(&other, &cache, "Kept ");
+    let location = notebook::location::local(&root).unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+    notebook::location::forget(&cache, &location).unwrap();
+    assert!(std::fs::metadata(notebook::location::folder(&cache, &location)).is_err());
+    // A notebook made where it was takes nothing of the queue; another keeps its own.
+    notebook(directory.path(), "Notebook");
+    assert_eq!(published(&root, &cache), 0);
+    assert_eq!(published(&other, &cache), 1);
+}

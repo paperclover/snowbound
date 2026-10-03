@@ -573,6 +573,33 @@ impl Library {
         Ok(to)
     }
 
+    /// Moves the notebook's folder to the Trash once nothing of this notebook holds its files,
+    /// its background stopped and its kept sections closed as the open section must be too,
+    /// then forgets what this computer keeps of it: its replicas, edits waiting in them
+    /// included, and its display name. Returns why not, as its reader is told.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn trash(&self) -> Result<(), String> {
+        let folder = self
+            .folder()
+            .ok_or("This notebook’s folder can’t be moved to the Trash.")?;
+        if let Some(background) = &self.background {
+            background.stop();
+        }
+        self.close_kept();
+        // As its replicas' folders name it.
+        let replicas = notebook::location::local(folder).map_err(|error| error.to_string())?;
+        crate::platform::trash(folder)?;
+        let forgotten = notebook::location::forget(&self.cache, &replicas).and_then(|()| {
+            edit_display_names(&self.cache, |names| {
+                names.remove(&self.location);
+            })
+        });
+        if let Err(error) = forgotten {
+            eprintln!("{}: {error}", self.location);
+        }
+        Ok(())
+    }
+
     /// The art the notebook's tags draw with.
     pub fn tag_art(&self) -> Arc<TagArt> {
         Arc::clone(

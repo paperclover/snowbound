@@ -856,6 +856,8 @@ struct State {
     icloud_reading: HashSet<String>,
     /// The notebook locations a folder rename takes a notebook from and to, while it does.
     folder_rename: Option<(String, String)>,
+    /// The notebook locations whose folders are on their way to the Trash.
+    trashing: HashSet<String>,
     /// The user's tag list, which the toolbar, menus and Ctrl+1 to Ctrl+9 apply.
     tags: Vec<canvas::editor::NoteTag>,
     /// The Customize Tags dialog's list while it is open.
@@ -1322,6 +1324,7 @@ impl State {
             server: None,
             icloud_reading: HashSet::new(),
             folder_rename: None,
+            trashing: HashSet::new(),
             tags: stored
                 .tags
                 .unwrap_or_else(canvas::editor::NoteTag::defaults),

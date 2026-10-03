@@ -55,7 +55,8 @@ the files its folders list otherwise than when last opened (`discover::Cache`, k
 `session::Section::open(file, cache_dir, notify)` opens one section file through
 a replica named by the file's location and the section's document identity, so the same
 file reopens the same queue after a relaunch and a copy of it elsewhere has its own
-(`notebook::location`: `folder`, `local`, `smb`, and `moved` for a notebook the app moves).
+(`notebook::location`: `folder`, `local`, `smb`, `moved` for a notebook the app moves,
+and `forget` for one it deletes).
 `Notebook::section(path, notify)` opens a mounted notebook's section; a replica already
 named by the identity its discovery read resumes without reading the file, which the
 worker checks next, as on a share.

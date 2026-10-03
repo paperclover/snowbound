@@ -67,6 +67,15 @@ impl Trail {
         }
     }
 
+    /// Forgets every place in the notebook at `location`, which is gone.
+    pub fn forget(&mut self, location: &str) {
+        let elsewhere = |visit: &Visit| visit.notebook != location;
+        self.back.retain(elsewhere);
+        self.forward.retain(elsewhere);
+        self.here = self.here.take().filter(elsewhere);
+        self.recent.retain(|place| place.notebook != location);
+    }
+
     /// Notes `place` shown, as the recent pages list it.
     pub fn remember(&mut self, place: Place) {
         self.recent.retain(|recent| *recent != place);

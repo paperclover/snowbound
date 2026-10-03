@@ -1247,7 +1247,33 @@ fn registry_dword(key: &str, value: &str) -> Option<u32> {
 /// Windows names no document of a window's.
 pub fn represent(_: &Window, _: Option<&std::path::Path>) {}
 
+/// Where deleted files go, as the file manager names it.
+pub const TRASH: &str = "Recycle Bin";
+
 pub const SHOW_FILE: &str = "Show in Explorer";
+
+/// Moves the file or folder at `path` to the Recycle Bin, as Explorer's Delete does.
+pub fn trash(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{
+        FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, SHFILEOPSTRUCTW,
+        SHFileOperationW,
+    };
+    // A list of paths, each ended by a NUL and the list by another.
+    let from: Vec<u16> = path.as_os_str().encode_wide().chain([0, 0]).collect();
+    let mut operation = SHFILEOPSTRUCTW {
+        wFunc: FO_DELETE,
+        pFrom: from.as_ptr(),
+        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_SILENT) as u16,
+        ..Default::default()
+    };
+    match unsafe { SHFileOperationW(&mut operation) } {
+        0 if operation.fAnyOperationsAborted == 0 => Ok(()),
+        code => Err(format!(
+            "Windows couldn’t move it to the Recycle Bin (error {code:#x})."
+        )),
+    }
+}
 
 /// Opens an Explorer window with `file` selected.
 pub fn show_file(file: &std::path::Path) {
