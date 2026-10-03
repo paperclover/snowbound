@@ -167,7 +167,7 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   module, and `web/index.html` and `web/glue.js` are the page around it. `glue.js` brings the
   canvas's pointer, wheel and touch, and a hidden text area's keys, composition and paste, as
   the `ui::Event`s winit would; `web.rs` stands in for winit's window and event loop and runs
-  `State` a turn per animation frame. `tools/release_web.py` builds and publishes it.
+  `State` a turn per animation frame. `tools/release_web.py` builds it and deploys it to https://snowbound.paperclover.net.
 - The page has one thread. The notebook's section thread, sync worker and background run as
   tasks on its event loop (`notebook::task`), and work the desktop gives a thread runs once
   the frame is done (`spawn`).

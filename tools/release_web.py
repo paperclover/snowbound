@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Builds Snowbound for the web (crates/snowbound for wasm32, with crates/snowbound/web) as a
-static folder and publishes it to the share's web/ folder.
+static folder and deploys it to the VPS, which serves it at https://snowbound.paperclover.net.
 
     python3 tools/release_web.py --out /tmp/snowbound-web/dist   # build only
-    python3 tools/release_web.py --publish                       # build, then replace web/
+    python3 tools/release_web.py --deploy                        # build, then replace the site
+
+The module and its JavaScript go in a folder named by their contents, b/HASH/, which
+index.html names, so a page never pairs one build's module with another's JavaScript; the
+server (tools/web/serve.py, which pm2's `snowbound-web` runs as `serve.py 23593 site` in the
+VPS's snowbound-web/) has index.html checked on every load and keeps a build's folder for good.
 """
 import argparse
 import gzip
@@ -26,9 +31,13 @@ WEB = ROOT / 'crates/snowbound/web'
 FONTS = ROOT / 'crates/canvas/assets/fonts'
 # Where the loading shell's icons are looked up by name, in order.
 ICONS = [ROOT / 'crates/snowbound/assets/icons', ROOT / 'crates/canvas/assets/tags', ROOT / 'crates/ui/assets']
-PUBLISHED = Path('/Volumes/clover/Documents/Public/Snowbound/web')
-# copyparty lists the folder itself, so the app is at its index.html.
-URL = 'https://file.paperclover.net/shr/snowbound/web/index.html'
+# The VPS's folder: serve.py, and the site it serves on 127.0.0.1:23593 as pm2's
+# `snowbound-web`, behind https://snowbound.paperclover.net.
+HOST = 'clo@paperclover.net'
+DEPLOYED = 'snowbound-web'
+URL = 'https://snowbound.paperclover.net'
+# Builds the server keeps beside the newest, for pages still running one.
+KEPT = 3
 EMOJI_URL = 'https://github.com/googlefonts/noto-emoji/raw/v2.051/fonts/Noto-COLRv1.ttf'
 EMOJI_SHA256 = '0ae57fe58645638523ba35f388d93739d292539a9acb84df5700c81b1e1a28d2'
 # As `EMOJI` in src/web.rs names it.
@@ -91,25 +100,32 @@ def build(out):
         shutil.rmtree(out)
     out.mkdir(parents=True)
     module = TARGET / 'wasm32-unknown-unknown/release/snowbound.wasm'
+    code = out / 'b/next'
     run([tool('wasm-bindgen'), '--target', 'web', '--no-typescript', '--out-name', 'snowbound_web',
-         '--out-dir', out, module])
-    bound = out / 'snowbound_web_bg.wasm'
+         '--out-dir', code, module])
+    bound = code / 'snowbound_web_bg.wasm'
     run([tool('wasm-opt', 'binaryen'), '-Oz', '--strip-debug', '--strip-producers', bound, '-o', bound])
+    digest = hashlib.sha256()
+    for path in sorted(code.rglob('*')):
+        if path.is_file():
+            digest.update(str(path.relative_to(code)).encode() + b'\0' + path.read_bytes())
+    code = code.rename(out / 'b' / digest.hexdigest()[:16])
     dictionaries(out / 'dictionaries')
     (out / 'fonts').mkdir()
     for font in sorted(FONTS.glob('*')):
         if font.suffix in ('.ttf', '.txt'):
             shutil.copy(font, out / 'fonts')
     fallbacks(out / 'fonts')
-    page(out)
+    page(out, code.relative_to(out).as_posix())
     for path in sorted(out.rglob('*')):
         if path.is_file():
             print(f'{path.stat().st_size:>12,}  {path.relative_to(out)}')
 
 
-def page(out):
-    """Writes index.html with its loading shell's icons inlined, and the sizes of the files
-    it fetches before the app starts, for its progress bar."""
+def page(out, code):
+    """Writes index.html with its loading shell's icons inlined, the folder `code` it takes
+    the module and its JavaScript from, and the sizes of the files it fetches before the app
+    starts, for its progress bar."""
     count = itertools.count()
 
     def inline(match):
@@ -121,12 +137,15 @@ def page(out):
         svg = re.sub(r'url\(#([^)]+)\)', rf'url(#{prefix}\1)', svg)
         return f'<i{match[1]}>{svg.strip()}</i>'
     html = re.sub(r'<i([^>]*) icon="([^"]+)"></i>', inline, (WEB / 'index.html').read_text())
-    sizes = {str(path.relative_to(out)): path.stat().st_size
-             for path in [out / 'snowbound_web_bg.wasm', *sorted((out / 'fonts').glob('*.ttf'))]}
-    marker = 'const SIZES = {};'
-    if marker not in html:
-        sys.exit(f'index.html lacks `{marker}`')
-    (out / 'index.html').write_text(html.replace(marker, f'const SIZES = {json.dumps(sizes)};'))
+    sizes = {path.relative_to(out).as_posix(): path.stat().st_size
+             for path in [out / code / 'snowbound_web_bg.wasm', *sorted((out / 'fonts').glob('*.ttf'))]}
+    for marker, written in [('const SIZES = {};', f'const SIZES = {json.dumps(sizes)};'),
+                            ('"./snowbound_web.js"', f'"./{code}/snowbound_web.js"'),
+                            ('const MODULE = "snowbound_web_bg.wasm";', f'const MODULE = "{code}/snowbound_web_bg.wasm";')]:
+        if marker not in html:
+            sys.exit(f'index.html lacks `{marker}`')
+        html = html.replace(marker, written)
+    (out / 'index.html').write_text(html)
 
 
 def dictionaries(folder):
@@ -187,32 +206,31 @@ def fallbacks(fonts):
     (fonts / 'Noto-OFL.txt').write_text('Noto fonts: SIL Open Font License 1.1, https://openfontlicense.org\n')
 
 
-def publish(built):
-    """Replaces the share's web/ folder with `built`, leaving every other folder alone."""
-    if not PUBLISHED.parent.is_dir():
-        sys.exit(f'{PUBLISHED.parent} is not mounted')
-    staging = PUBLISHED.with_name('.web-staging')
-    if staging.exists():
-        shutil.rmtree(staging)
-    shutil.copytree(built, staging)
-    if PUBLISHED.exists():
-        shutil.rmtree(PUBLISHED)
-    staging.rename(PUBLISHED)
-    print(f'Published {URL}')
+def deploy(built):
+    """Makes the VPS's site `built`, each file taking its place once all have arrived, and
+    leaves the last builds' folders for pages still running them."""
+    sync = ['rsync', '--recursive', '--links', '--times', '--compress', '--itemize-changes']
+    server = subprocess.run([*sync, ROOT / 'tools/web/serve.py', f'{HOST}:{DEPLOYED}/'],
+                            check=True, capture_output=True, text=True).stdout
+    run([*sync, '--delete', '--delay-updates', '--filter=P b/*', f'{built}/', f'{HOST}:{DEPLOYED}/site/'])
+    run(['ssh', HOST, f'cd {DEPLOYED}/site/b && ls -t | tail -n +{KEPT + 2} | xargs -r rm -rf --'])
+    if server.strip():
+        run(['ssh', HOST, 'pm2 restart snowbound-web'])
+    print(f'Deployed {URL}')
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--out', type=Path, help='Build into this folder (default: a temporary one)')
-    parser.add_argument('--publish', action='store_true', help=f'Copy the build to {PUBLISHED}')
+    parser.add_argument('--deploy', action='store_true', help=f'Copy the build to {DEPLOYED}')
     args = parser.parse_args()
-    if not args.out and not args.publish:
-        parser.error('give --out, --publish or both')
+    if not args.out and not args.deploy:
+        parser.error('give --out, --deploy or both')
     with tempfile.TemporaryDirectory() as scratch:
         out = args.out or Path(scratch) / 'web'
         build(out)
-        if args.publish:
-            publish(out)
+        if args.deploy:
+            deploy(out)
 
 
 if __name__ == '__main__':
