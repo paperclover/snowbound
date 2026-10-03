@@ -187,14 +187,13 @@ fn toolbar(ui: &mut Ui, bold: bool) -> Vec<&'static str> {
             ..popup::Item::default()
         },
     ];
-    let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
-    popup::menu(ui, font_menu(), anchor, &items, Some("Font"));
+    popup::menu(ui, font_menu(), Anchor::Over(combo), &items, Some("Font"));
     let paste = [popup::Item {
         text: "Keep Text Only",
         shortcut: "⌘⇧V",
         ..popup::Item::default()
     }];
-    let anchor = Anchor::Below(ui.rect(ui.id("paste")).unwrap_or_default());
+    let anchor = Anchor::Below(ui.id("paste"));
     popup::menu(ui, more_menu(), anchor, &paste, None);
     clicked
 }
@@ -256,7 +255,7 @@ fn a_disabled_combo_shows_its_value_but_takes_no_clicks_or_focus() {
         });
     };
     build(&mut ui);
-    let [left, top, right, bottom] = ui.rect(ui.id("font")).unwrap();
+    let [left, top, right, bottom] = ui.laid_out(ui.id("font")).unwrap();
     let middle = [(left + right) / 2.0, (top + bottom) / 2.0];
     ui.event(Event::PointerMoved(middle));
     for pressed in [true, false] {
@@ -317,7 +316,7 @@ fn a_row_opening_a_menu_says_so_instead_of_naming_keys() {
     ui.open_popup(menu);
     for _ in 0..2 {
         frame(&mut ui, |ui| {
-            popup::menu(ui, menu, Anchor::Below([0.0; 4]), &items, None);
+            popup::menu(ui, menu, Anchor::Point([0.0; 2]), &items, None);
         });
     }
     let tree = tree(&mut ui);
@@ -348,7 +347,7 @@ fn swatches_are_named_by_their_colour_names_or_hex() {
     ui.open_popup(grid);
     for _ in 0..2 {
         frame(&mut ui, |ui| {
-            popup::colors(ui, grid, Anchor::Below([0.0; 4]), "No Color", &swatches, 2);
+            popup::colors(ui, grid, Anchor::Point([0.0; 2]), "No Color", &swatches, 2);
         });
     }
     let snapshot = snapshot(&tree(&mut ui));
@@ -782,7 +781,7 @@ fn a_segmented_control_is_a_radio_group_tab_enters_at_its_choice_and_arrows_pick
     }
     assert_eq!((ui.focused(), chosen), (segment(0), 0), "an arrow picks");
     // A click picks without moving the focus, which stays put on later frames.
-    let [left, top, right, bottom] = ui.rect(segment(1).unwrap()).unwrap();
+    let [left, top, right, bottom] = ui.laid_out(segment(1).unwrap()).unwrap();
     ui.event(Event::PointerMoved([
         (left + right) / 2.0,
         (top + bottom) / 2.0,

@@ -265,7 +265,7 @@ fn choose(ui: &mut ui::Ui, label: &str, names: &[&str], current: usize) -> Optio
             ..Item::default()
         })
         .collect();
-    let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
+    let anchor = Anchor::Below(combo);
     let chosen = ui::popup::menu(ui, menu, anchor, &items, None);
     ui.close();
     chosen

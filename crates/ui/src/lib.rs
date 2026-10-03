@@ -167,7 +167,7 @@ impl Flags {
     /// The host paints it and receives the events routed to it.
     pub const CUSTOM: Flags = Flags(32);
     /// Paints in place while the popup around it opens, as a field standing in for the one
-    /// it opened from.
+    /// it opened from, and as tall as that box.
     pub const STILL: Flags = Flags(64);
 
     pub(crate) fn contains(self, other: Flags) -> bool {
@@ -219,14 +219,17 @@ fn fitting(room: f32) -> f32 {
 }
 
 /// Where a popup opens, flipping to the far side of its anchor where the window ends first.
+/// The box it opens beside is placed where layout puts it in the same frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Anchor {
-    /// Under the rectangle, from its leading edge, as a drop-down opens.
-    Below([f32; 4]),
-    /// Past the rectangle's trailing edge, from its top, as a submenu opens.
-    Right([f32; 4]),
-    /// Over the rectangle from its corner, as a combo box opens into its own list.
-    Over([f32; 4]),
+    /// Under the box, from its leading edge, as a drop-down opens; at least as wide as it.
+    Below(Id),
+    /// Past the trailing edge of the box, or of the popup holding it, level with the box's
+    /// top, as a submenu opens.
+    Right(Id),
+    /// Over the box from its corner, the popup's contents covering it, as a combo box opens
+    /// into its own list; at least as wide as it.
+    Over(Id),
     /// At a point, as a context menu opens.
     Point([f32; 2]),
     /// Centred across the window near its top, over the interface, which dims, as a dialog
@@ -238,24 +241,23 @@ pub enum Anchor {
 }
 
 impl Anchor {
-    /// Where a popup `size` long on `axis` starts in a window `room` long: past the
-    /// anchor on the axis it opens along, level with it otherwise. Shown only `shown` long
-    /// as it opens, it keeps the edge it would have at full size.
-    fn place(self, axis: usize, size: f32, shown: f32, room: f32) -> f32 {
+    /// Where a popup `size` long on `axis` starts in a window `room` long: past `around`, the
+    /// rectangle it opens beside, on the axis it opens along, level with it otherwise. Shown
+    /// only `shown` long as it opens, it keeps the edge it would have at full size.
+    fn place(self, around: [f32; 4], axis: usize, size: f32, shown: f32, room: f32) -> f32 {
         let size = size.min(fitting(room));
         let shown = shown.min(size);
         let most = (room - POPUP_MARGIN - size).max(POPUP_MARGIN);
-        let (rect, along) = match self {
-            Anchor::Below(rect) => (rect, Some(1)),
-            Anchor::Right(rect) => (rect, Some(0)),
-            Anchor::Over(rect) => (rect, None),
-            Anchor::Point([x, y]) => ([x, y, x, y], Some(1)),
+        let along = match self {
+            Anchor::Below(_) | Anchor::Point(_) => Some(1),
+            Anchor::Right(_) => Some(0),
+            Anchor::Over(_) => None,
             Anchor::Dialog | Anchor::Top if axis == 0 => {
                 return ((room - size) / 2.0).max(POPUP_MARGIN);
             }
             Anchor::Dialog | Anchor::Top => return (room / 8.0).clamp(POPUP_MARGIN, most),
         };
-        let [low, high] = [rect[axis], rect[axis + 2]];
+        let [low, high] = [around[axis], around[axis + 2]];
         let (first, second) = if along == Some(axis) {
             (high, low - size)
         } else {
@@ -267,42 +269,6 @@ impl Anchor {
             second.min(most) + size - shown
         } else {
             first.clamp(POPUP_MARGIN, most) + size - shown
-        }
-    }
-
-    /// How a popup laid out at `rect` beside the anchor shows `open` of the way open: where it
-    /// `grows`, it swings out of the anchor's edge as it grows and fades in, and a dialog swings
-    /// up into place.
-    fn motion(self, rect: [f32; 4], open: f32, grows: bool) -> Motion {
-        let pivot = match self {
-            Anchor::Below(anchor) => [anchor[0], anchor[3]],
-            Anchor::Right(anchor) => [anchor[2], anchor[1]],
-            Anchor::Over(anchor) => [anchor[0], anchor[1]],
-            Anchor::Point(point) => point,
-            Anchor::Dialog | Anchor::Top => [(rect[0] + rect[2]) / 2.0, rect[1]],
-        };
-        let (from, tilt) = match self {
-            _ if !grows => (1.0, 0.0),
-            Anchor::Dialog | Anchor::Top => (0.95, 0.2),
-            // Over a box, the popup widens out of it in layout instead of growing.
-            Anchor::Over(_) => (1.0, 0.2),
-            _ => (0.94, 0.2),
-        };
-        let pivot = [
-            pivot[0].clamp(rect[0], rect[2]),
-            pivot[1].clamp(rect[1], rect[3]),
-        ];
-        // A popup flipped above its anchor swings out of its bottom edge, its top leaning away.
-        let tilt = if pivot[1] > (rect[1] + rect[3]) / 2.0 {
-            -tilt
-        } else {
-            tilt
-        };
-        Motion {
-            zoom: from + (1.0 - from) * open,
-            pivot,
-            tilt: tilt * (1.0 - open),
-            opacity: open,
         }
     }
 
@@ -534,6 +500,8 @@ struct Built {
     offset: [f32; 2],
     cursor: Option<CursorIcon>,
     anchor: Option<Anchor>,
+    /// The rectangle a popup opens beside, as layout resolves its anchor.
+    around: [f32; 4],
     /// How far open a popup over a box is, as it widens out of the box.
     open: f32,
     motion: Option<Motion>,
@@ -604,12 +572,61 @@ struct Tip {
     due: Option<Instant>,
 }
 
+/// A popup painted: its anchor, the rectangle it opens beside, and its own.
+#[derive(Clone, Copy)]
+struct Placed {
+    id: Id,
+    anchor: Anchor,
+    around: [f32; 4],
+    rect: [f32; 4],
+}
+
+impl Placed {
+    /// How the popup shows `open` of the way open: where it `grows`, it swings out of its
+    /// anchor's edge as it grows and fades in, and a dialog swings up into place.
+    fn motion(self, open: f32, grows: bool) -> Motion {
+        let Placed {
+            anchor,
+            around,
+            rect,
+            ..
+        } = self;
+        let pivot = match anchor {
+            Anchor::Below(_) | Anchor::Point(_) => [around[0], around[3]],
+            Anchor::Right(_) => [around[2], around[1]],
+            Anchor::Over(_) => [around[0], around[1]],
+            Anchor::Dialog | Anchor::Top => [(rect[0] + rect[2]) / 2.0, rect[1]],
+        };
+        let (from, tilt) = match anchor {
+            _ if !grows => (1.0, 0.0),
+            Anchor::Dialog | Anchor::Top => (0.95, 0.2),
+            // Over a box, the popup widens out of it in layout instead of growing.
+            Anchor::Over(_) => (1.0, 0.2),
+            _ => (0.94, 0.2),
+        };
+        let pivot = [
+            pivot[0].clamp(rect[0], rect[2]),
+            pivot[1].clamp(rect[1], rect[3]),
+        ];
+        // A popup flipped above its anchor swings out of its bottom edge, its top leaning away.
+        let tilt = if pivot[1] > (rect[1] + rect[3]) / 2.0 {
+            -tilt
+        } else {
+            tilt
+        };
+        Motion {
+            zoom: from + (1.0 - from) * open,
+            pivot,
+            tilt: tilt * (1.0 - open),
+            opacity: open,
+        }
+    }
+}
+
 /// A popup's painting as it last showed, fading out since it closed.
 struct Closing {
-    id: Id,
+    placed: Placed,
     display: Vec<Display>,
-    anchor: Anchor,
-    rect: [f32; 4],
     closed: Instant,
 }
 
@@ -716,9 +733,8 @@ pub struct Ui {
     still: Vec<Display>,
     /// Where the popups' painting starts in `display`, for edges drawn beneath them.
     popups_painted: usize,
-    /// Each popup painted, its anchor and rectangle, and its painting's place after
-    /// `popups_painted`.
-    painted: Vec<(Id, Anchor, [f32; 4], std::ops::Range<usize>)>,
+    /// Each popup painted, and its painting's place after `popups_painted`.
+    painted: Vec<(Placed, std::ops::Range<usize>)>,
     closing: Vec<Closing>,
     tip: Option<Tip>,
     /// When a tooltip last showed.
@@ -739,6 +755,8 @@ pub struct Ui {
     resume: Option<Id>,
     /// The nodes last sent to assistive technology.
     sent: HashMap<Id, accesskit::Node>,
+    /// Scrolling boxes to scroll to a box within each, once laid out.
+    scrolls: Vec<(Id, Id)>,
 }
 
 impl Ui {
@@ -786,6 +804,7 @@ impl Ui {
             focus_ring: false,
             resume: None,
             sent: HashMap::new(),
+            scrolls: Vec::new(),
         }
     }
 
@@ -867,21 +886,27 @@ impl Ui {
         Some(layout::narrowest(&self.nodes, index))
     }
 
-    /// The box's rectangle from the latest layout; none for one not laid out yet.
-    pub fn rect(&self, id: Id) -> Option<[f32; 4]> {
+    /// Where box `id` lies in the latest layout: this frame's once `end` has run, otherwise
+    /// the previous frame's, which input is routed against; none for one not laid out yet.
+    /// For hosts painting, hit-testing or mapping input after layout: a box placed beside
+    /// another takes an `Anchor`, which layout resolves in the same frame.
+    pub fn laid_out(&self, id: Id) -> Option<[f32; 4]> {
         self.states.get(&id).and_then(|state| state.rect)
     }
 
-    /// Scrolls `scroller`, a scrolling box, until `target` within it starts at its top, both
-    /// as last laid out, easing there.
+    /// The window's size in logical pixels this frame.
+    pub fn size(&self) -> [f32; 2] {
+        let root = self.nodes.first().map(|root| root.size);
+        root.unwrap_or_default().map(|extent| match extent.size {
+            Size::Pixels(pixels) => pixels,
+            _ => 0.0,
+        })
+    }
+
+    /// Scrolls `scroller`, a scrolling box, until `target` within it starts at its top, as
+    /// this frame lays them out, easing there.
     pub fn scroll_to(&mut self, scroller: Id, target: Id) {
-        let (Some(top), Some(start)) = (self.rect(target), self.rect(scroller)) else {
-            return;
-        };
-        let state = self.states.entry(scroller).or_default();
-        let most = (state.content - (start[3] - start[1])).max(0.0);
-        state.scroll_target = (state.scroll + top[1] - start[1]).clamp(0.0, most);
-        self.animating |= state.scroll != state.scroll_target;
+        self.scrolls.push((scroller, target));
     }
 
     /// The pointer's cursor, or None over a custom box, whose host chooses.
@@ -981,7 +1006,7 @@ impl Ui {
                 self.focus_ring = false;
                 if !self.popups.is_empty() {
                     let under = self.popups.iter().rposition(|popup| {
-                        self.rect(popup.id)
+                        self.laid_out(popup.id)
                             .is_some_and(|rect| contains(rect, point))
                     });
                     // A press outside every popup only dismisses them.
@@ -1385,6 +1410,15 @@ impl Ui {
                 state.scroll = state.scroll.clamp(0.0, most);
             }
         }
+        for (scroller, target) in std::mem::take(&mut self.scrolls) {
+            let (Some(top), Some(start)) = (self.laid_out(target), self.laid_out(scroller)) else {
+                continue;
+            };
+            let state = self.states.entry(scroller).or_default();
+            let most = (state.content - (start[3] - start[1])).max(0.0);
+            state.scroll_target = (state.scroll + top[1] - start[1]).clamp(0.0, most);
+            self.animating |= state.scroll != state.scroll_target;
+        }
         self.states
             .retain(|id, state| state.touched == self.frame || *id == Id::ROOT);
         self.texts.prune(self.frame);
@@ -1415,14 +1449,19 @@ impl Ui {
             let Some(anchor) = node.anchor else {
                 continue;
             };
-            let (id, rect) = (node.id, node.rect);
-            if Some(id) == tip {
+            let placed = Placed {
+                id: node.id,
+                anchor,
+                around: node.around,
+                rect: node.rect,
+            };
+            if Some(placed.id) == tip {
                 continue;
             }
-            if let Some(open) = self.opening(id, anchor) {
+            if let Some(open) = self.opening(placed.id, anchor) {
                 self.scrim(anchor, open);
                 let grows = self.popup_motion(anchor) == PopupMotion::Grow;
-                self.nodes[index].motion = Some(anchor.motion(rect, open, grows));
+                self.nodes[index].motion = Some(placed.motion(open, grows));
             }
             let from = self.display.len() - self.popups_painted;
             self.paint(index, None, None);
@@ -1435,15 +1474,10 @@ impl Ui {
                     Display::Round(None),
                 ]);
             }
-            painted.push((
-                id,
-                anchor,
-                rect,
-                from..self.display.len() - self.popups_painted,
-            ));
+            painted.push((placed, from..self.display.len() - self.popups_painted));
         }
-        for (id, anchor, rect, range) in std::mem::replace(&mut self.painted, painted) {
-            if self.painted.iter().any(|(shown, ..)| *shown == id) {
+        for (placed, range) in std::mem::replace(&mut self.painted, painted) {
+            if self.painted.iter().any(|(shown, _)| shown.id == placed.id) {
                 continue;
             }
             // What held still while it opened goes at once, uncovering what it stood in for.
@@ -1460,18 +1494,17 @@ impl Ui {
                 .cloned()
                 .collect();
             self.closing.push(Closing {
-                id,
+                placed,
                 display,
-                anchor,
-                rect,
                 closed: self.now,
             });
         }
         for closing in std::mem::take(&mut self.closing) {
-            let motion = self.popup_motion(closing.anchor);
+            let Placed { id, anchor, .. } = closing.placed;
+            let motion = self.popup_motion(anchor);
             let open = match motion {
                 PopupMotion::Grow => {
-                    (1.0 - self.progress(closing.closed, closing.anchor.durations()[1])).powi(3)
+                    (1.0 - self.progress(closing.closed, anchor.durations()[1])).powi(3)
                 }
                 PopupMotion::Cut => 0.0,
                 PopupMotion::Fade([_, close]) => {
@@ -1481,13 +1514,13 @@ impl Ui {
             if open == 0.0 {
                 continue;
             }
-            self.scrim(closing.anchor, open);
+            self.scrim(anchor, open);
             let grows = motion == PopupMotion::Grow;
-            let motion = closing.anchor.motion(closing.rect, open, grows);
+            let motion = closing.placed.motion(open, grows);
             self.display.push(Display::Motion(Some(motion)));
             self.display.extend(closing.display.iter().cloned());
             self.display.push(Display::Motion(None));
-            if !self.painted.iter().any(|(shown, ..)| *shown == closing.id) {
+            if !self.painted.iter().any(|(shown, _)| shown.id == id) {
                 self.closing.push(closing);
             }
         }
@@ -2050,6 +2083,7 @@ impl Built {
             offset: spec.offset,
             cursor: spec.cursor,
             anchor: spec.anchor,
+            around: [0.0; 4],
             open: 1.0,
             motion: None,
             marks: Vec::new(),

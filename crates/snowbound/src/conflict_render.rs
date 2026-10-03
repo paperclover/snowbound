@@ -86,7 +86,7 @@ fn paint(
     queue: &wgpu::Queue,
 ) -> Vec<u8> {
     let size = SIZE.map(|side| (side * SCALE) as u32);
-    let corner = ui.rect(super::page()).unwrap();
+    let corner = ui.laid_out(super::page()).unwrap();
     let box_size = [
         ((corner[2] - corner[0]) * SCALE) as u32,
         ((corner[3] - corner[1]) * SCALE) as u32,
@@ -281,7 +281,7 @@ fn conflict_views_offer_the_versions_and_render_offscreen() {
             other => panic!("{other:?}", other = other.0),
         }
         let row = Id::ROOT.child("frame").child("panel").child(version);
-        let listed = ui.rect(row).is_some();
+        let listed = ui.laid_out(row).is_some();
         assert_eq!(listed, shown.is_some(), "{name}");
         if let (Some(output), Some((renderer, device, queue))) = (&output, &mut gpu) {
             let shown = session.reader(space)().unwrap();
@@ -398,7 +398,7 @@ fn page_versions_list_open_read_only_and_render_offscreen() {
         }
         for context in &versions {
             let row = Id::ROOT.child("frame").child("panel").child(context);
-            assert_eq!(ui.rect(row).is_some(), shown.is_some(), "{name}");
+            assert_eq!(ui.laid_out(row).is_some(), shown.is_some(), "{name}");
         }
         if let (Some(output), Some((renderer, device, queue))) = (&output, &mut gpu) {
             let shown = match version {

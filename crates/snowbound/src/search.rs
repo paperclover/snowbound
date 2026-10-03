@@ -780,8 +780,7 @@ impl State {
         self.ui.close();
         // Results opened this frame build from the next, as the box's field was built.
         if searching || !self.ui.popup_open(results()) {
-            let rect = self.ui.rect(box_id).unwrap_or_default();
-            self.results_popup(theme, rect)?;
+            self.results_popup(theme, box_id)?;
         }
         self.scope_popup();
         Ok(())
@@ -791,8 +790,7 @@ impl State {
         let button = self.ui.id("scope");
         if ui::shell::tool_button(&mut self.ui, "scope", art::SEARCH, theme.text_dim, None).pressed
         {
-            let rect = self.ui.rect(button).unwrap_or_default();
-            self.search.anchor = Some(Anchor::Below(rect));
+            self.search.anchor = Some(Anchor::Below(button));
             self.ui.open_popup(scope_menu());
         }
         let open = self.ui.popup_open(scope_menu());
@@ -856,7 +854,7 @@ impl State {
     }
 
     /// The dropdown of results, over the box it drops from.
-    fn results_popup(&mut self, theme: &Theme, rect: [f32; 4]) -> Result<(), Box<dyn Error>> {
+    fn results_popup(&mut self, theme: &Theme, over: Id) -> Result<(), Box<dyn Error>> {
         if !self.ui.popup_open(results()) {
             // Closed by Esc or a press elsewhere: the search ends.
             if std::mem::take(&mut self.search.open) {
@@ -879,21 +877,18 @@ impl State {
         if self.ui.focused() == Some(results()) {
             self.ui.set_focus(Some(field()));
         }
-        let [left, top, right, bottom] = rect;
-        let anchor = Anchor::Over([left - 4.0, top - 4.0, right + 4.0, bottom + 4.0]);
-        let width = RESULTS.max(right - left);
         self.ui.open_as(
             results(),
             Spec {
                 axis: Axis::Y,
-                size: [px(width), children()],
+                size: [px(RESULTS), children()],
                 fill: Some(theme.popup),
                 border: Some(theme.chip),
                 shadow: Some(theme.shadow),
                 radius: 6.0,
                 pad: [4.0, 4.0],
                 gap: 4.0,
-                anchor: Some(anchor),
+                anchor: Some(Anchor::Over(over)),
                 role: Some(Role::Dialog),
                 ..Spec::default()
             },
@@ -985,8 +980,7 @@ impl State {
             )
             .clicked
         {
-            let rect = self.ui.rect(change).unwrap_or_default();
-            self.search.anchor = Some(Anchor::Below(rect));
+            self.search.anchor = Some(Anchor::Below(change));
             self.ui.open_popup(scope_menu());
         }
         self.ui.leaf(
@@ -1016,8 +1010,9 @@ impl State {
                 count: found.len(),
             };
             let content = found.len() as f32 * RESULT + ui::Rows::space_before(&rows, found.len());
-            let window = self.ui.rect(Id::ROOT).map_or(600.0, |window| window[3]);
-            let view = content.min((window - bottom - 80.0).max(RESULT));
+            // Down to the window's foot from the box, as last laid out.
+            let bottom = self.ui.laid_out(over).map_or(0.0, |rect| rect[3]);
+            let view = content.min((self.ui.size()[1] - bottom - 80.0).max(RESULT));
             let before = self.search.selected;
             let places: Vec<String> = found
                 .iter()

@@ -5,7 +5,7 @@
 use crate::{Command, Library, State, art, manage::Structure};
 use accesskit::Role;
 use std::{error::Error, sync::Arc, time::Duration};
-use ui::{Anchor, Axis, Flags, Id, Spec, Ui, children, fill, px};
+use ui::{Anchor, Axis, Extent, Flags, Id, Spec, Ui, children, fill, px};
 use winit::keyboard::NamedKey;
 use zeroize::Zeroizing;
 
@@ -133,6 +133,7 @@ impl State {
             shown,
             None,
             None,
+            None,
             section,
             crate::TAB_ROW,
             strip,
@@ -165,24 +166,48 @@ impl State {
         let ui = &mut self.ui;
         let entered =
             ui::popup::navigation(ui, &[notice()], &[NamedKey::Enter]).contains(&NamedKey::Enter);
-        let area = ui.open(
+        ui.open(
             "locked",
             Spec {
+                axis: Axis::Y,
                 size: [fill(), fill()],
                 fill: Some(ui::mix(theme.paper, theme.chip, 0.6)),
                 ..Spec::default()
             },
         );
-        let [left, top, right, bottom] = ui.rect(area).unwrap_or_default();
-        let width = 380.0_f32.min(right - left);
+        // A fifth of the way down, centred across, narrowing with a narrow page.
+        let room = |ui: &mut Ui, part: &str, size| {
+            ui.leaf(
+                part,
+                Spec {
+                    size,
+                    ..Spec::default()
+                },
+            );
+        };
+        let fifth = Extent {
+            size: ui::Size::Fraction(0.2),
+            strictness: 1.0,
+        };
+        room(ui, "above", [fill(), fifth]);
+        ui.open(
+            "across",
+            Spec {
+                size: [fill(), children()],
+                ..Spec::default()
+            },
+        );
+        room(ui, "before", [fill(), px(0.0)]);
         let open = ui.open_as(
             notice(),
             Spec {
-                flags: Flags::FLOAT | Flags::CLICKABLE | Flags::FOCUSABLE,
-                size: [px(width), children()],
-                position: [
-                    ((right - left - width) / 2.0).max(0.0),
-                    ((bottom - top) * 0.2).max(0.0),
+                flags: Flags::CLICKABLE | Flags::FOCUSABLE,
+                size: [
+                    Extent {
+                        size: ui::Size::Pixels(380.0),
+                        strictness: 0.0,
+                    },
+                    children(),
                 ],
                 gap: 12.0,
                 role: Some(Role::Button),
@@ -229,6 +254,8 @@ impl State {
             false,
         );
         ui.close();
+        ui.close();
+        room(ui, "after", [fill(), px(0.0)]);
         ui.close();
         ui.close();
         ui.theme = chrome;

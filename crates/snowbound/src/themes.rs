@@ -446,7 +446,7 @@ impl State {
                     ..Item::default()
                 })
                 .collect();
-            let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
+            let anchor = Anchor::Over(combo);
             if let Some(index) = ui::popup::menu(ui, popup("styles"), anchor, &items, None) {
                 dialog.style = index;
             }
@@ -475,7 +475,7 @@ impl State {
                     ..Item::default()
                 })
                 .collect();
-            let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
+            let anchor = Anchor::Over(combo);
             if let Some(index) = ui::popup::menu(ui, popup("fonts"), anchor, &items, Some("Font")) {
                 let font = names[index].to_owned();
                 change = Some(Change::Font(font));
@@ -495,7 +495,7 @@ impl State {
                     ..Item::default()
                 })
                 .collect();
-            let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
+            let anchor = Anchor::Over(combo);
             if let Some(index) = ui::popup::menu(ui, popup("sizes"), anchor, &items, None) {
                 let size = crate::SIZES[index];
                 change = Some(Change::Size(size));
@@ -521,7 +521,7 @@ impl State {
                 .iter()
                 .map(|&(color, name)| (canvas::gpu::colorref(color), name))
                 .collect();
-            let anchor = Anchor::Below(ui.rect(button).unwrap_or_default());
+            let anchor = Anchor::Below(button);
             let buttons = ["Automatic", "Theme"];
             if let Some(picked) =
                 ui::popup::color_grid(ui, popup("colors"), anchor, &buttons, &swatches, 10)
@@ -556,7 +556,7 @@ impl State {
                         ..Item::default()
                     })
                     .collect();
-                let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
+                let anchor = Anchor::Over(combo);
                 if let Some(index) = ui::popup::menu(ui, popup(part), anchor, &items, None) {
                     let points = SPACING[index];
                     change = Some(Change::Spacing(part == "before", points));
@@ -634,7 +634,7 @@ impl State {
                     ..Item::default()
                 })
                 .collect();
-            let anchor = Anchor::Below(ui.rect(ui.id(part)).unwrap_or_default());
+            let anchor = Anchor::Below(ui.id(part));
             ui::popup::menu(ui, menu, anchor, &items, None)
         };
         let remove = match targets[..] {

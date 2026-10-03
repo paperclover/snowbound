@@ -54,6 +54,23 @@ pub fn field() -> Id {
     Id::ROOT.child("rename")
 }
 
+/// The rename field over the label of a section tab `tall`, editing `name`, as `edit`.
+pub fn tab_field(ui: &mut Ui, theme: &Theme, name: &mut String, tall: f32) -> Option<bool> {
+    let width = ui.measure(name)[0] + 4.0 + 2.0 * PAD;
+    ui.open(
+        "rename",
+        Spec {
+            flags: ui::Flags::FLOAT,
+            size: [px(width.max(48.0)), px(tall - 6.0)],
+            position: [ui::shell::TAB_PAD - PAD, 3.0],
+            ..Spec::default()
+        },
+    );
+    let kept = edit(ui, theme, name, tall - 6.0);
+    ui.close();
+    kept
+}
+
 /// The rename field, `height` tall, editing `name`: whether Enter kept or Escape dropped
 /// the name typed.
 pub fn edit(ui: &mut Ui, theme: &Theme, name: &mut String, height: f32) -> Option<bool> {
@@ -143,49 +160,6 @@ impl State {
                     );
                 }
             }
-        }
-    }
-
-    /// The rename field over the section tab being renamed, of those built as `row` in the
-    /// tab row `bar`, where the tab's label stands.
-    pub(crate) fn tab_rename_field(&mut self, theme: &Theme, row: Id, bar: Id) {
-        let (Some(session), Some(renaming)) = (&self.session, &mut self.renaming) else {
-            return;
-        };
-        let Some(tab) = session
-            .tabs
-            .iter()
-            .position(|tab| renaming.entry(&session.library, &tab.path, true))
-        else {
-            return;
-        };
-        let (Some(rect), Some(bar)) =
-            (self.ui.rect(ui::shell::tab_id(row, tab)), self.ui.rect(bar))
-        else {
-            return;
-        };
-        let width = self.ui.measure(&renaming.name)[0] + 4.0 + 2.0 * PAD;
-        self.ui.open(
-            "rename",
-            Spec {
-                flags: ui::Flags::FLOAT,
-                size: [px(width.max(48.0)), px(rect[3] - rect[1] - 6.0)],
-                position: [
-                    rect[0] + ui::shell::TAB_PAD - PAD - bar[0],
-                    rect[1] + 3.0 - bar[1],
-                ],
-                ..Spec::default()
-            },
-        );
-        let kept = edit(
-            &mut self.ui,
-            theme,
-            &mut renaming.name,
-            rect[3] - rect[1] - 6.0,
-        );
-        self.ui.close();
-        if let Some(keep) = kept {
-            self.finish_renaming(keep);
         }
     }
 

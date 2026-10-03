@@ -298,7 +298,7 @@ fn sidebar(
         }
         if row.dragging
             && !renamed
-            && let Some(rect) = ui.rect(id)
+            && let Some(rect) = ui.laid_out(id)
         {
             tree.held_notebook = Some(Entry {
                 notebook: index,
@@ -316,7 +316,7 @@ fn sidebar(
             ui.close();
         }
         ui.close();
-        tree.blocks.extend(ui.rect(block));
+        tree.blocks.extend(ui.laid_out(block));
     }
     if let Some((_, slot)) = tree.lifted_notebook {
         opening(ui, tree, ("notebook gap", ""), slot == place);
@@ -632,7 +632,7 @@ fn opening(ui: &mut Ui, tree: &mut Tree, part: impl std::hash::Hash + Copy, here
     let id = ui.id(part);
     let height = ui.animate(id, if here { ROW } else { 0.0 });
     if here {
-        tree.gap = ui.rect(id);
+        tree.gap = ui.laid_out(id);
     }
     if height > 0.0 {
         ui.leaf(
@@ -657,7 +657,7 @@ fn unfolding(ui: &mut Ui, part: impl std::hash::Hash, unfolded: bool) -> bool {
         ui::children()
     } else {
         let rows = ui
-            .rect(outer.child("rows"))
+            .laid_out(outer.child("rows"))
             .map_or(0.0, |rect| rect[3] - rect[1]);
         let height = ui.animate(outer, if unfolded { rows } else { 0.0 });
         if !unfolded && height == 0.0 {
@@ -687,7 +687,7 @@ fn unfolding(ui: &mut Ui, part: impl std::hash::Hash, unfolded: bool) -> bool {
 
 /// Records a section or group row, built as `id`, for dragging.
 fn entry(ui: &Ui, tree: &mut Tree, notebook: usize, path: &str, id: Id, group: bool, row: &Signal) {
-    let Some(rect) = ui.rect(id) else {
+    let Some(rect) = ui.laid_out(id) else {
         return;
     };
     let entry = Entry {
@@ -929,7 +929,7 @@ impl crate::State {
             gap,
             ..
         } = tree;
-        let corner = self.ui.rect(rows_id).unwrap_or_default();
+        let corner = self.ui.laid_out(rows_id).unwrap_or_default();
         let found = ghost.is_some();
         let (ghost_held, settled) = self.lifted_row(theme, ghost, gap, &rows, corner);
         let settled = settled || !found;
@@ -987,17 +987,9 @@ impl crate::State {
         if self.temporary {
             return;
         }
-        let (nav, toggle) = if self.navigation_bar_right {
-            // The notebook button stands at the body's far edge, as laid out last frame.
-            let edge = self
-                .ui
-                .rect(self.ui.current())
-                .map_or(0.0, |[left, _, right, _]| right - left - RAIL);
-            (0.0, edge)
-        } else {
-            let toggle = (MARGIN + ROW_PAD - (RAIL - ICON) / 2.0) * width / WIDTH;
-            (toggle + RAIL, toggle)
-        };
+        let far = self.navigation_bar_right;
+        let toggle = (MARGIN + ROW_PAD - (RAIL - ICON) / 2.0) * width / WIDTH;
+        let nav = if far { 0.0 } else { toggle + RAIL };
         let pad = [
             (RAIL - ui::shell::TOOL) / 2.0,
             (RAIL - ui::shell::TOOL) / 2.0 + DROP,
@@ -1021,10 +1013,32 @@ impl crate::State {
             }
         }
         self.ui.close();
+        // The notebook button stands at the body's far edge, after the room before it.
+        if far {
+            self.ui.open(
+                "far edge",
+                Spec {
+                    flags: Flags::FLOAT,
+                    size: [fill(), px(height)],
+                    ..Spec::default()
+                },
+            );
+            self.ui.leaf(
+                "room",
+                Spec {
+                    size: [fill(), px(height)],
+                    ..Spec::default()
+                },
+            );
+        }
         self.ui.open(
             "toggle",
             Spec {
-                flags: Flags::FLOAT | Flags::CLIP,
+                flags: if far {
+                    Flags::CLIP
+                } else {
+                    Flags::FLOAT | Flags::CLIP
+                },
                 size: [px(RAIL), px(height)],
                 position: [toggle, 0.0],
                 pad,
@@ -1043,6 +1057,9 @@ impl crate::State {
         }
         crate::tip(&mut self.ui, Cmd::Sidebar);
         self.ui.close();
+        if far {
+            self.ui.close();
+        }
     }
 
     /// The dragged row, `ghost`, drawn over the others in the rows' box `corner`: following
@@ -1499,25 +1516,43 @@ impl crate::State {
         const BUTTON: [f32; 2] = [240.0, 32.0];
         let theme = self.page_area_theme();
         let chrome = std::mem::replace(&mut self.ui.theme, theme.clone());
-        let [left, top, right, bottom] = self.ui.rect(id).unwrap_or_default();
         self.ui.open_as(
             id,
             Spec {
+                axis: Axis::Y,
                 size: [fill(), fill()],
                 fill: Some(theme.paper),
                 ..Spec::default()
             },
         );
+        // Centred across, with two fifths of the room to spare above it and the rest below.
+        let room = |ui: &mut Ui, part: &str, size| {
+            ui.leaf(
+                part,
+                Spec {
+                    size,
+                    ..Spec::default()
+                },
+            );
+        };
+        let share = |fraction| ui::Extent {
+            size: ui::Size::Fraction(fraction),
+            strictness: 0.0,
+        };
+        room(&mut self.ui, "above", [fill(), share(0.4)]);
+        self.ui.open(
+            "across",
+            Spec {
+                size: [fill(), ui::children()],
+                ..Spec::default()
+            },
+        );
+        room(&mut self.ui, "before", [fill(), px(0.0)]);
         self.ui.open(
             "content",
             Spec {
-                flags: Flags::FLOAT,
                 axis: Axis::Y,
                 size: [px(BUTTON[0]), ui::children()],
-                position: [
-                    ((right - left - BUTTON[0]) / 2.0).max(0.0),
-                    ((bottom - top) * 0.4 - 60.0).max(0.0),
-                ],
                 gap: 10.0,
                 ..Spec::default()
             },
@@ -1558,6 +1593,9 @@ impl crate::State {
         self.commands.extend(chosen);
         let saved = crate::server::saved_servers(&mut self.ui, servers);
         self.ui.close();
+        room(&mut self.ui, "after", [fill(), px(0.0)]);
+        self.ui.close();
+        room(&mut self.ui, "below", [fill(), share(0.6)]);
         self.ui.close();
         self.ui.theme = chrome;
         if let Some(saved) = saved {

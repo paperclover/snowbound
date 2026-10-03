@@ -99,7 +99,7 @@ fn choose(ui: &mut Ui, name: &str, names: &[&str], current: usize) -> Option<usi
             ..Item::default()
         })
         .collect();
-    let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
+    let anchor = Anchor::Below(combo);
     ui::popup::menu(ui, menu, anchor, &items, None)
 }
 

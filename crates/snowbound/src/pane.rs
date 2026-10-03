@@ -360,7 +360,7 @@ fn choice(
             ..Default::default()
         })
         .collect();
-    let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
+    let anchor = Anchor::Below(combo);
     ui::popup::menu(ui, popup(name), anchor, &items, None)
 }
 

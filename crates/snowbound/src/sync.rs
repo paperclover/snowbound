@@ -290,7 +290,7 @@ fn changes_list(ui: &mut Ui, changes: &update::Changes, listed: bool) {
     // Unfolds to the titles' height, scrolling past a few dozen lines.
     let list = ui.id("changes");
     let rows = ui
-        .rect(list.child("rows"))
+        .laid_out(list.child("rows"))
         .map_or(0.0, |rect| rect[3] - rect[1]);
     let height = ui.animate(list, if listed { rows.min(line * 9.0) } else { 0.0 });
     if listed || height > 0.0 {
@@ -533,7 +533,7 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
     let state = sync.state();
     let syncing = !facts.offline && state == SyncState::Syncing;
     let bar = id().child("status").child("bar");
-    let shown = ui.rect(bar).is_some() && state == SyncState::UpToDate;
+    let shown = ui.laid_out(bar).is_some() && state == SyncState::UpToDate;
     let showing = !facts.offline && shows_sync(ui, button(), syncing, shown);
     let (mut headline, mut icon) = describe(&sync, facts.offline, !showing);
     let host = facts.place.first().map_or("the notebook", String::as_str);
@@ -731,7 +731,7 @@ fn build(ui: &mut Ui, facts: &Facts) -> Picked {
                 ..Spec::default()
             },
         );
-        let width = ui.rect(bar).map_or(0.0, |rect| rect[2] - rect[0]);
+        let width = ui.laid_out(bar).map_or(0.0, |rect| rect[2] - rect[0]);
         let filled = width * fraction;
         ui.mark([0.0, 0.0, filled, 6.0], theme.accent, 3.0);
         // A sheen sweeps the filled part while the sync runs, so a long section still moves.
@@ -1075,10 +1075,7 @@ impl State {
         session.sync = session.section.sync_status()?;
         let (library, anchor) = match &self.sync_notebook {
             Some((library, at)) => (Arc::clone(library), Anchor::Point(*at)),
-            None => (
-                Arc::clone(&session.library),
-                Anchor::Below(ui.rect(button()).unwrap_or_default()),
-            ),
+            None => (Arc::clone(&session.library), Anchor::Below(button())),
         };
         let own = Arc::ptr_eq(&library, &session.library);
         let offline = library::offline();
@@ -1244,7 +1241,7 @@ mod tests {
         if !ui.popup_open(id()) {
             ui.open_popup(id());
         }
-        open(ui, Anchor::Below(ui.rect(button()).unwrap_or_default()));
+        open(ui, Anchor::Below(button()));
         build(ui, facts);
         ui.close();
         ui.end();
@@ -1352,7 +1349,7 @@ mod tests {
                 .unwrap();
             let mapped = buffer.get_mapped_range(..).unwrap();
             let bottom = bottom
-                .unwrap_or(ui.rect(id()).unwrap()[3] + 24.0)
+                .unwrap_or(ui.laid_out(id()).unwrap()[3] + 24.0)
                 .min(SIZE[1]);
             let height = (bottom * SCALE) as u32;
             let pixels: Vec<u8> = mapped
@@ -1382,7 +1379,7 @@ mod tests {
     }
 
     fn bar(ui: &Ui) -> bool {
-        ui.rect(id().child("status").child("bar")).is_some()
+        ui.laid_out(id().child("status").child("bar")).is_some()
     }
 
     #[test]
@@ -1547,7 +1544,7 @@ mod tests {
                 let mut ui = ui(Appearance::Light);
                 let mut now = Instant::now();
                 settle(&mut ui, &mut now, &made());
-                let [_, top, _, bottom] = ui.rect(id()).unwrap();
+                let [_, top, _, bottom] = ui.laid_out(id()).unwrap();
                 (name, bottom - top)
             })
             .collect();
@@ -1570,7 +1567,7 @@ mod tests {
                 let mut now = Instant::now();
                 let facts = Facts { offline, ..made() };
                 settle(&mut ui, &mut now, &facts);
-                places.push((ui.rect(switch).unwrap(), ui.rect(controls).unwrap()));
+                places.push((ui.laid_out(switch).unwrap(), ui.laid_out(controls).unwrap()));
             }
             assert!(
                 places.windows(2).all(|pair| pair[0] == pair[1]),
@@ -1594,7 +1591,7 @@ mod tests {
                 let mut now = Instant::now();
                 let facts = facts();
                 settle(&mut ui, &mut now, &facts);
-                assert!(ui.rect(id()).is_some(), "{name}");
+                assert!(ui.laid_out(id()).is_some(), "{name}");
                 if let (Some(output), Some(gpu)) = (&output, &mut gpu) {
                     gpu.save(&ui, &output.join(format!("{name}-{theme}.png")), None);
                 }

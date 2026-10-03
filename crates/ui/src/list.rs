@@ -96,7 +96,7 @@ pub fn list<R: Rows>(
         }
         low
     };
-    let rect = ui.rect(id);
+    let rect = ui.laid_out(id);
     let view = f64::from(match spec.size[1].size {
         Size::Pixels(pixels) => pixels,
         _ => rect.map_or(0.0, |rect| rect[3] - rect[1]),

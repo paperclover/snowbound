@@ -406,7 +406,7 @@ impl State {
         shown
             && self
                 .ui
-                .rect(crate::sections())
+                .laid_out(crate::sections())
                 .is_some_and(|[left, top, right, bottom]| {
                     x >= left && x < right && y >= top && y < bottom
                 })
@@ -1108,7 +1108,7 @@ impl State {
         (0..session.tabs.len())
             .filter(|tab| *tab != session.tab)
             .find(|tab| {
-                self.ui.rect(ui::shell::tab_id(row, *tab)).is_some_and(
+                self.ui.laid_out(ui::shell::tab_id(row, *tab)).is_some_and(
                     |[left, top, right, bottom]| x >= left && x < right && y >= top && y < bottom,
                 )
             })
@@ -1120,7 +1120,7 @@ impl State {
         let Dragged::Page(space) = drag.what else {
             return None;
         };
-        let origin = self.ui.rect(self.ui.id(crate::page_list_top()))?[1];
+        let origin = self.ui.laid_out(self.ui.id(crate::page_list_top()))?[1];
         Some(crate::PageDrag {
             space,
             top: drag.live().then(|| drag.corner(self.pointer)[1] - origin),
@@ -1142,10 +1142,10 @@ impl State {
     ) {
         let mine = |what: &Dragged| matches!(what, Dragged::Page(_));
         self.settle(mine, settled);
-        let held =
-            held.and_then(|space| Some((Dragged::Page(space), self.ui.rect(self.ui.id(space))?)));
+        let held = held
+            .and_then(|space| Some((Dragged::Page(space), self.ui.laid_out(self.ui.id(space))?)));
         let target = self.page_drop(row);
-        let origin = self.ui.rect(self.ui.id(crate::page_list_top()));
+        let origin = self.ui.laid_out(self.ui.id(crate::page_list_top()));
         let dropped = self.follow_drag(held, mine);
         let (
             Some(session),
@@ -1217,7 +1217,7 @@ impl State {
         let Dragged::Tab(index) = drag.what else {
             return None;
         };
-        let start = drag.corner(self.pointer)[0] - self.ui.rect(row)?[0];
+        let start = drag.corner(self.pointer)[0] - self.ui.laid_out(row)?[0];
         Some(ui::shell::Dragged {
             index,
             start: drag.live().then_some(start),
@@ -1239,7 +1239,7 @@ impl State {
         let held = held.and_then(|tab| {
             Some((
                 Dragged::Tab(tab),
-                self.ui.rect(ui::shell::tab_id(row, tab))?,
+                self.ui.laid_out(ui::shell::tab_id(row, tab))?,
             ))
         });
         let dropped = self.follow_drag(held, mine);

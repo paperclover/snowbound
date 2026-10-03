@@ -224,7 +224,7 @@ impl State {
         ui::popup::submenus(&mut self.ui, id(), &items[0], |index| {
             commands[index].submenu.then(|| submenu(index))
         });
-        let anchor = Anchor::Right(self.ui.rect(id()).unwrap_or_default());
+        let anchor = Anchor::Right(id());
         for (index, row) in commands.iter().enumerate() {
             if let (Some(target), Some(action)) = (&row.target, &row.action)
                 && let Some(chosen) = self.submenu(submenu(index), action, target, anchor)
@@ -307,7 +307,7 @@ impl State {
                 (action, Item { separated, ..item })
             },
         ));
-        let anchor = Anchor::Right(self.ui.rect(id()).unwrap_or_default());
+        let anchor = Anchor::Right(id());
         if let Some(action) =
             self.action_menu(panel, anchor, Some("Search actions"), &target, &actions)
         {

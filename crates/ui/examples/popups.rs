@@ -75,8 +75,7 @@ fn main() {
                 ui::popup::menu(ui, context, Anchor::Point([140.0, 70.0]), &items[..8], None);
             }),
             ("combo", fonts, &|ui, [combo, _]| {
-                let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
-                ui::popup::menu(ui, fonts, anchor, &items, Some("Calibri"));
+                ui::popup::menu(ui, fonts, Anchor::Over(combo), &items, Some("Calibri"));
             }),
             ("search", search, &|ui, [combo, _]| {
                 results(ui, search, combo)
@@ -138,33 +137,27 @@ fn results(ui: &mut Ui, id: Id, combo: Id) {
         return;
     }
     let theme = ui.theme.clone();
-    let [left, top, right, bottom] = ui.rect(combo).unwrap_or_default();
-    let anchor = Anchor::Over([left - 4.0, top - 4.0, right + 4.0, bottom + 4.0]);
-    let width = 300.0;
-    let open = ui.opening(id, anchor).unwrap_or(1.0);
     ui.open_as(
         id,
         Spec {
             axis: ui::Axis::Y,
-            size: [px(width), ui::children()],
+            size: [px(300.0), ui::children()],
             fill: Some(theme.popup),
             border: Some(theme.chip),
             shadow: Some(theme.shadow),
             radius: 6.0,
             pad: [4.0, 4.0],
             gap: 4.0,
-            anchor: Some(anchor),
+            anchor: Some(Anchor::Over(combo)),
             ..Spec::default()
         },
     );
+    // Stands in for the combo, as tall, widening with the panel.
     ui.leaf(
         "box",
         Spec {
             flags: ui::Flags::STILL,
-            size: [
-                px(right - left + (width - 8.0 - (right - left)) * open),
-                px(bottom - top),
-            ],
+            size: [fill(), px(0.0)],
             text: Some("Search All Notebooks (⌘E)"),
             color: Some(theme.text_dim),
             fill: Some(theme.base),
@@ -253,8 +246,7 @@ fn keystroke(
     let items = font_items();
     let id = Id::ROOT.child("fonts");
     let build = |ui: &mut Ui, [combo, _]: [Id; 2]| {
-        let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
-        ui::popup::menu(ui, id, anchor, &items, Some("Calibri"));
+        ui::popup::menu(ui, id, Anchor::Over(combo), &items, Some("Calibri"));
     };
     scene.open(id, Vec::new(), build);
     let mut panels = vec![paint(device, queue, renderer, &scene.ui)];
@@ -543,10 +535,6 @@ impl Scene {
     }
 }
 
-fn below(ui: &Ui, id: Id) -> Anchor {
-    Anchor::Below(ui.rect(id).unwrap_or_default())
-}
-
 fn key(named: NamedKey) -> Event {
     Event::Key {
         key: Key::Named(named),
@@ -656,8 +644,7 @@ fn fonts(scene: &mut Scene) {
     let items = font_items();
     let id = Id::ROOT.child("fonts");
     scene.open(id, typed("ca"), |ui, [combo, _]| {
-        let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
-        ui::popup::menu(ui, id, anchor, &items, Some("Calibri"));
+        ui::popup::menu(ui, id, Anchor::Over(combo), &items, Some("Calibri"));
     });
 }
 
@@ -707,16 +694,16 @@ fn colors(scene: &mut Scene) {
     let swatches = office_colors();
     let id = Id::ROOT.child("font color");
     scene.open(id, Vec::new(), |ui, [_, split]| {
-        let anchor = below(ui, split);
+        let anchor = Anchor::Below(split);
         ui::popup::colors(ui, id, anchor, "Automatic", &swatches, 10);
     });
-    let cell = scene.ui.rect(id.child(("cell", 15_usize))).unwrap();
+    let cell = scene.ui.laid_out(id.child(("cell", 15_usize))).unwrap();
     scene
         .ui
         .event(Event::PointerMoved([cell[0] + 5.0, cell[1] + 5.0]));
     for _ in 0..30 {
         scene.frame(|ui, [_, split]| {
-            let anchor = below(ui, split);
+            let anchor = Anchor::Below(split);
             ui::popup::colors(ui, id, anchor, "Automatic", &swatches, 10);
         });
     }
@@ -743,7 +730,7 @@ fn highlight(scene: &mut Scene) {
     .map(|(r, g, b)| (draw::srgb(r, g, b), ""));
     let id = Id::ROOT.child("highlight");
     scene.open(id, vec![key(NamedKey::ArrowDown)], |ui, [_, split]| {
-        let anchor = below(ui, split);
+        let anchor = Anchor::Below(split);
         ui::popup::colors(ui, id, anchor, "No Color", &swatches, 5);
     });
 }
@@ -820,21 +807,16 @@ fn tags(scene: &mut Scene) {
         ..Item::default()
     });
     let id = Id::ROOT.child("tags");
-    scene.open(id, Vec::new(), |ui, [combo, _]| {
-        let rect = ui.rect(combo).unwrap_or_default();
-        let anchor = Anchor::Below([rect[0] + 200.0, rect[1], rect[0] + 222.0, rect[3]]);
-        ui::popup::menu(ui, id, anchor, &tags, Some("Filter tags"));
-    });
-    let row = scene.ui.rect(id.child("rows").child(3_usize)).unwrap();
+    let build = |ui: &mut Ui, [_, split]: [Id; 2]| {
+        ui::popup::menu(ui, id, Anchor::Below(split), &tags, Some("Filter tags"));
+    };
+    scene.open(id, Vec::new(), build);
+    let row = scene.ui.laid_out(id.child("rows").child(3_usize)).unwrap();
     scene
         .ui
         .event(Event::PointerMoved([row[0] + 40.0, row[1] + 8.0]));
     for _ in 0..3 {
-        scene.frame(|ui, [combo, _]| {
-            let rect = ui.rect(combo).unwrap_or_default();
-            let anchor = Anchor::Below([rect[0] + 200.0, rect[1], rect[0] + 222.0, rect[3]]);
-            ui::popup::menu(ui, id, anchor, &tags, Some("Filter tags"));
-        });
+        scene.frame(build);
     }
 }
 

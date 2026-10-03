@@ -112,6 +112,10 @@ fn strip(
         shown.push(pick);
     }
     shown.push(more);
+    let tiles = (shown.iter())
+        .map(|(_, label)| GAP + tile_width(ui, label))
+        .sum::<f32>()
+        - GAP;
     let mut chosen = None;
     ui.open(
         "templates",
@@ -177,15 +181,12 @@ fn strip(
         }
         ui.close();
     }
-    let width = ui
-        .rect(ui.id("tiles"))
-        .map_or(0.0, |rect| rect[2] - rect[0]);
     let close = ui.leaf(
         "dismiss",
         Spec {
             flags: Flags::FLOAT | Flags::CLICKABLE,
             size: [px(22.0), px(22.0)],
-            position: [width + 2.0 * PAD - 14.0, -8.0],
+            position: [tiles + 2.0 * PAD - 14.0, -8.0],
             icon: Some(art::CLOSE),
             color: Some(theme.text_dim),
             fill: Some(theme.popup),
@@ -437,7 +438,8 @@ impl crate::State {
             self.templates = View::Strip;
             return;
         }
-        let (Some(rect), Some(start)) = (self.ui.rect(crate::page()), editor.body_start()) else {
+        let (Some(rect), Some(start)) = (self.ui.laid_out(crate::page()), editor.body_start())
+        else {
             return;
         };
         let viewport = self.view.viewport;
@@ -503,7 +505,7 @@ impl crate::State {
     /// The Page Color menu's Show All: every template's art, one of which goes behind the
     /// open page.
     fn art_gallery(&mut self, theme: &Theme) {
-        let Some(rect) = self.ui.rect(crate::page()) else {
+        let Some(rect) = self.ui.laid_out(crate::page()) else {
             return;
         };
         let paper = Paper {

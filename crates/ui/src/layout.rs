@@ -1,5 +1,6 @@
 use crate::{
-    Anchor, Axis, Built, Flags, ICON, ICON_GAP, Id, Overflow, Size, State, fitting, text::Texts,
+    Anchor, Axis, Built, Flags, ICON, ICON_GAP, Id, Overflow, Size, State, fitting, popup::PAD,
+    text::Texts,
 };
 use std::collections::HashMap;
 
@@ -7,8 +8,9 @@ use std::collections::HashMap;
 /// ancestors (pre-order), sizes summed from children (post-order), overflow taken back
 /// (by folding a row's groups for what space sized by ancestors can't give, then from that
 /// space, then from the least strict boxes first), and positions along each parent's flow. Labels too wide for their
-/// solved width wrap or shorten before heights are solved. Boxes are in build order, so
-/// index order is pre-order.
+/// solved width wrap or shorten before heights are solved. Boxes are in build order, so a
+/// parent comes before its children. The interface is solved first, then each popup in
+/// turn beside its anchor's box as laid out by then, or as last laid out where not yet.
 pub(crate) fn solve(
     nodes: &mut [Built],
     states: &HashMap<Id, State>,
@@ -22,15 +24,97 @@ pub(crate) fn solve(
             nodes[folded].hidden = true;
         }
     }
+    // The popup each box lies in, by the popup's index; 0 for the interface beneath.
+    let mut popup = vec![0; nodes.len()];
+    for index in 1..nodes.len() {
+        popup[index] = match nodes[index].anchor {
+            Some(_) => index,
+            None => popup[nodes[index].parent],
+        };
+    }
+    let members = |group: usize| -> Vec<usize> {
+        (0..popup.len())
+            .filter(|index| popup[*index] == group)
+            .collect()
+    };
+    solve_group(nodes, &members(0), states, scale, texts, frame);
+    for group in 1..nodes.len() {
+        if popup[group] == group {
+            resolve(nodes, &popup, group, states);
+            solve_group(nodes, &members(group), states, scale, texts, frame);
+        }
+    }
+}
+
+/// Finds where popup `index` opens from its anchor's box, laid out before it in `popup`'s
+/// order, or as last laid out, and what it takes from the box: a popup below or over it is
+/// at least as wide, and what holds still in a popup over it stands in for it as tall.
+fn resolve(nodes: &mut [Built], popup: &[usize], index: usize, states: &HashMap<Id, State>) {
+    let node = &nodes[index];
+    let anchor = node.anchor.expect("a popup has an anchor");
+    let laid_out = |id: Id| {
+        let found = (1..nodes.len()).find(|at| nodes[*at].id == id && popup[*at] < index);
+        found
+            .map(|at| (nodes[at].rect, popup[at]))
+            .or_else(|| Some((states.get(&id)?.rect?, 0)))
+    };
+    let [pad_x, pad_y] = node.pad;
+    let around = match anchor {
+        Anchor::Point([x, y]) => [x, y, x, y],
+        Anchor::Dialog | Anchor::Top => [0.0; 4],
+        Anchor::Below(id) | Anchor::Right(id) | Anchor::Over(id) => {
+            let (rect, holder) = laid_out(id).unwrap_or_default();
+            let [left, top, right, bottom] = rect;
+            match anchor {
+                Anchor::Right(_) => {
+                    let [left, _, right, _] = if holder == 0 {
+                        rect
+                    } else {
+                        nodes[holder].rect
+                    };
+                    [left, top - pad_y, right, bottom + pad_y]
+                }
+                Anchor::Over(_) => [left - pad_x, top - pad_y, right + pad_x, bottom + pad_y],
+                _ => [left, top - PAD, right, bottom + PAD],
+            }
+        }
+    };
+    let node = &mut nodes[index];
+    node.around = around;
+    if let (Some(Anchor::Below(_) | Anchor::Over(_)), Size::Pixels(width)) =
+        (node.anchor, node.size[0].size)
+    {
+        node.size[0].size = Size::Pixels(width.max(around[2] - around[0]));
+    }
+    if let Anchor::Over(_) = anchor {
+        let height = around[3] - around[1] - 2.0 * pad_y;
+        for at in index..nodes.len() {
+            if popup[at] == index && nodes[at].flags.contains(Flags::STILL) {
+                nodes[at].size[1].size = Size::Pixels(height);
+            }
+        }
+    }
+}
+
+/// Solves the boxes `members`, the interface or a popup and what it holds, in build order.
+fn solve_group(
+    nodes: &mut [Built],
+    members: &[usize],
+    states: &HashMap<Id, State>,
+    scale: f32,
+    texts: &mut Texts,
+    frame: u64,
+) {
     for axis in 0..2 {
         if axis == 1 {
-            fit_labels(nodes, texts, frame);
+            fit_labels(nodes, members, texts, frame);
         }
-        for node in nodes.iter_mut() {
+        for &index in members {
+            let node = &mut nodes[index];
             node.computed[axis] = match node.size[axis].size {
                 Size::Pixels(pixels) => match node.anchor {
-                    Some(Anchor::Over(rect)) if axis == 0 => {
-                        let from = rect[2] - rect[0];
+                    Some(Anchor::Over(_)) if axis == 0 => {
+                        let from = node.around[2] - node.around[0];
                         from + (pixels - from) * node.open
                     }
                     _ => pixels,
@@ -51,8 +135,8 @@ pub(crate) fn solve(
                 Size::Fraction(_) | Size::Children => 0.0,
             };
         }
-        fit_popups(nodes, axis);
-        for index in 1..nodes.len() {
+        fit_popups(nodes, members, axis);
+        for &index in members.iter().filter(|index| **index != 0) {
             if let Size::Fraction(fraction) = nodes[index].size[axis].size {
                 if stretches(nodes, index, axis) {
                     nodes[index].computed[axis] = 0.0;
@@ -66,15 +150,15 @@ pub(crate) fn solve(
                 nodes[index].computed[axis] = room.max(0.0) * fraction;
             }
         }
-        for index in (0..nodes.len()).rev() {
+        for &index in members.iter().rev() {
             if nodes[index].size[axis].size == Size::Children {
                 let content = flow(nodes, index, axis);
                 nodes[index].computed[axis] = content + 2.0 * nodes[index].pad[axis];
             }
         }
-        yield_popups(nodes, axis);
-        fit_popups(nodes, axis);
-        for index in 0..nodes.len() {
+        yield_popups(nodes, members, axis);
+        fit_popups(nodes, members, axis);
+        for &index in members {
             let node = &nodes[index];
             if node.children.is_empty() || (axis == 1 && node.flags.contains(Flags::SCROLL)) {
                 continue;
@@ -144,24 +228,30 @@ pub(crate) fn solve(
             }
         }
         let window = nodes[0].computed[axis];
-        for index in 0..nodes.len() {
+        for &index in members {
+            let node = &nodes[index];
+            if let Some(anchor) = node.anchor {
+                let shown = node.computed[axis];
+                let size = match node.size[axis].size {
+                    Size::Pixels(pixels) => pixels,
+                    _ => shown,
+                };
+                nodes[index].relative[axis] = anchor.place(node.around, axis, size, shown, window);
+            }
             let mut cursor = nodes[index].pad[axis];
             // Where a popup widening over its anchor lays its children out, from where it is.
             let shift = match (nodes[index].anchor, nodes[index].size[axis].size) {
                 (Some(anchor @ Anchor::Over(_)), Size::Pixels(full)) if axis == 0 => {
-                    anchor.place(axis, full, full, window) - nodes[index].relative[axis]
+                    let around = nodes[index].around;
+                    anchor.place(around, axis, full, full, window) - nodes[index].relative[axis]
                 }
                 _ => 0.0,
             };
             for child in nodes[index].children.clone() {
-                nodes[child].relative[axis] = if let Some(anchor) = nodes[child].anchor {
-                    let shown = nodes[child].computed[axis];
-                    let size = match nodes[child].size[axis].size {
-                        Size::Pixels(pixels) => pixels,
-                        _ => shown,
-                    };
-                    anchor.place(axis, size, shown, window)
-                } else if nodes[child].flags.contains(Flags::FLOAT) {
+                if nodes[child].anchor.is_some() {
+                    continue;
+                }
+                nodes[child].relative[axis] = if nodes[child].flags.contains(Flags::FLOAT) {
                     nodes[child].position[axis]
                 } else if nodes[child].hidden {
                     nodes[index].pad[axis]
@@ -182,13 +272,12 @@ pub(crate) fn solve(
         }
     }
     let snap = |value: f32| (value * scale).round() / scale;
-    nodes[0].rect = [
-        0.0,
-        0.0,
-        snap(nodes[0].computed[0]),
-        snap(nodes[0].computed[1]),
-    ];
-    for index in 1..nodes.len() {
+    for &index in members {
+        if index == 0 {
+            let [width, height] = nodes[0].computed;
+            nodes[0].rect = [0.0, 0.0, snap(width), snap(height)];
+            continue;
+        }
         let parent = nodes[index].parent;
         if nodes[index].hidden || nodes[parent].hidden {
             nodes[index].hidden = true;
@@ -229,9 +318,10 @@ fn stretches(nodes: &[Built], index: usize, axis: usize) -> bool {
 
 /// Lets each popup sized loosely give way to the window, as far as its strictness lets it:
 /// a dialog keeps below it the margin it opens under.
-fn yield_popups(nodes: &mut [Built], axis: usize) {
+fn yield_popups(nodes: &mut [Built], members: &[usize], axis: usize) {
     let window = nodes[0].computed[axis];
-    for node in &mut nodes[1..] {
+    for &index in members {
+        let node = &mut nodes[index];
         let room = match node.anchor {
             None => continue,
             Some(Anchor::Dialog | Anchor::Top) if axis == 1 => window * 3.0 / 4.0,
@@ -246,9 +336,10 @@ fn yield_popups(nodes: &mut [Built], axis: usize) {
 
 /// Shrinks each popup longer than the window lets it be on `axis`; one cut short vertically
 /// scrolls what it holds.
-fn fit_popups(nodes: &mut [Built], axis: usize) {
+fn fit_popups(nodes: &mut [Built], members: &[usize], axis: usize) {
     let most = fitting(nodes[0].computed[axis]);
-    for node in &mut nodes[1..] {
+    for &index in members {
+        let node = &mut nodes[index];
         if node.anchor.is_some() && node.computed[axis] > most {
             node.computed[axis] = most;
             if axis == 1 {
@@ -374,8 +465,9 @@ fn least(nodes: &[Built], index: usize) -> f32 {
     own * node.size[0].strictness.clamp(0.0, 1.0)
 }
 
-fn fit_labels(nodes: &mut [Built], texts: &mut Texts, frame: u64) {
-    for node in nodes.iter_mut() {
+fn fit_labels(nodes: &mut [Built], members: &[usize], texts: &mut Texts, frame: u64) {
+    for &index in members {
+        let node = &mut nodes[index];
         let Some(label) = node.label.clone() else {
             continue;
         };

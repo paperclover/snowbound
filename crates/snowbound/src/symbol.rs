@@ -547,7 +547,7 @@ impl State {
         ui.close();
         ui.close();
 
-        let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
+        let anchor = Anchor::Below(combo);
         if ui.popup_open(subsets()) {
             // Each subset that shows a character, and its first.
             let all = characters(ui);

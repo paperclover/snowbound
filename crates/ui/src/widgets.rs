@@ -360,7 +360,7 @@ pub fn scrollbar(
         return system_scrollbar(ui, part, axis, offset, range, view, corner);
     }
     let along = usize::from(axis == Axis::Y);
-    let rect = ui.rect(ui.current())?;
+    let rect = ui.laid_out(ui.current())?;
     let length = rect[along + 2] - rect[along];
     let cross = rect[3 - along] - rect[1 - along];
     let span = range[1] - range[0];
@@ -415,7 +415,7 @@ fn system_scrollbar(
     corner: bool,
 ) -> Option<f32> {
     let along = usize::from(axis == Axis::Y);
-    let rect = ui.rect(ui.current())?;
+    let rect = ui.laid_out(ui.current())?;
     let span = range[1] - range[0];
     let thickness = ui.scrollers.as_ref()?.thickness;
     let length = rect[along + 2] - rect[along] - if corner { thickness } else { 0.0 };
@@ -572,7 +572,7 @@ fn field(
     let modifiers = edit_modifiers(ui.modifiers());
     let pointer = ui
         .pointer()
-        .zip(ui.rect(id))
+        .zip(ui.laid_out(id))
         .map(|(pointer, rect)| pointer[0] - rect[0] - pad)
         .filter(|_| signal.pressed || signal.dragging);
     let state = ui.state(id);

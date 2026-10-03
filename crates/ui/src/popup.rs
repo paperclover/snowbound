@@ -117,7 +117,7 @@ pub fn menu(
                 .map_or(0.0, |badge| crate::badge_width(ui, badge) + ICON_GAP)
         })
         .collect();
-    let window = ui.rect(Id::ROOT).map_or(0.0, |window| window[3]);
+    let window = ui.size()[1];
     let field = if filter.is_some() {
         ROW + style.pad
     } else {
@@ -154,11 +154,6 @@ pub fn menu(
                 0.0
             }
             + 2.0 * (style.pad + style.row_pad);
-    let least = match anchor {
-        Anchor::Below(rect) => rect[2] - rect[0],
-        Anchor::Over(rect) => rect[2] - rect[0] + 2.0 * style.pad,
-        _ => 0.0,
-    };
     choose(
         ui,
         id,
@@ -166,7 +161,7 @@ pub fn menu(
         anchor,
         &[("", items)],
         filter,
-        width.max(least).max(NARROWEST),
+        width.max(NARROWEST),
         style.row,
     )
     .map(|(_, index)| index)
@@ -194,7 +189,7 @@ pub fn submenus(ui: &mut Ui, id: Id, items: &[Item], submenu: impl Fn(usize) -> 
         highlight.is_some_and(opens) && !navigation(ui, &[id], &[NamedKey::ArrowRight]).is_empty();
     let under = highlight.filter(|key| {
         ui.pointer
-            .zip(ui.rect(rows.child(*key)))
+            .zip(ui.laid_out(rows.child(*key)))
             .is_some_and(|(point, rect)| crate::contains(rect, point))
     });
     let now = ui.now;
@@ -225,23 +220,23 @@ pub fn submenus(ui: &mut Ui, id: Id, items: &[Item], submenu: impl Fn(usize) -> 
 }
 
 /// Shows `title`, with the `keys` that run it and a `description` under it, in a tooltip
-/// below the box built last while the pointer rests on it or on a box inside it: after a
-/// delay, or at once while another has just shown. A press or the wheel hides it until the
-/// pointer leaves. It names the box to assistive technology, or where the box has no role,
-/// the unnamed controls inside it.
+/// below the box built last while the pointer rests on it or on a box inside it:
+/// after a delay, or at once while another has just shown. A press or the wheel hides it
+/// until the pointer leaves. It names the box to assistive technology, or where the box has
+/// no role, the unnamed controls inside it.
 pub fn tooltip(ui: &mut Ui, title: &str, keys: &str, description: Option<&str>) {
     tooltip_below(ui, None, title, keys, description);
 }
 
-/// A `tooltip` below `part`, a window rectangle within the box built last, as a custom
-/// box names what it draws.
-pub fn tooltip_over(ui: &mut Ui, part: [f32; 4], title: &str, description: Option<&str>) {
+/// A `tooltip` below `part`, a box built within the box built last, as a custom box names
+/// part of what it draws.
+pub fn tooltip_over(ui: &mut Ui, part: Id, title: &str, description: Option<&str>) {
     tooltip_below(ui, Some(part), title, "", description);
 }
 
 fn tooltip_below(
     ui: &mut Ui,
-    part: Option<[f32; 4]>,
+    part: Option<Id>,
     title: &str,
     keys: &str,
     description: Option<&str>,
@@ -312,7 +307,6 @@ fn tooltip_below(
     } else {
         format!("{title} ({keys})")
     };
-    let [left, top, right, bottom] = part.or(ui.rect(id)).unwrap_or_default();
     let theme = &ui.theme;
     let spec = Spec {
         axis: Axis::Y,
@@ -322,7 +316,7 @@ fn tooltip_below(
         radius: 4.0,
         pad: [8.0, 5.0],
         gap: 3.0,
-        anchor: Some(Anchor::Below([left, top, right, bottom + PAD])),
+        anchor: Some(Anchor::Below(part.unwrap_or(id))),
         ..Spec::default()
     };
     ui.open_as(id.child("tooltip"), spec);
@@ -379,8 +373,7 @@ pub fn palette(ui: &mut Ui, id: Id, modes: &[(&str, &[Item])], placeholder: &str
             (ui.signals.get(&rows.child(*key))).is_some_and(|signal| signal.context.is_some())
         });
     let chord = chord(ui, id.child("filter"), "k");
-    let window = ui.rect(Id::ROOT).unwrap_or_default();
-    let width = PALETTE.min(window[2] - 8.0 * PAD).max(NARROWEST);
+    let width = PALETTE.min(ui.size()[0] - 8.0 * PAD).max(NARROWEST);
     if let Some((mode, index)) = choose(
         ui,
         id,
@@ -461,9 +454,9 @@ fn choose(
     let theme = ui.theme.clone();
     let style = theme.menu();
     // Over a combo box, the field takes the box's place at once, widening with the popup.
-    let (flags, height) = match anchor {
-        Anchor::Over(rect) => (Flags::STILL, rect[3] - rect[1]),
-        _ => (Flags::default(), ROW),
+    let flags = match anchor {
+        Anchor::Over(_) => Flags::STILL,
+        _ => Flags::default(),
     };
     surface(ui, id, role, anchor, width);
     if let Some(placeholder) = filter {
@@ -475,7 +468,7 @@ fn choose(
             placeholder,
             Spec {
                 flags,
-                size: [fill(), px(height)],
+                size: [fill(), px(ROW)],
                 fill: Some(theme.base),
                 border: Some(theme.accent),
                 radius: 4.0,
@@ -512,7 +505,7 @@ fn choose(
         };
         first.map(|row| matches.key(row))
     });
-    let window = ui.rect(Id::ROOT).map_or(0.0, |window| window[3]);
+    let window = ui.size()[1];
     let field = if filter.is_some() {
         ROW + style.pad
     } else {
@@ -1208,7 +1201,7 @@ pub fn color_picker(
     let mut picked = state(ui, id).picked.unwrap_or_else(|| to_hsl(initial));
     let pointer = ui.pointer();
     let along = |ui: &Ui, part: Id| {
-        let [left, top, right, bottom] = ui.rect(part)?;
+        let [left, top, right, bottom] = ui.laid_out(part)?;
         let [x, y] = pointer?;
         Some([
             ((x - left) / (right - left)).clamp(0.0, 1.0),
@@ -1412,33 +1405,15 @@ fn from_hsl([hue, saturation, lightness]: [f32; 3]) -> [u8; 3] {
     [red, green, blue].map(|channel| ((channel + base) * 255.0).round().clamp(0.0, 255.0) as u8)
 }
 
-/// Opens popup `id`'s panel, a `role` `width` wide beside `anchor`; the caller closes it.
+/// Opens popup `id`'s panel, a `role` `width` wide beside `anchor`, or as a submenu beside
+/// its row; the caller closes it.
 fn surface(ui: &mut Ui, id: Id, role: Role, anchor: Anchor, width: f32) {
     let style = ui.theme.menu();
-    let pad = style.pad;
-    // Level with its row, past the menu's edges.
     let beside = ui
         .popups
         .iter()
-        .position(|popup| popup.id == id)
-        .and_then(|at| {
-            let [_, top, _, bottom] = ui.rect(ui.popups[at].beside?)?;
-            let [left, _, right, _] = ui.rect(ui.popups[at.checked_sub(1)?].id)?;
-            Some([left, top, right, bottom])
-        });
-    let anchor = match beside.map_or(anchor, Anchor::Right) {
-        Anchor::Below([left, top, right, bottom]) => {
-            Anchor::Below([left, top - PAD, right, bottom + PAD])
-        }
-        // Level with the row it opens from, or with its contents over the box.
-        Anchor::Right([left, top, right, bottom]) => {
-            Anchor::Right([left, top - pad, right, bottom + pad])
-        }
-        Anchor::Over([left, top, right, bottom]) => {
-            Anchor::Over([left - pad, top - pad, right + pad, bottom + pad])
-        }
-        point => point,
-    };
+        .find(|popup| popup.id == id)
+        .and_then(|popup| popup.beside);
     let spec = Spec {
         axis: Axis::Y,
         size: [px(width), children()],
@@ -1446,9 +1421,9 @@ fn surface(ui: &mut Ui, id: Id, role: Role, anchor: Anchor, width: f32) {
         border: Some(style.border),
         shadow: Some(ui.theme.shadow),
         radius: style.radius,
-        pad: [pad; 2],
-        gap: pad,
-        anchor: Some(anchor),
+        pad: [style.pad; 2],
+        gap: style.pad,
+        anchor: Some(beside.map_or(anchor, Anchor::Right)),
         role: Some(role),
         ..Spec::default()
     };

@@ -341,7 +341,7 @@ fn picker(
     if ui.signal(button).pressed {
         ui.open_popup(menu);
     }
-    Anchor::Below(ui.rect(button).unwrap_or_default())
+    Anchor::Below(button)
 }
 
 /// The frame of a dialog titled `title`, centred in the window.

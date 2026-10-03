@@ -521,8 +521,8 @@ impl State {
         // The section in the top quarter of the list, or the last once the list is scrolled to
         // its end.
         let current = options.picked.or_else(|| {
-            let [_, top, _, bottom] = ui.rect(list())?;
-            let starts = |id| ui.rect(id).map(|rect: [f32; 4]| rect[1]);
+            let [_, top, _, bottom] = ui.laid_out(list())?;
+            let starts = |id| ui.laid_out(id).map(|rect: [f32; 4]| rect[1]);
             let end = starts(list().child("top")).is_some_and(|start| start < top - 1.0)
                 && starts(list().child("end")).is_some_and(|end| end <= bottom + 1.0);
             sections
@@ -886,7 +886,7 @@ fn dropdown(ui: &mut Ui, name: &str, choices: &[&str], chosen: usize, width: f32
             ..Item::default()
         })
         .collect();
-    let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
+    let anchor = Anchor::Below(combo);
     ui::popup::menu(ui, menu, anchor, &items, None)
 }
 
@@ -968,7 +968,7 @@ fn renderer(state: &mut State, options: &mut Options, name: &str) {
             ..Item::default()
         })
         .collect();
-    let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
+    let anchor = Anchor::Below(combo);
     if let Some(index) = ui::popup::menu(ui, menu, anchor, &items, None) {
         let picked = Backend::PLATFORM[index];
         options.renderer = if Some(picked) == automatic {
@@ -1044,7 +1044,7 @@ fn font_face(state: &mut State, options: &mut Options, name: &str) {
             ..Item::default()
         })
         .collect();
-    let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
+    let anchor = Anchor::Over(combo);
     if let Some(index) = ui::popup::menu(ui, self::fonts(), anchor, &items, Some(name)) {
         font.face = fonts[index].clone();
     }
@@ -1083,7 +1083,7 @@ fn font_color(state: &mut State, options: &mut Options, name: &str) {
         .iter()
         .map(|&(color, name)| (canvas::gpu::colorref(color), name))
         .collect();
-    let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
+    let anchor = Anchor::Below(combo);
     if let Some(chosen) = ui::popup::colors(ui, font_colors(), anchor, "Automatic", &swatches, 10) {
         font.color = chosen.and_then(|chosen| {
             let at = swatches.iter().position(|(swatch, _)| *swatch == chosen)?;

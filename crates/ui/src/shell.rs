@@ -54,8 +54,9 @@ const EDGE: f32 = 20.0;
 /// The row is as wide as the tabs, and gives up all of that where its own row lacks room.
 /// Then the tabs scroll sideways under the wheel, either way it turns, fading out at the
 /// ends they are cut at into the row's `fill`, and the open tab scrolls into view as it
-/// opens. A tab given `true` after its colour shows the unread dot in its leading pad.
-#[allow(clippy::too_many_arguments)]
+/// opens. A tab given `true` after its colour shows the unread dot in its leading pad. The tab
+/// `renaming` holds what its builder builds inside it, given the tab's height.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn section_tabs(
     ui: &mut Ui,
     row: Id,
@@ -63,6 +64,7 @@ pub fn section_tabs(
     active: usize,
     lit: Option<usize>,
     dragged: Option<Dragged>,
+    mut renaming: Option<(usize, &mut dyn FnMut(&mut Ui, f32))>,
     section: &Section,
     height: f32,
     fill: [f32; 4],
@@ -83,7 +85,7 @@ pub fn section_tabs(
         .collect();
     // The last tab's slant and shadow reach past its box.
     let wide = left + lean(height) + crate::SHADOW[0];
-    let view = ui.rect(row).map_or(wide, |rect| rect[2] - rect[0]);
+    let view = ui.laid_out(row).map_or(wide, |rect| rect[2] - rect[0]);
     let most = (wide - view).max(0.0);
     let [scroll, shown, shift] = [row.child("scroll"), row.child("shown"), row.child("offset")];
     let held_value = |ui: &Ui, id: Id| ui.states.get(&id).and_then(|state| state.tween);
@@ -190,7 +192,7 @@ pub fn section_tabs(
         let top = if index == active { section } else { &colors };
         let fill = mix(colors.tab, top.frame[0], open);
         let fade = |color: [f32; 4], alpha: f32| [color[0], color[1], color[2], color[3] * alpha];
-        let signal = ui.leaf(
+        let id = ui.open(
             ("tab", index),
             Spec {
                 flags: Flags::CLICKABLE | Flags::FLOAT,
@@ -215,6 +217,11 @@ pub fn section_tabs(
                 ..Spec::default()
             },
         );
+        if let Some((_, build)) = renaming.as_mut().filter(|(at, _)| *at == index) {
+            build(ui, tall);
+        }
+        ui.close();
+        let signal = ui.signal(id);
         if unread {
             let position = [
                 x - offset + (TAB_PAD - DOT) / 2.0,
@@ -548,7 +555,7 @@ pub fn more_button(ui: &mut Ui, part: impl Hash, menu: Id, enabled: bool) -> Anc
     if enabled && ui.signal(id).pressed {
         ui.open_popup(menu);
     }
-    Anchor::Below(ui.rect(id).unwrap_or_default())
+    Anchor::Below(id)
 }
 
 /// A button showing `icon` and a menu arrow, one control that opens popup `menu`, a toggle
@@ -593,15 +600,23 @@ pub fn menu_button(
             },
         );
     }
+    // The menu opens from the button shifted so its icons line up under the button's.
+    let style = ui.theme.menu();
+    let from = ui.id("menu");
+    ui.leaf(
+        "menu",
+        Spec {
+            flags: Flags::FLOAT,
+            size: [px(TOOL + ARROW), px(TOOL)],
+            position: [(TOOL - crate::ICON) / 2.0 - style.pad - style.row_pad, 0.0],
+            ..Spec::default()
+        },
+    );
     ui.close();
     if ui.signal(id).pressed {
         ui.open_popup(menu);
     }
-    let [left, top, right, bottom] = ui.rect(id).unwrap_or_default();
-    let menu = ui.theme.menu();
-    // The menu's icons line up under the button's.
-    let shift = menu.pad + menu.row_pad - (TOOL - crate::ICON) / 2.0;
-    Anchor::Below([left - shift, top, right - shift, bottom])
+    Anchor::Below(from)
 }
 
 /// A drop-down box `name`d, `width` wide, showing `text`, that opens popup `menu`; where

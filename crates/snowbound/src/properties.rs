@@ -175,7 +175,7 @@ impl State {
                 ..Item::default()
             })
             .collect();
-        let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
+        let anchor = Anchor::Below(combo);
         if let Some(index) = ui::popup::menu(ui, colors(), anchor, &items, None) {
             dialog.color = Some(SECTION_COLORS[index].0);
         }

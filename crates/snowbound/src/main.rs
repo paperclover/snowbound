@@ -1602,7 +1602,7 @@ impl State {
                 |_| [0.0; 4],
             );
         }
-        if let Some(rect) = self.ui.rect(page()) {
+        if let Some(rect) = self.ui.laid_out(page()) {
             let size = [
                 ((rect[2] - rect[0]) * scale).round() as u32,
                 ((rect[3] - rect[1]) * scale).round() as u32,
@@ -1712,7 +1712,7 @@ impl State {
             .ui
             .animate(tab_row(), if self.full_page { 0.0 } else { TAB_ROW });
         let drags = self.chrome_drags();
-        let tab_row = self.ui.open_as(
+        self.ui.open_as(
             tab_row(),
             Spec {
                 flags: if drags {
@@ -1757,24 +1757,41 @@ impl State {
         let unread = self.unread_keys();
         let (clicked, open_tab) = match &self.session {
             Some(session) => {
+                let lit = self.page_drop(row);
+                let dragged = self.dragged_tab(row);
+                let shown = self.open_tab().unwrap_or(session.tab);
                 // A tab being renamed takes the name typed, which its field covers.
+                let renaming = self.renaming.as_mut().and_then(|renaming| {
+                    let tab = (session.tabs.iter())
+                        .position(|tab| renaming.entry(&session.library, &tab.path, true))?;
+                    Some((tab, &mut renaming.name))
+                });
+                let typed = renaming
+                    .as_ref()
+                    .map(|(tab, name)| (*tab, name.to_string()));
                 let tabs: Vec<_> = session
                     .tabs
                     .iter()
-                    .map(|tab| {
-                        let name = match &self.renaming {
-                            Some(renaming) if renaming.entry(&session.library, &tab.path, true) => {
-                                renaming.name.as_str()
-                            }
+                    .enumerate()
+                    .map(|(index, tab)| {
+                        let name = match &typed {
+                            Some((renamed, name)) if *renamed == index => name.as_str(),
                             _ => tab.name.as_str(),
                         };
                         let unread = unread.contains(&session.library.key(&tab.path));
                         (name, section_color(tab.color), unread)
                     })
                     .collect();
-                let lit = self.page_drop(row);
-                let dragged = self.dragged_tab(row);
-                let shown = self.open_tab().unwrap_or(session.tab);
+                let mut kept = None;
+                let mut field;
+                let renaming = match renaming {
+                    Some((tab, name)) => {
+                        field =
+                            |ui: &mut Ui, tall| kept = rename::tab_field(ui, &theme, name, tall);
+                        Some((tab, &mut field as &mut dyn FnMut(&mut Ui, f32)))
+                    }
+                    None => None,
+                };
                 let ui::shell::Tabs {
                     clicked,
                     context,
@@ -1790,10 +1807,14 @@ impl State {
                     shown,
                     lit,
                     dragged,
+                    renaming,
                     &section,
                     TAB_ROW,
                     theme.strip,
                 );
+                if let Some(keep) = kept {
+                    self.finish_renaming(keep);
+                }
                 name(&mut self.ui, row, "Sections");
                 self.drag_tabs(held, slot, settled, row);
                 let Some(session) = &self.session else {
@@ -1825,7 +1846,6 @@ impl State {
                     };
                     self.rename(target);
                 }
-                self.tab_rename_field(&theme, row, tab_row);
                 (clicked, open_tab)
             }
             None if self.locked.is_some() => self.locked_tabs(row, &section, theme.strip),
@@ -1837,6 +1857,7 @@ impl State {
                     row,
                     shown,
                     0,
+                    None,
                     None,
                     None,
                     &section,
@@ -1963,9 +1984,7 @@ impl State {
         if !opening {
             self.template_strip(&theme);
         }
-        if let Some(rect) = self.ui.rect(page()) {
-            self.transport(&theme, rect)?;
-        }
+        self.transport(&theme)?;
         let scroll = self.view.scroll();
         for (index, axis) in [Axis::X, Axis::Y]
             .into_iter()
@@ -1990,20 +2009,24 @@ impl State {
         if !opening {
             self.peer_carets();
         }
-        self.ui.close();
-        if let Some(task) = self.view.task_under_pointer() {
-            let [left, top, ..] = self.ui.rect(page()).unwrap_or_default();
+        let task = self.view.task_under_pointer().map(|[x0, y0, x1, y1]| {
             let scale = self.ui.scale();
-            let [x0, y0, x1, y1] = task;
-            let part = [
-                left + x0 / scale,
-                top + y0 / scale,
-                left + x1 / scale,
-                top + y1 / scale,
-            ];
+            self.ui.leaf(
+                "task",
+                Spec {
+                    flags: Flags::FLOAT,
+                    size: [px((x1 - x0) / scale), px((y1 - y0) / scale)],
+                    position: [x0 / scale, y0 / scale],
+                    ..Spec::default()
+                },
+            );
+            page().child("task")
+        });
+        self.ui.close();
+        if let Some(task) = task {
             ui::popup::tooltip_over(
                 &mut self.ui,
-                part,
+                task,
                 "Outlook task",
                 Some("Edit it in OneNote with Outlook"),
             );
@@ -2046,8 +2069,9 @@ impl State {
     /// Borders the open section tab and the frame's top, and rounds and borders the page
     /// together with the open page's tab, joined where they meet.
     fn edges(&mut self, section: ui::Section, open_tab: Id, open_page: Option<Id>) {
-        let panel = self.ui.rect(frame().child("panel"));
-        let (Some(frame), Some(page)) = (self.ui.rect(frame()), self.ui.rect(page())) else {
+        let panel = self.ui.laid_out(frame().child("panel"));
+        let (Some(frame), Some(page)) = (self.ui.laid_out(frame()), self.ui.laid_out(page()))
+        else {
             return;
         };
         let rounding = self.rounding();
@@ -2056,7 +2080,7 @@ impl State {
         let [left, top, right, bottom] = page;
         let left_tabs = self.page_tabs_left;
         let tab = open_page
-            .and_then(|id| self.ui.rect(id))
+            .and_then(|id| self.ui.laid_out(id))
             .map(|row| [row[0], row[1], row[2], row[3] - ROW_GAP])
             .zip(panel)
             .and_then(|(row, panel)| {
@@ -2129,7 +2153,7 @@ impl State {
         // the open tab stands on it.
         let [start, end] = [frame[0], frame[2]];
         let outer = platform::corner_radius(&self.window);
-        let window = self.ui.rect(Id::ROOT).map_or(end, |root| root[2]);
+        let window = self.ui.size()[0];
         let [beside, beside_right] =
             [start, window - end].map(|gap| (outer * gap / sidebar::WIDTH).min(outer));
         let strip = self.ui.theme.strip;
@@ -2153,11 +2177,11 @@ impl State {
         // The border breaks where the open tab shows, which the row may scroll it out of.
         let [left, right] = self
             .ui
-            .rect(sections())
+            .laid_out(sections())
             .map_or([end; 2], |row| [row[0], row[2]]);
         let [foot, toe] = self
             .ui
-            .rect(open_tab)
+            .laid_out(open_tab)
             .map_or([end; 2], |tab| ui::shell::tab_base(tab, TAB_ROW))
             .map(|x| x.clamp(left, right));
         // The border runs down both sides to the window's bottom, round the bottom corner
@@ -2398,7 +2422,7 @@ impl State {
             disabled: !enabled,
             ..Default::default()
         }));
-        let anchor = ui::Anchor::Below(ui.rect(ui.id("menu")).unwrap_or_default());
+        let anchor = ui::Anchor::Below(ui.id("menu"));
         if ui::popup::menu(ui, toolbar_popup("paste"), anchor, &items, None).is_some() {
             choice = Some(Choice::Command(Cmd::Paste));
         }
@@ -2422,7 +2446,7 @@ impl State {
             ui::shell::menu_button(ui, "styles", art::STYLES, None, styles)
         } else {
             ui::shell::unavailable(ui, "styles", art::STYLES, text, true);
-            ui::Anchor::Below(ui.rect(ui.id("styles")).unwrap_or_default())
+            ui::Anchor::Below(ui.id("styles"))
         };
         let shown = notebook::sidecar::themes::STYLES
             .iter()
@@ -2485,7 +2509,7 @@ impl State {
                 ..Default::default()
             })
             .collect();
-        let anchor = ui::Anchor::Over(ui.rect(combo).unwrap_or_default());
+        let anchor = ui::Anchor::Over(combo);
         if let Some(index) =
             ui::popup::menu(ui, toolbar_popup("font"), anchor, &items, Some("Font"))
             && let Some(name) = choices[index].1
@@ -2534,7 +2558,7 @@ impl State {
                 ..Default::default()
             });
         }
-        let anchor = ui::Anchor::Over(ui.rect(combo).unwrap_or_default());
+        let anchor = ui::Anchor::Over(combo);
         if let Some(index) = ui::popup::menu(ui, toolbar_popup("size"), anchor, &items, Some(&size))
         {
             choice = Some(Choice::Size(sizes[index]));
@@ -2601,7 +2625,7 @@ impl State {
                         .iter()
                         .map(|&(color, name)| (colorref(color), name))
                         .collect();
-                    let anchor = ui::Anchor::Below(ui.rect(split).unwrap_or_default());
+                    let anchor = ui::Anchor::Below(split);
                     if let Some(chosen) =
                         ui::popup::colors(ui, toolbar_popup(part), anchor, none, &colors, columns)
                     {
@@ -2681,8 +2705,7 @@ impl State {
                     }
                     tip(ui, id);
                 }
-                let [bullets, numbering] =
-                    ["bullets", "numbering"].map(|part| ui.rect(ui.id(part)).unwrap_or_default());
+                let [bullets, numbering] = ["bullets", "numbering"].map(|part| ui.id(part));
                 let current = |bullet| match state.list {
                     Some(ListStyle::Bullet(place)) if bullet => Some(place),
                     Some(ListStyle::Number(place)) if !bullet => Some(place),
@@ -2982,7 +3005,7 @@ impl State {
                         choice = Some(Choice::Command(Cmd::Pen));
                     }
                     tip(ui, Cmd::Pen);
-                    let anchor = ui::Anchor::Below(ui.rect(split).unwrap_or_default());
+                    let anchor = ui::Anchor::Below(split);
                     if let Some(place) = pen_gallery(ui, anchor, &drawing_pens, pens.pen) {
                         choice = Some(Choice::Pen(place));
                     }
@@ -3367,7 +3390,7 @@ impl State {
         }
         let read_only = self.session.as_ref().is_some_and(Session::read_only);
         let scale = self.ui.scale();
-        let corner = self.ui.rect(page()).unwrap_or_default();
+        let corner = self.ui.laid_out(page()).unwrap_or_default();
         let device = |point: [f32; 2]| {
             [
                 (point[0] - corner[0]) * scale,
@@ -3934,7 +3957,7 @@ impl State {
     /// Follows the view moving: the input method's position and accessibility.
     fn after_move(&mut self) -> Result<(), Box<dyn Error>> {
         let scale = self.ui.scale();
-        let corner = self.ui.rect(page()).unwrap_or_default();
+        let corner = self.ui.laid_out(page()).unwrap_or_default();
         let [x0, y0, x1, y1] = self.view.caret_area()?;
         self.window.set_ime_cursor_area(
             LogicalPosition::new(x0 / scale + corner[0], y0 / scale + corner[1]),
@@ -4292,7 +4315,7 @@ impl State {
     /// `page` asks or its tree is not grafted yet. The interface's tree goes first, since it
     /// holds the page's.
     fn update_accessibility(&mut self, page: bool) -> Result<(), Box<dyn Error>> {
-        let built = self.ui.rect(self::page()).is_some();
+        let built = self.ui.laid_out(self::page()).is_some();
         if !built && self.page_grafted {
             // Its graft is gone, and with it the tree, which must be sent whole again.
             self.accessibility.deactivate();
@@ -4396,12 +4419,12 @@ impl State {
             .accessibility_tree(&self.window.title(), self.window.scale_factor());
         let focus = std::mem::replace(&mut chrome.focus, ui::Id::ROOT.node());
         let mut tree = Tree::new(chrome, true);
-        if self.ui.rect(page()).is_some() {
+        if self.ui.laid_out(page()).is_some() {
             let mut fresh = accessibility::Accessibility::default();
             let page = page_tree(&self.view, &self.ui, &self.window, &mut fresh)?;
             tree.update_and_process_changes(page, &mut Unwatched);
         }
-        if focus != graft || self.ui.rect(page()).is_some() {
+        if focus != graft || self.ui.laid_out(page()).is_some() {
             let update = accesskit::TreeUpdate {
                 nodes: Vec::new(),
                 tree: None,
@@ -4567,7 +4590,7 @@ impl State {
         }
         let theme = &self.ui.theme;
         let scale = self.ui.scale();
-        let corner = self.ui.rect(page()).unwrap_or_default();
+        let corner = self.ui.laid_out(page()).unwrap_or_default();
         // A page taking a while to open shows its outline, drawn in points from the corner.
         let (page_primitives, viewport) = match self.loading() {
             Some(since) => (
@@ -4640,14 +4663,14 @@ impl State {
     }
 
     fn over_page(&self) -> bool {
-        let [x0, y0, x1, y1] = self.ui.rect(page()).unwrap_or_default();
+        let [x0, y0, x1, y1] = self.ui.laid_out(page()).unwrap_or_default();
         let [x, y] = self.pointer;
         (x0..x1).contains(&x) && (y0..y1).contains(&y)
     }
 
     /// Window point `point` in the page's device pixels.
     fn page_point(&self, point: [f32; 2]) -> [f32; 2] {
-        let [left, top, ..] = self.ui.rect(page()).unwrap_or_default();
+        let [left, top, ..] = self.ui.laid_out(page()).unwrap_or_default();
         let scale = self.ui.scale();
         [(point[0] - left) * scale, (point[1] - top) * scale]
     }
@@ -4777,7 +4800,7 @@ fn page_tree(
     window: &Window,
     access: &mut accessibility::Accessibility,
 ) -> Result<accesskit::TreeUpdate, onestore::page::text::EditError> {
-    let corner = ui.rect(page()).unwrap_or_default();
+    let corner = ui.laid_out(page()).unwrap_or_default();
     let scale = ui.scale();
     let ratio = window.scale_factor() as f32 / scale;
     let viewport = canvas::gpu::Viewport {
@@ -4868,8 +4891,8 @@ fn conflict_bar(ui: &mut Ui, bar: Bar, sections: &[&str], steps: [bool; 2]) -> O
             ..Spec::default()
         },
     );
-    for (part, text) in [("said", said), ("action", action)] {
-        ui.leaf(
+    let line = |ui: &mut Ui, part: &str, text| {
+        ui.open(
             part,
             Spec {
                 size: [fill(), fit()],
@@ -4879,16 +4902,28 @@ fn conflict_bar(ui: &mut Ui, bar: Bar, sections: &[&str], steps: [bool; 2]) -> O
                 ..Spec::default()
             },
         );
-    }
-    let action = ui.id("action");
+    };
+    line(ui, "said", said);
+    ui.close();
+    line(ui, "action", action);
+    // The menu opens under the line the click asks for, from its leading edge, as wide as
+    // its items.
+    let from = ui.id("menu");
+    ui.leaf(
+        "menu",
+        Spec {
+            flags: Flags::FLOAT,
+            size: [px(0.0), fill()],
+            ..Spec::default()
+        },
+    );
+    ui.close();
     ui.close();
     ui.close();
     let clicked = ui.signal(row).clicked;
     let menu = Id::ROOT.child("conflict-menu");
     let copy = Id::ROOT.child("conflict-copy");
-    // The menu opens under the line the click asks for, as wide as its items.
-    let [left, top, _, bottom] = ui.rect(action).unwrap_or_default();
-    let anchor = ui::Anchor::Below([left, top, left, bottom]);
+    let anchor = ui::Anchor::Below(from);
     match bar {
         Bar::Page { page, shown } => clicked.then_some(Command::Versions { page, show: !shown }),
         Bar::History {
@@ -5568,7 +5603,7 @@ fn dropdown(
                 choice = Some(Choice::Command(id));
             }
             tip(ui, id);
-            ui::Anchor::Below(ui.rect(button).unwrap_or_default())
+            ui::Anchor::Below(button)
         }
         Head::Tag(place, tag) if status_of(commands::Id::Tag(place)).enabled => {
             let on = status_of(commands::Id::Tag(place)).checked;
@@ -5577,7 +5612,7 @@ fn dropdown(
                 choice = Some(Choice::Command(commands::Id::Tag(place)));
             }
             tag_tip(ui, place, tag);
-            ui::Anchor::Below(ui.rect(button).unwrap_or_default())
+            ui::Anchor::Below(button)
         }
         // Where its command does not apply, the button only opens the menu.
         Head::Split(id) => {
@@ -5596,7 +5631,7 @@ fn dropdown(
             let tint = ui.theme.text;
             ui::shell::unavailable(ui, part, icon, tint, true);
             name(ui, button, label);
-            ui::Anchor::Below(ui.rect(button).unwrap_or_default())
+            ui::Anchor::Below(button)
         }
         Head::Menu(label, icon) => {
             let anchor = ui::shell::menu_button(ui, part, icon, None, menu);

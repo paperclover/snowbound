@@ -62,8 +62,8 @@ fn fill_yields_to_strict_siblings_along_the_flow() {
         ui.close();
         ui.close();
     });
-    assert_eq!(ui.rect(ids[0]), Some([0.0, 0.0, 280.0, 100.0]));
-    assert_eq!(ui.rect(ids[1]), Some([280.0, 0.0, 400.0, 100.0]));
+    assert_eq!(ui.laid_out(ids[0]), Some([0.0, 0.0, 280.0, 100.0]));
+    assert_eq!(ui.laid_out(ids[1]), Some([280.0, 0.0, 400.0, 100.0]));
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn padding_wider_than_its_box_leaves_loose_children_empty_not_negative() {
         ui.close();
         ui.close();
     });
-    assert_eq!(ui.rect(child.unwrap()), Some([8.0, 8.0, 8.0, 8.0]));
+    assert_eq!(ui.laid_out(child.unwrap()), Some([8.0, 8.0, 8.0, 8.0]));
 }
 
 #[test]
@@ -128,8 +128,8 @@ fn children_sum_with_gaps_and_padding() {
         ui.close();
         ui.close();
     });
-    assert_eq!(ui.rect(column.unwrap()), Some([0.0, 0.0, 58.0, 44.0]));
-    assert_eq!(ui.rect(second.unwrap()), Some([4.0, 18.0, 34.0, 38.0]));
+    assert_eq!(ui.laid_out(column.unwrap()), Some([0.0, 0.0, 58.0, 44.0]));
+    assert_eq!(ui.laid_out(second.unwrap()), Some([4.0, 18.0, 34.0, 38.0]));
 }
 
 /// A row `width` wide of a space, a box that yields all but a quarter of its 80 pixels, and
@@ -191,7 +191,7 @@ fn folding_row(ui: &mut Ui, width: f32, priorities: &[u32]) -> Vec<Option<[f32; 
         }
         ui.close();
     });
-    ids.into_iter().map(|id| ui.rect(id)).collect()
+    ids.into_iter().map(|id| ui.laid_out(id)).collect()
 }
 
 #[test]
@@ -296,12 +296,12 @@ fn a_group_inside_a_box_sized_by_its_children_folds_with_the_row() {
     };
     let [outer, after] = ["outer", "later"].map(|part| Id::ROOT.child("row").child(part));
     build(&mut ui, 180.0);
-    assert_eq!(ui.rect(outer), Some([0.0, 0.0, 150.0, 20.0]));
+    assert_eq!(ui.laid_out(outer), Some([0.0, 0.0, 150.0, 20.0]));
     // 50 + 100 + 30 overflows 179, so the group folds before the later one of higher priority,
     // and the box around it narrows to 70.
     build(&mut ui, 179.0);
-    assert_eq!(ui.rect(outer), Some([0.0, 0.0, 70.0, 20.0]));
-    assert_eq!(ui.rect(after), Some([70.0, 0.0, 100.0, 20.0]));
+    assert_eq!(ui.laid_out(outer), Some([0.0, 0.0, 70.0, 20.0]));
+    assert_eq!(ui.laid_out(after), Some([70.0, 0.0, 100.0, 20.0]));
     assert_eq!(ui.narrowest(Id::ROOT.child("row")), Some(100.0));
 }
 
@@ -340,7 +340,7 @@ fn a_box_sized_by_its_children_yields_what_they_yield() {
         ui.close();
         ui.close();
     });
-    assert_eq!(ui.rect(combo.unwrap()), Some([0.0, 0.0, 60.0, 20.0]));
+    assert_eq!(ui.laid_out(combo.unwrap()), Some([0.0, 0.0, 60.0, 20.0]));
 }
 
 #[test]
@@ -621,7 +621,7 @@ fn wheel_scrolls_within_the_content_and_clips_children() {
         200.0,
         "at once, as on the page"
     );
-    assert_eq!(ui.rect(last.unwrap()), Some([0.0, 70.0, 100.0, 100.0]));
+    assert_eq!(ui.laid_out(last.unwrap()), Some([0.0, 70.0, 100.0, 100.0]));
     let layers = ui.layers();
     assert!(matches!(
         layers[..],
@@ -959,7 +959,7 @@ fn scrollbar_thumbs_track_the_offset_and_drags_reach_both_ends() {
     build(&mut ui, &mut offset);
     build(&mut ui, &mut offset);
     let thumb = Id::ROOT.child("view").child("bar");
-    let rect = ui.rect(thumb).unwrap();
+    let rect = ui.laid_out(thumb).unwrap();
     assert_eq!(
         rect,
         [190.0, 4.0, 196.0, 61.0],
@@ -978,7 +978,7 @@ fn scrollbar_thumbs_track_the_offset_and_drags_reach_both_ends() {
     build(&mut ui, &mut offset);
     assert_eq!(offset, 1000.0);
     build(&mut ui, &mut offset);
-    assert_eq!(ui.rect(thumb).unwrap(), [190.0, 147.0, 196.0, 204.0]);
+    assert_eq!(ui.laid_out(thumb).unwrap(), [190.0, 147.0, 196.0, 204.0]);
     ui.event(Event::PointerMoved([193.0, -500.0]));
     build(&mut ui, &mut offset);
     assert_eq!(offset, 0.0);
@@ -1010,7 +1010,7 @@ fn a_scrollbar_without_a_corner_ends_as_far_from_its_end_as_from_its_start() {
             ui.close();
         });
     }
-    let rect = ui.rect(Id::ROOT.child("view").child("bar")).unwrap();
+    let rect = ui.laid_out(Id::ROOT.child("view").child("bar")).unwrap();
     assert_eq!(rect[3], 204.0);
 }
 
@@ -1067,7 +1067,7 @@ fn system_scrollers_step_page_and_drag_by_the_parts_the_platform_paints() {
     build(&mut ui, &mut offset);
     let bar = Id::ROOT.child("view").child("bar");
     assert_eq!(
-        ui.rect(bar).unwrap(),
+        ui.laid_out(bar).unwrap(),
         [185.0, 0.0, 200.0, 200.0],
         "the corner stays clear"
     );
@@ -1126,7 +1126,11 @@ fn menu_id() -> Id {
 
 /// Builds a frame with a button filling the window under the menu, and returns the
 /// button's signal and the item chosen.
-fn menu_frame(ui: &mut Ui, anchor: Anchor, filter: Option<&str>) -> (Signal, Option<usize>) {
+fn menu_frame(
+    ui: &mut Ui,
+    anchor: impl FnOnce(&mut Ui) -> Anchor,
+    filter: Option<&str>,
+) -> (Signal, Option<usize>) {
     let mut result = (Signal::default(), None);
     frame(ui, |ui| {
         let under = ui.leaf(
@@ -1137,28 +1141,49 @@ fn menu_frame(ui: &mut Ui, anchor: Anchor, filter: Option<&str>) -> (Signal, Opt
                 ..Spec::default()
             },
         );
+        let anchor = anchor(ui);
         let chosen = popup::menu(ui, menu_id(), anchor, &items(), filter);
         result = (under, chosen);
     });
     result
 }
 
-const BELOW: Anchor = Anchor::Below([20.0, 20.0, 100.0, 40.0]);
+/// A box floating at `rect` in the window, built at its root, for a popup to open beside.
+fn spot(ui: &mut Ui, rect: [f32; 4]) -> Id {
+    let [left, top, right, bottom] = rect;
+    let id = Id::ROOT.child(("spot", rect.map(f32::to_bits)));
+    ui.open_as(
+        id,
+        Spec {
+            flags: Flags::FLOAT,
+            size: [px(right - left), px(bottom - top)],
+            position: [left, top],
+            ..Spec::default()
+        },
+    );
+    ui.close();
+    id
+}
 
-/// A window with the menu open and faded in below `BELOW`.
+/// Below a box at (20, 20), 80 by 20.
+fn below(ui: &mut Ui) -> Anchor {
+    Anchor::Below(spot(ui, [20.0, 20.0, 100.0, 40.0]))
+}
+
+/// A window with the menu open and faded in `below`.
 fn open_menu(filter: Option<&str>) -> Ui {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
-    menu_frame(&mut ui, BELOW, filter);
+    menu_frame(&mut ui, below, filter);
     ui.open_popup(menu_id());
     for _ in 0..40 {
-        menu_frame(&mut ui, BELOW, filter);
+        menu_frame(&mut ui, below, filter);
     }
     ui
 }
 
 /// The centre of the menu's row for `item`, from the latest layout.
 fn row(ui: &Ui, item: usize) -> [f32; 2] {
-    let rect = ui.rect(menu_id().child("rows").child(item)).unwrap();
+    let rect = ui.laid_out(menu_id().child("rows").child(item)).unwrap();
     [(rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0]
 }
 
@@ -1189,7 +1214,7 @@ fn tip_frame(ui: &mut Ui) -> [Option<[f32; 4]>; 2] {
             tips[index] = id.child("tooltip");
         }
     });
-    tips.map(|tip| ui.rect(tip))
+    tips.map(|tip| ui.laid_out(tip))
 }
 
 /// Frames the pointer rests through for `millis`, returning the tooltips as they end.
@@ -1242,9 +1267,17 @@ fn tooltips_wait_then_switch_at_once_and_hide_on_press_until_left() {
 }
 
 #[test]
+fn a_popup_opens_beside_a_box_first_laid_out_in_the_same_frame() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    ui.open_popup(menu_id());
+    menu_frame(&mut ui, below, None);
+    assert_eq!(ui.laid_out(menu_id()).unwrap()[..2], [20.0, 44.0]);
+}
+
+#[test]
 fn popups_open_beside_their_anchor_and_flip_to_stay_in_the_window() {
     let mut ui = open_menu(None);
-    let rect = ui.rect(menu_id()).unwrap();
+    let rect = ui.laid_out(menu_id()).unwrap();
     assert_eq!(
         [rect[0], rect[1]],
         [20.0, 44.0],
@@ -1252,17 +1285,19 @@ fn popups_open_beside_their_anchor_and_flip_to_stay_in_the_window() {
     );
     assert_eq!(rect[2] - rect[0], 140.0, "no narrower than a menu");
     let height = rect[3] - rect[1];
-    menu_frame(&mut ui, Anchor::Below([300.0, 260.0, 380.0, 280.0]), None);
-    menu_frame(&mut ui, Anchor::Below([300.0, 260.0, 380.0, 280.0]), None);
+    let corner = |ui: &mut Ui| Anchor::Below(spot(ui, [300.0, 260.0, 380.0, 280.0]));
+    menu_frame(&mut ui, corner, None);
+    menu_frame(&mut ui, corner, None);
     assert_eq!(
-        ui.rect(menu_id()),
+        ui.laid_out(menu_id()),
         Some([240.0, 256.0 - height, 380.0, 256.0]),
         "above, level with the anchor's far edge"
     );
-    menu_frame(&mut ui, Anchor::Right([350.0, 100.0, 390.0, 120.0]), None);
-    menu_frame(&mut ui, Anchor::Right([350.0, 100.0, 390.0, 120.0]), None);
+    let edge = |ui: &mut Ui| Anchor::Right(spot(ui, [350.0, 100.0, 390.0, 120.0]));
+    menu_frame(&mut ui, edge, None);
+    menu_frame(&mut ui, edge, None);
     assert_eq!(
-        ui.rect(menu_id()),
+        ui.laid_out(menu_id()),
         Some([210.0, 96.0, 350.0, 96.0 + height]),
         "a submenu that cannot fit to the right opens to the left, its first row level"
     );
@@ -1280,7 +1315,8 @@ fn popups_too_large_for_a_narrow_window_shrink_inside_its_margin() {
     let narrow = [100.0, 300.0];
     let menu = |ui: &mut Ui| {
         sized_frame(ui, narrow, |ui| {
-            popup::menu(ui, menu_id(), BELOW, &items(), None);
+            let anchor = below(ui);
+            popup::menu(ui, menu_id(), anchor, &items(), None);
         });
     };
     menu(&mut ui);
@@ -1288,14 +1324,14 @@ fn popups_too_large_for_a_narrow_window_shrink_inside_its_margin() {
     for _ in 0..40 {
         menu(&mut ui);
     }
-    let rect = ui.rect(menu_id()).unwrap();
+    let rect = ui.laid_out(menu_id()).unwrap();
     assert!(inside(rect, narrow), "{rect:?} leaves the window's margin");
     assert_eq!(
         rect[2] - rect[0],
         100.0 - 2.0 * POPUP_MARGIN,
         "as wide as fits"
     );
-    let row = ui.rect(menu_id().child("rows").child(0_u64)).unwrap();
+    let row = ui.laid_out(menu_id().child("rows").child(0_u64)).unwrap();
     assert!(row[2] <= rect[2], "its rows narrow with it");
 
     // A dialog taller than a short window scrolls what it holds.
@@ -1333,15 +1369,15 @@ fn popups_too_large_for_a_narrow_window_shrink_inside_its_margin() {
     for _ in 0..40 {
         build(&mut ui);
     }
-    let rect = ui.rect(dialog).unwrap();
+    let rect = ui.laid_out(dialog).unwrap();
     assert!(inside(rect, short), "{rect:?} leaves the window's margin");
-    let first = ui.rect(dialog.child(0)).unwrap();
+    let first = ui.laid_out(dialog.child(0)).unwrap();
     ui.event(Event::PointerMoved([200.0, 60.0]));
     ui.event(Event::Wheel([0.0, -100.0]));
     for _ in 0..40 {
         build(&mut ui);
     }
-    let scrolled = ui.rect(dialog.child(0)).unwrap();
+    let scrolled = ui.laid_out(dialog.child(0)).unwrap();
     assert!(scrolled[1] < first[1], "the wheel scrolls it");
     for layer in ui.layers() {
         let Layer::Primitives(layer) = layer else {
@@ -1361,32 +1397,32 @@ fn popups_too_large_for_a_narrow_window_shrink_inside_its_margin() {
 #[test]
 fn popups_show_at_once_by_their_anchor() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
-    menu_frame(&mut ui, BELOW, None);
+    menu_frame(&mut ui, below, None);
     ui.open_popup(menu_id());
-    menu_frame(&mut ui, BELOW, None);
-    menu_frame(&mut ui, BELOW, None);
+    menu_frame(&mut ui, below, None);
+    menu_frame(&mut ui, below, None);
     assert_eq!(
-        ui.rect(menu_id()).unwrap()[1],
+        ui.laid_out(menu_id()).unwrap()[1],
         44.0,
         "right under the anchor"
     );
     ui.close_popup(menu_id());
-    menu_frame(&mut ui, Anchor::Point([50.0, 50.0]), None);
+    menu_frame(&mut ui, |_| Anchor::Point([50.0, 50.0]), None);
     ui.open_popup(menu_id());
-    menu_frame(&mut ui, Anchor::Point([50.0, 50.0]), None);
-    menu_frame(&mut ui, Anchor::Point([50.0, 50.0]), None);
-    assert_eq!(ui.rect(menu_id()).unwrap()[..2], [50.0, 50.0]);
+    menu_frame(&mut ui, |_| Anchor::Point([50.0, 50.0]), None);
+    menu_frame(&mut ui, |_| Anchor::Point([50.0, 50.0]), None);
+    assert_eq!(ui.laid_out(menu_id()).unwrap()[..2], [50.0, 50.0]);
 }
 
 #[test]
 fn a_press_outside_dismisses_without_reaching_what_is_beneath() {
     let mut ui = open_menu(None);
     click(&mut ui, [300.0, 250.0]);
-    let (under, chosen) = menu_frame(&mut ui, BELOW, None);
+    let (under, chosen) = menu_frame(&mut ui, below, None);
     assert!(!ui.popup_open(menu_id()) && chosen.is_none());
     assert!(!under.pressed && !under.clicked);
     click(&mut ui, [300.0, 250.0]);
-    let (under, _) = menu_frame(&mut ui, BELOW, None);
+    let (under, _) = menu_frame(&mut ui, below, None);
     assert!(under.clicked, "once closed, beneath takes presses again");
 }
 
@@ -1394,13 +1430,13 @@ fn a_press_outside_dismisses_without_reaching_what_is_beneath() {
 fn escape_dismisses_and_returns_the_focus() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let page = Id::ROOT.child("under");
-    menu_frame(&mut ui, BELOW, None);
+    menu_frame(&mut ui, below, None);
     ui.set_focus(Some(page));
     ui.open_popup(menu_id());
-    menu_frame(&mut ui, BELOW, None);
+    menu_frame(&mut ui, below, None);
     assert_eq!(ui.focused(), Some(menu_id()));
     ui.event(key(NamedKey::Escape));
-    menu_frame(&mut ui, BELOW, None);
+    menu_frame(&mut ui, below, None);
     assert!(!ui.popup_open(menu_id()));
     assert_eq!(ui.focused(), Some(page));
 }
@@ -1409,11 +1445,11 @@ fn escape_dismisses_and_returns_the_focus() {
 fn input_over_a_popup_stays_with_it() {
     let mut ui = open_menu(None);
     ui.event(Event::PointerMoved(row(&ui, 1)));
-    let (under, _) = menu_frame(&mut ui, BELOW, None);
+    let (under, _) = menu_frame(&mut ui, below, None);
     assert!(!under.hovered);
     let point = row(&ui, 1);
     click(&mut ui, point);
-    let (under, chosen) = menu_frame(&mut ui, BELOW, None);
+    let (under, chosen) = menu_frame(&mut ui, below, None);
     assert_eq!(chosen, Some(1));
     assert!(!under.pressed && !under.clicked);
     assert!(!ui.popup_open(menu_id()), "choosing closes it");
@@ -1424,7 +1460,7 @@ fn disabled_items_ignore_the_pointer() {
     let mut ui = open_menu(None);
     let point = row(&ui, 2);
     click(&mut ui, point);
-    let (_, chosen) = menu_frame(&mut ui, BELOW, None);
+    let (_, chosen) = menu_frame(&mut ui, below, None);
     assert_eq!(chosen, None);
     assert!(ui.popup_open(menu_id()));
 }
@@ -1444,21 +1480,21 @@ fn keys_move_the_highlight_past_disabled_items() {
         for named in keys {
             ui.event(key(named));
         }
-        menu_frame(&mut ui, BELOW, None);
+        menu_frame(&mut ui, below, None);
         assert_eq!(ui.popups[0].highlight, Some(highlight));
     }
     ui.event(key(NamedKey::Enter));
-    assert_eq!(menu_frame(&mut ui, BELOW, None).1, Some(3));
+    assert_eq!(menu_frame(&mut ui, below, None).1, Some(3));
 }
 
 #[test]
 fn the_pointer_moves_the_highlight_only_when_it_moves() {
     let mut ui = open_menu(None);
     ui.event(Event::PointerMoved(row(&ui, 1)));
-    menu_frame(&mut ui, BELOW, None);
+    menu_frame(&mut ui, below, None);
     ui.event(key(NamedKey::ArrowDown));
-    menu_frame(&mut ui, BELOW, None);
-    menu_frame(&mut ui, BELOW, None);
+    menu_frame(&mut ui, below, None);
+    menu_frame(&mut ui, below, None);
     assert_eq!(
         ui.popups[0].highlight,
         Some(3),
@@ -1483,7 +1519,8 @@ fn headings_are_never_chosen_and_hide_while_filtered() {
     let build = |ui: &mut Ui| {
         let mut chosen = None;
         frame(ui, |ui| {
-            chosen = popup::menu(ui, menu_id(), BELOW, &items, Some("Filter"));
+            let anchor = below(ui);
+            chosen = popup::menu(ui, menu_id(), anchor, &items, Some("Filter"));
         });
         chosen
     };
@@ -1516,7 +1553,7 @@ fn typing_filters_to_the_best_matches_first() {
     }
     let settle = |ui: &mut Ui| {
         for _ in 0..30 {
-            menu_frame(ui, BELOW, Some("Filter"));
+            menu_frame(ui, below, Some("Filter"));
         }
     };
     settle(&mut ui);
@@ -1524,7 +1561,7 @@ fn typing_filters_to_the_best_matches_first() {
     let shown = |ui: &Ui| {
         let mut shown: Vec<_> = (0..4_usize)
             .filter_map(|item| {
-                let rect = ui.rect(menu_id().child("rows").child(item))?;
+                let rect = ui.laid_out(menu_id().child("rows").child(item))?;
                 Some((rect[1] as i32, item))
             })
             .collect();
@@ -1541,20 +1578,20 @@ fn typing_filters_to_the_best_matches_first() {
     assert_eq!(shown(&ui), [0, 1, 3], "equal matches keep their order");
     ui.event(key(NamedKey::ArrowDown));
     ui.event(key(NamedKey::Enter));
-    assert_eq!(menu_frame(&mut ui, BELOW, Some("Filter")).1, Some(1));
+    assert_eq!(menu_frame(&mut ui, below, Some("Filter")).1, Some(1));
 }
 
 #[test]
 fn nothing_matching_leaves_nothing_to_choose_and_enter_leaves_the_menu() {
     let mut ui = open_menu(Some("Filter"));
     ui.event(typed("z"));
-    menu_frame(&mut ui, BELOW, Some("Filter"));
+    menu_frame(&mut ui, below, Some("Filter"));
     ui.event(key(NamedKey::ArrowDown));
-    let (_, chosen) = menu_frame(&mut ui, BELOW, Some("Filter"));
+    let (_, chosen) = menu_frame(&mut ui, below, Some("Filter"));
     assert_eq!(chosen, None);
     assert!(ui.popup_open(menu_id()));
     ui.event(key(NamedKey::Enter));
-    let (_, chosen) = menu_frame(&mut ui, BELOW, Some("Filter"));
+    let (_, chosen) = menu_frame(&mut ui, below, Some("Filter"));
     assert_eq!(chosen, None);
     assert!(!ui.popup_open(menu_id()));
 }
@@ -1579,7 +1616,7 @@ fn the_palette_centres_near_the_windows_top_and_chooses_the_best_match() {
     for _ in 0..40 {
         build(&mut ui);
     }
-    let rect = ui.rect(palette).unwrap();
+    let rect = ui.laid_out(palette).unwrap();
     assert_eq!(rect[0] + rect[2], 400.0, "centred");
     assert_eq!(rect[1], 300.0 / 8.0, "an eighth down");
     ui.event(typed("a"));
@@ -1704,7 +1741,7 @@ fn the_palette_opens_an_items_actions_on_command_k_or_a_right_click() {
         ui.popup_open(palette) && !ui.popup_open(actions),
         "Escape goes back to the palette"
     );
-    let row = ui.rect(palette.child("rows").child(3_u64)).unwrap();
+    let row = ui.laid_out(palette.child("rows").child(3_u64)).unwrap();
     ui.event(Event::PointerMoved([row[0] + 4.0, row[1] + 4.0]));
     ui.event(Event::Button {
         button: MouseButton::Right,
@@ -1718,7 +1755,7 @@ fn the_palette_opens_an_items_actions_on_command_k_or_a_right_click() {
     ui.event(typed("c"));
     build(&mut ui);
     assert_eq!(
-        ui.rect(palette.child("rows").child(0_u64)),
+        ui.laid_out(palette.child("rows").child(0_u64)),
         None,
         "a repeated item shows only while unfiltered"
     );
@@ -1734,7 +1771,8 @@ fn colour_grids_move_in_two_dimensions_and_choose_a_swatch_or_none() {
     let build = |ui: &mut Ui| {
         let mut chosen = None;
         frame(ui, |ui| {
-            chosen = popup::colors(ui, grid, BELOW, "Automatic", &swatches, 3);
+            let anchor = below(ui);
+            chosen = popup::colors(ui, grid, anchor, "Automatic", &swatches, 3);
         });
         chosen
     };
@@ -1755,7 +1793,7 @@ fn colour_grids_move_in_two_dimensions_and_choose_a_swatch_or_none() {
     for _ in 0..40 {
         build(&mut ui);
     }
-    let rect = ui.rect(grid.child(("cell", 0_usize))).unwrap();
+    let rect = ui.laid_out(grid.child(("cell", 0_usize))).unwrap();
     click(&mut ui, [rect[0] + 4.0, rect[1] + 4.0]);
     assert_eq!(build(&mut ui), Some(None));
 }
@@ -1767,7 +1805,8 @@ fn table_pickers_choose_columns_and_rows_by_keys_or_a_click() {
     let build = |ui: &mut Ui| {
         let mut chosen = None;
         frame(ui, |ui| {
-            chosen = popup::table_picker(ui, grid, BELOW, [4, 3]);
+            let anchor = below(ui);
+            chosen = popup::table_picker(ui, grid, anchor, [4, 3]);
         });
         chosen
     };
@@ -1789,7 +1828,7 @@ fn table_pickers_choose_columns_and_rows_by_keys_or_a_click() {
     for _ in 0..40 {
         build(&mut ui);
     }
-    let rect = ui.rect(grid.child(("cell", 5_usize))).unwrap();
+    let rect = ui.laid_out(grid.child(("cell", 5_usize))).unwrap();
     click(&mut ui, [rect[0] + 4.0, rect[1] + 4.0]);
     assert_eq!(build(&mut ui), Some([2, 2]));
 }
@@ -1804,7 +1843,7 @@ fn popups_opened_within_a_popup_stay_above_it() {
                 menu_id(),
                 Spec {
                     size: [px(100.0), px(100.0)],
-                    anchor: Some(BELOW),
+                    anchor: Some(Anchor::Point([20.0, 44.0])),
                     ..Spec::default()
                 },
             );
@@ -1812,13 +1851,8 @@ fn popups_opened_within_a_popup_stay_above_it() {
                 ui.open_popup(submenu);
             }
             ui.close();
-            popup::menu(
-                ui,
-                submenu,
-                Anchor::Right([100.0, 50.0, 120.0, 70.0]),
-                &items(),
-                None,
-            );
+            let anchor = Anchor::Right(spot(ui, [100.0, 50.0, 120.0, 70.0]));
+            popup::menu(ui, submenu, anchor, &items(), None);
         })
     };
     build(&mut ui, true);
@@ -1837,11 +1871,12 @@ fn a_submenu_opens_beside_its_row_once_the_pointer_rests_and_closes_with_its_cho
     let build = |ui: &mut Ui| {
         let mut chosen = None;
         frame(ui, |ui| {
-            chosen = popup::menu(ui, menu_id(), BELOW, &entries, None);
+            let anchor = below(ui);
+            chosen = popup::menu(ui, menu_id(), anchor, &entries, None);
             popup::submenus(ui, menu_id(), &entries, |item| {
                 (item == 1).then_some(submenu)
             });
-            popup::menu(ui, submenu, BELOW, &items(), None);
+            popup::menu(ui, submenu, anchor, &items(), None);
         });
         chosen
     };
@@ -1860,7 +1895,7 @@ fn a_submenu_opens_beside_its_row_once_the_pointer_rests_and_closes_with_its_cho
         build(&mut ui);
     }
     assert!(ui.popup_open(submenu), "once it rests");
-    let [menu, beside] = [menu_id(), submenu].map(|id| ui.rect(id).unwrap());
+    let [menu, beside] = [menu_id(), submenu].map(|id| ui.laid_out(id).unwrap());
     assert!(
         beside[0] >= menu[2] - 1.0,
         "beside the menu, not below the anchor"
@@ -1878,7 +1913,7 @@ fn a_submenu_opens_beside_its_row_once_the_pointer_rests_and_closes_with_its_cho
     assert_eq!(build(&mut ui), None, "a click opens it, not a choice");
     build(&mut ui);
     assert!(ui.popup_open(menu_id()) && ui.popup_open(submenu));
-    let first = ui.rect(submenu.child("rows").child(0_u64)).unwrap();
+    let first = ui.laid_out(submenu.child("rows").child(0_u64)).unwrap();
     click(&mut ui, [first[0] + 4.0, first[1] + 4.0]);
     build(&mut ui);
     assert!(
@@ -1967,7 +2002,7 @@ fn list_frame(
 }
 
 fn row_top(ui: &Ui, key: u64) -> Option<f32> {
-    ui.rect(list_id().child(key)).map(|rect| rect[1])
+    ui.laid_out(list_id().child(key)).map(|rect| rect[1])
 }
 
 /// Frames until the list's animations end.
@@ -2071,7 +2106,8 @@ fn a_menu_runs_to_the_window_edge_before_it_scrolls() {
         .collect();
     let build = |ui: &mut Ui, height: f32| {
         sized_frame(ui, [400.0, height], |ui| {
-            popup::menu(ui, menu_id(), BELOW, &items, None);
+            let anchor = below(ui);
+            popup::menu(ui, menu_id(), anchor, &items, None);
         })
     };
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
@@ -2080,9 +2116,9 @@ fn a_menu_runs_to_the_window_edge_before_it_scrolls() {
     for _ in 0..3 {
         build(&mut ui, 800.0);
     }
-    let bar = |ui: &Ui| ui.rect(menu_id().child("rows").child("bar"));
+    let bar = |ui: &Ui| ui.laid_out(menu_id().child("rows").child("bar"));
     assert!(bar(&ui).is_none(), "twenty rows fit a tall window whole");
-    assert!(ui.rect(menu_id().child("rows").child(19u64)).is_some());
+    assert!(ui.laid_out(menu_id().child("rows").child(19u64)).is_some());
     for _ in 0..3 {
         build(&mut ui, 300.0);
     }
@@ -2101,7 +2137,8 @@ fn a_long_menu_scrolls_by_dragging_its_thumb() {
         .collect();
     let build = |ui: &mut Ui| {
         frame(ui, |ui| {
-            popup::menu(ui, menu_id(), BELOW, &items, None);
+            let anchor = below(ui);
+            popup::menu(ui, menu_id(), anchor, &items, None);
         })
     };
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
@@ -2109,9 +2146,9 @@ fn a_long_menu_scrolls_by_dragging_its_thumb() {
     ui.open_popup(menu_id());
     build(&mut ui);
     build(&mut ui);
-    let thumb = ui.rect(menu_id().child("rows").child("bar")).unwrap();
+    let thumb = ui.laid_out(menu_id().child("rows").child("bar")).unwrap();
     let top = ui
-        .rect(menu_id().child("rows").child(0u64))
+        .laid_out(menu_id().child("rows").child(0u64))
         .map(|rect| rect[1]);
     let at = Instant::now();
     let x = (thumb[0] + thumb[2]) / 2.0;
@@ -2123,7 +2160,7 @@ fn a_long_menu_scrolls_by_dragging_its_thumb() {
     build(&mut ui);
     assert!(ui.popup_open(menu_id()));
     assert_ne!(
-        ui.rect(menu_id().child("rows").child(0u64))
+        ui.laid_out(menu_id().child("rows").child(0u64))
             .map(|rect| rect[1]),
         top
     );
@@ -2141,7 +2178,8 @@ fn a_long_menu_fades_the_ends_its_rows_are_cut_at_and_its_thumb_reaches_its_end(
         .collect();
     let build = |ui: &mut Ui| {
         frame(ui, |ui| {
-            popup::menu(ui, menu_id(), BELOW, &items, None);
+            let anchor = below(ui);
+            popup::menu(ui, menu_id(), anchor, &items, None);
         })
     };
     let rows = menu_id().child("rows");
@@ -2152,7 +2190,7 @@ fn a_long_menu_fades_the_ends_its_rows_are_cut_at_and_its_thumb_reaches_its_end(
     build(&mut ui);
     build(&mut ui);
     assert_eq!(fade(&ui), [0.0, 12.0], "cut only at the bottom");
-    let thumb = ui.rect(rows.child("bar")).unwrap();
+    let thumb = ui.laid_out(rows.child("bar")).unwrap();
     let x = (thumb[0] + thumb[2]) / 2.0;
     ui.event(Event::PointerMoved([x, thumb[1] + 2.0]));
     press(&mut ui, Instant::now(), true);
@@ -2161,8 +2199,8 @@ fn a_long_menu_fades_the_ends_its_rows_are_cut_at_and_its_thumb_reaches_its_end(
     build(&mut ui);
     build(&mut ui);
     assert_eq!(fade(&ui), [12.0, 0.0], "cut only at the top");
-    let list = ui.rect(rows).unwrap();
-    let thumb = ui.rect(rows.child("bar")).unwrap();
+    let list = ui.laid_out(rows).unwrap();
+    let thumb = ui.laid_out(rows.child("bar")).unwrap();
     assert_eq!(
         thumb[3],
         list[3] - 4.0,
@@ -2187,7 +2225,8 @@ fn a_command_menu_opens_at_its_top_and_a_picker_on_its_current_value() {
             .collect();
         let build = |ui: &mut Ui| {
             frame(ui, |ui| {
-                popup::menu(ui, menu_id(), BELOW, &items, None);
+                let anchor = below(ui);
+                popup::menu(ui, menu_id(), anchor, &items, None);
             })
         };
         let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
@@ -2197,8 +2236,8 @@ fn a_command_menu_opens_at_its_top_and_a_picker_on_its_current_value() {
             build(&mut ui);
         }
         assert_eq!(ui.popups[0].highlight, picker.then_some(30));
-        let top = ui.rect(rows).unwrap()[1];
-        let first = ui.rect(rows.child(0u64)).map(|rect| rect[1]);
+        let top = ui.laid_out(rows).unwrap()[1];
+        let first = ui.laid_out(rows.child(0u64)).map(|rect| rect[1]);
         assert_eq!(first == Some(top), !picker, "{first:?} under {top}");
     }
 }
@@ -2347,7 +2386,8 @@ fn a_filtered_menu_shows_its_new_results_at_once_from_the_top() {
     let fonts = fonts();
     let build = |ui: &mut Ui| {
         frame(ui, |ui| {
-            popup::menu(ui, menu_id(), BELOW, &fonts, Some("Font"));
+            let anchor = below(ui);
+            popup::menu(ui, menu_id(), anchor, &fonts, Some("Font"));
         })
     };
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
@@ -2358,7 +2398,7 @@ fn a_filtered_menu_shows_its_new_results_at_once_from_the_top() {
     }
     let results = menu_id().child("rows");
     let height = |ui: &Ui| {
-        let rect = ui.rect(results).unwrap();
+        let rect = ui.laid_out(results).unwrap();
         rect[3] - rect[1]
     };
     assert!(
@@ -2373,15 +2413,18 @@ fn a_filtered_menu_shows_its_new_results_at_once_from_the_top() {
     for query in ["t", "nr"] {
         ui.event(typed(query));
         build(&mut ui);
-        let shown = [ui.rect(results), ui.rect(results.child(42_u64))];
+        let shown = [ui.laid_out(results), ui.laid_out(results.child(42_u64))];
         build(&mut ui);
         assert!(!ui.wants_frame(), "nothing eases");
-        assert_eq!([ui.rect(results), ui.rect(results.child(42_u64))], shown);
+        assert_eq!(
+            [ui.laid_out(results), ui.laid_out(results.child(42_u64))],
+            shown
+        );
     }
-    let row = ui.rect(results.child(42_u64)).unwrap();
+    let row = ui.laid_out(results.child(42_u64)).unwrap();
     assert_eq!(
         row[1],
-        ui.rect(results).unwrap()[1],
+        ui.laid_out(results).unwrap()[1],
         "Times New Roman at the top"
     );
     assert_eq!(height(&ui), popup::MENU_ROW);
@@ -2599,7 +2642,7 @@ fn a_dragged_box_lands_past_the_middles_it_crossed_and_the_rest_slide_aside() {
 
 /// Clicks the middle of `id`'s box as laid out now, where it must be hit.
 fn click_box(ui: &mut Ui, id: Id) {
-    let rect = ui.rect(id).unwrap();
+    let rect = ui.laid_out(id).unwrap();
     let middle = [(rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0];
     assert_eq!(
         ui.box_at(middle),
@@ -2662,7 +2705,7 @@ fn dialog_frame(ui: &mut Ui, text: &mut String) -> Reported {
             text,
             ..popup::Item::default()
         });
-        let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
+        let anchor = Anchor::Below(combo);
         reported.scheme = popup::menu(ui, Id::ROOT.child("schemes"), anchor, &items, None);
         ui.close();
     });
@@ -2722,8 +2765,7 @@ fn a_combo_s_field_widens_over_rows_laid_out_where_they_end_and_its_rows_take_cl
             );
             shell::combo(ui, "combo", "Font", "Calibri", 120.0, menu_id(), true);
             ui.close();
-            let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
-            chosen = popup::menu(ui, menu_id(), anchor, &fonts, Some("Font"));
+            chosen = popup::menu(ui, menu_id(), Anchor::Over(combo), &fonts, Some("Font"));
         });
         chosen
     };
@@ -2731,12 +2773,12 @@ fn a_combo_s_field_widens_over_rows_laid_out_where_they_end_and_its_rows_take_cl
     ui.open_popup(menu_id());
     build(&mut ui);
     let field = menu_id().child("filter");
-    let [box_rect, first] = [ui.rect(combo).unwrap(), ui.rect(field).unwrap()];
+    let [box_rect, first] = [ui.laid_out(combo).unwrap(), ui.laid_out(field).unwrap()];
     assert_eq!(first[..2], box_rect[..2], "the field starts on the box");
     assert!(first[2] - first[0] < box_rect[2] - box_rect[0] + 20.0);
-    let shown = ui.rect(menu_id()).unwrap();
+    let shown = ui.laid_out(menu_id()).unwrap();
     let row = menu_id().child("rows").child(3_u64);
-    let opening = ui.rect(row).unwrap();
+    let opening = ui.laid_out(row).unwrap();
     assert!(
         opening[2] > shown[2],
         "the rows lie out past the popup as it opens"
@@ -2770,9 +2812,9 @@ fn a_combo_s_field_widens_over_rows_laid_out_where_they_end_and_its_rows_take_cl
         build(&mut ui);
     }
     assert!(!ui.wants_frame());
-    let [panel, last] = [ui.rect(menu_id()).unwrap(), ui.rect(field).unwrap()];
+    let [panel, last] = [ui.laid_out(menu_id()).unwrap(), ui.laid_out(field).unwrap()];
     assert_eq!(last[2], panel[2] - 4.0, "the field widens across the popup");
-    assert_eq!(ui.rect(row), Some(opening), "the rows never move");
+    assert_eq!(ui.laid_out(row), Some(opening), "the rows never move");
     click_box(&mut ui, menu_id().child("rows").child(3_u64));
     assert_eq!(build(&mut ui), Some(3));
 }
@@ -2781,9 +2823,9 @@ fn a_combo_s_field_widens_over_rows_laid_out_where_they_end_and_its_rows_take_cl
 fn a_popup_over_a_box_by_the_window_s_edge_widens_away_from_it() {
     let mut ui = Ui::new(Theme::light(), DOUBLE_CLICK);
     let fonts = fonts();
-    let anchor = Anchor::Over([330.0, 10.0, 390.0, 30.0]);
     let build = |ui: &mut Ui| {
         frame(ui, |ui| {
+            let anchor = Anchor::Over(spot(ui, [330.0, 10.0, 390.0, 30.0]));
             _ = popup::menu(ui, menu_id(), anchor, &fonts, Some("Font"))
         })
     };
@@ -2791,11 +2833,12 @@ fn a_popup_over_a_box_by_the_window_s_edge_widens_away_from_it() {
     ui.open_popup(menu_id());
     build(&mut ui);
     let field = menu_id().child("filter");
-    let edges =
-        |ui: &Ui| [ui.rect(field).unwrap(), ui.rect(menu_id()).unwrap()].map(|rect| rect[2]);
-    let first = ui.rect(field).unwrap();
+    let edges = |ui: &Ui| {
+        [ui.laid_out(field).unwrap(), ui.laid_out(menu_id()).unwrap()].map(|rect| rect[2])
+    };
+    let first = ui.laid_out(field).unwrap();
     let row = menu_id().child("rows").child(3_u64);
-    let opening = ui.rect(row).unwrap();
+    let opening = ui.laid_out(row).unwrap();
     assert_eq!(
         edges(&ui),
         [390.0, 394.0],
@@ -2807,10 +2850,10 @@ fn a_popup_over_a_box_by_the_window_s_edge_widens_away_from_it() {
     }
     assert_eq!(edges(&ui), [390.0, 394.0], "the trailing edges hold");
     assert!(
-        ui.rect(field).unwrap()[0] < first[0] - 30.0,
+        ui.laid_out(field).unwrap()[0] < first[0] - 30.0,
         "the field widens leftward"
     );
-    assert_eq!(ui.rect(row), Some(opening), "the rows never move");
+    assert_eq!(ui.laid_out(row), Some(opening), "the rows never move");
 }
 
 fn built(ui: &Ui, id: Id) -> &Built {
@@ -2835,7 +2878,8 @@ fn split_frame(ui: &mut Ui) -> Signal {
             text: "Item",
             ..Default::default()
         };
-        popup::menu(ui, split_menu(), BELOW, &[item], None);
+        let anchor = below(ui);
+        popup::menu(ui, split_menu(), anchor, &[item], None);
         ui.close();
     });
     signal
@@ -2867,24 +2911,24 @@ fn a_split_button_fills_its_button_alone_and_outlines_both_halves_from_its_arrow
             split_frame(ui);
         }
     };
-    ui.event(Event::PointerMoved(center(ui.rect(button).unwrap())));
+    ui.event(Event::PointerMoved(center(ui.laid_out(button).unwrap())));
     settle(&mut ui);
     // The fill rounds past the button's clip, so it meets the arrow square.
-    let [left, top, right, bottom] = ui.rect(button).unwrap();
+    let [left, top, right, bottom] = ui.laid_out(button).unwrap();
     assert!(built(&ui, face).fill.is_some());
-    assert_eq!(ui.rect(face), Some([left, top, right + 4.0, bottom]));
+    assert_eq!(ui.laid_out(face), Some([left, top, right + 4.0, bottom]));
     assert!(built(&ui, button).flags.contains(Flags::CLIP));
     assert!(built(&ui, ring).border.is_none());
-    ui.event(Event::PointerMoved(center(ui.rect(arrow).unwrap())));
+    ui.event(Event::PointerMoved(center(ui.laid_out(arrow).unwrap())));
     settle(&mut ui);
     assert!(built(&ui, face).fill.is_none());
     assert!(built(&ui, ring).border.is_some());
     assert_eq!(
-        ui.rect(ring),
-        Some([left, top, ui.rect(arrow).unwrap()[2], bottom])
+        ui.laid_out(ring),
+        Some([left, top, ui.laid_out(arrow).unwrap()[2], bottom])
     );
     // The arrow opens the menu, and the outline stays while it is open.
-    let point = center(ui.rect(arrow).unwrap());
+    let point = center(ui.laid_out(arrow).unwrap());
     click(&mut ui, point);
     assert!(!split_frame(&mut ui).clicked);
     assert!(ui.popup_open(split_menu()));
@@ -2893,7 +2937,7 @@ fn a_split_button_fills_its_button_alone_and_outlines_both_halves_from_its_arrow
     assert!(built(&ui, ring).border.is_some());
     ui.close_popup(split_menu());
     settle(&mut ui);
-    let point = center(ui.rect(button).unwrap());
+    let point = center(ui.laid_out(button).unwrap());
     click(&mut ui, point);
     assert!(split_frame(&mut ui).clicked);
     assert!(!ui.popup_open(split_menu()));
@@ -2932,7 +2976,7 @@ fn a_menu_button_opens_its_menu_with_the_icons_under_its_own() {
         });
     };
     build(&mut ui);
-    let button = ui.rect(Id::ROOT.child("bar").child("align")).unwrap();
+    let button = ui.laid_out(Id::ROOT.child("bar").child("align")).unwrap();
     // One target: the arrow opens the menu as the icon does.
     click(&mut ui, [button[2] - 3.0, center(button)[1]]);
     for _ in 0..40 {
@@ -2940,7 +2984,7 @@ fn a_menu_button_opens_its_menu_with_the_icons_under_its_own() {
     }
     assert!(ui.popup_open(menu_id()));
     let icon = ui
-        .rect(
+        .laid_out(
             menu_id()
                 .child("rows")
                 .child(0_usize)
@@ -2965,7 +3009,8 @@ fn galleries_choose_across_their_groups_by_keys_and_clicks() {
     let build = |ui: &mut Ui| {
         let mut chosen = None;
         frame(ui, |ui| {
-            chosen = popup::gallery(ui, gallery, BELOW, &groups, &[3], |ui, index| {
+            let anchor = below(ui);
+            chosen = popup::gallery(ui, gallery, anchor, &groups, &[3], |ui, index| {
                 ui.leaf(
                     "label",
                     Spec {
@@ -2990,7 +3035,7 @@ fn galleries_choose_across_their_groups_by_keys_and_clicks() {
     for _ in 0..40 {
         build(&mut ui);
     }
-    let cell = |index: usize| ui.rect(gallery.child(("cell", index))).unwrap();
+    let cell = |index: usize| ui.laid_out(gallery.child(("cell", index))).unwrap();
     // The library starts a row of its own under its heading.
     assert_eq!(cell(2)[0], cell(0)[0]);
     assert!(cell(2)[1] > cell(0)[3]);
@@ -3007,7 +3052,7 @@ fn desktop_menus_cut_or_fade_without_growing() {
             Layer::Custom { .. } => None,
         })
     };
-    let at = Anchor::Point([50.0, 50.0]);
+    let at = |_: &mut Ui| Anchor::Point([50.0, 50.0]);
     let styled = |motion| {
         let mut theme = Theme::light();
         theme.desktop_menu = Some(Menu {
@@ -3066,7 +3111,9 @@ fn tab_row(ui: &mut Ui, active: usize) -> Id {
                 ..Spec::default()
             },
         );
-        shell::section_tabs(ui, row, &tabs, active, None, None, &section, 28.0, [0.0; 4]);
+        shell::section_tabs(
+            ui, row, &tabs, active, None, None, None, &section, 28.0, [0.0; 4],
+        );
         ui.close();
     });
     row
@@ -3085,10 +3132,10 @@ fn settle_tabs(ui: &mut Ui, active: usize) -> Id {
 fn overflowing_tabs_scroll_the_open_one_into_view() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let row = settle_tabs(&mut ui, 0);
-    let view = ui.rect(row).unwrap();
+    let view = ui.laid_out(row).unwrap();
     assert_eq!(view[2] - view[0], 200.0);
     let row = settle_tabs(&mut ui, 11);
-    let last = ui.rect(shell::tab_id(row, 11)).unwrap();
+    let last = ui.laid_out(shell::tab_id(row, 11)).unwrap();
     assert!(
         last[0] >= view[0] && last[2] <= view[2],
         "{last:?} in {view:?}"
@@ -3099,17 +3146,17 @@ fn overflowing_tabs_scroll_the_open_one_into_view() {
 fn the_wheel_scrolls_overflowing_tabs_sideways_either_way_it_turns() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     let row = settle_tabs(&mut ui, 0);
-    let first = ui.rect(shell::tab_id(row, 0)).unwrap()[0];
+    let first = ui.laid_out(shell::tab_id(row, 0)).unwrap()[0];
     ui.event(Event::PointerMoved([100.0, 14.0]));
     ui.event(Event::Wheel([0.0, -40.0]));
     tab_row(&mut ui, 0);
     tab_row(&mut ui, 0);
-    let scrolled = ui.rect(shell::tab_id(row, 0)).unwrap()[0];
+    let scrolled = ui.laid_out(shell::tab_id(row, 0)).unwrap()[0];
     assert_eq!(first - scrolled, 40.0, "at once, as on the page");
     ui.event(Event::Wheel([30.0, 0.0]));
     tab_row(&mut ui, 0);
     tab_row(&mut ui, 0);
-    let back = ui.rect(shell::tab_id(row, 0)).unwrap()[0];
+    let back = ui.laid_out(shell::tab_id(row, 0)).unwrap()[0];
     assert_eq!(back - scrolled, 30.0);
 }
 
@@ -3120,10 +3167,11 @@ fn a_colour_picker_applies_its_colour_and_keeps_it_through_hsl() {
     let build = |ui: &mut Ui| {
         let mut chosen = None;
         frame(ui, |ui| {
+            let anchor = below(ui);
             chosen = popup::color_picker(
                 ui,
                 picker,
-                BELOW,
+                anchor,
                 "Custom Color",
                 [0xd4, 0xf9, 0xf2],
                 |_| [1.0; 4],
@@ -3246,7 +3294,7 @@ fn a_loose_dialog_fits_its_contents_to_the_window_and_its_side_stretches_to_its_
             ui.close();
         });
     };
-    let height = |ui: &Ui, id: Id| ui.rect(id).map(|rect| rect[3] - rect[1]).unwrap();
+    let height = |ui: &Ui, id: Id| ui.laid_out(id).map(|rect| rect[3] - rect[1]).unwrap();
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     build(&mut ui, 2);
     ui.open_popup(dialog);
@@ -3271,7 +3319,7 @@ fn a_loose_dialog_fits_its_contents_to_the_window_and_its_side_stretches_to_its_
     for _ in 0..60 {
         build(&mut ui, 20);
     }
-    let [top, row] = [list, list.child(10_usize)].map(|id| ui.rect(id).unwrap()[1]);
+    let [top, row] = [list, list.child(10_usize)].map(|id| ui.laid_out(id).unwrap()[1]);
     assert!(
         (row - top).abs() < 0.5,
         "row 10 at {row}, the list's top at {top}"
@@ -3316,7 +3364,7 @@ fn a_box_has_no_rectangle_until_it_is_first_laid_out() {
                 ..Spec::default()
             },
         );
-        ui.rect(Id::ROOT.child("new"))
+        ui.laid_out(Id::ROOT.child("new"))
     };
     let mut seen = Vec::new();
     frame(&mut ui, |ui| seen.push(build(ui)));

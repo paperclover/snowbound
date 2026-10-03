@@ -7,7 +7,7 @@ use crate::{State, media, platform};
 use canvas::recording::{RATE, video};
 use onestore::page::Attachment;
 use std::{error::Error, ops::Range, path::Path, sync::Arc, time::Duration};
-use ui::{Axis, Flags, Spec, Theme, children, fit, px};
+use ui::{Axis, Flags, Spec, Theme, children, fill, fit, px};
 use winit::keyboard::NamedKey;
 
 /// What records or plays now.
@@ -273,11 +273,7 @@ impl State {
 
     /// The transport over the page's foot while something records or plays: OneNote's
     /// Recording and Playback tabs, with a video's pictures above.
-    pub(crate) fn transport(
-        &mut self,
-        theme: &Theme,
-        page: [f32; 4],
-    ) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn transport(&mut self, theme: &Theme) -> Result<(), Box<dyn Error>> {
         let row = theme.font_size * 2.0;
         if matches!(self.media, Media::Saving { .. }) {
             self.stop_recording(false)?;
@@ -354,13 +350,30 @@ impl State {
             .as_ref()
             .map_or(0.0, |image| image.size()[1] as f32 + 6.0);
         let height = row + 16.0 + picture_height;
+        // In the page's lower leading corner.
+        self.ui.open(
+            "corner",
+            Spec {
+                flags: Flags::FLOAT,
+                axis: Axis::Y,
+                size: [fill(), fill()],
+                pad: [16.0, 16.0],
+                ..Spec::default()
+            },
+        );
+        self.ui.leaf(
+            "room",
+            Spec {
+                size: [px(0.0), fill()],
+                ..Spec::default()
+            },
+        );
         self.ui.open(
             "transport",
             Spec {
-                flags: Flags::FLOAT | Flags::CLICKABLE,
+                flags: Flags::CLICKABLE,
                 axis: Axis::Y,
                 size: [children(), px(height)],
-                position: [16.0, page[3] - page[1] - height - 16.0],
                 fill: Some(theme.popup),
                 shadow: Some(theme.shadow),
                 radius: 8.0,
@@ -433,6 +446,7 @@ impl State {
         if !saving && ui::button(&mut self.ui, "stop", "Stop").clicked {
             chosen = Some(Transport::Stop);
         }
+        self.ui.close();
         self.ui.close();
         self.ui.close();
         if let Some(at) = seek

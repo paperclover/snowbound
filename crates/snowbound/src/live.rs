@@ -676,11 +676,8 @@ impl State {
                     ..ui::popup::Item::default()
                 })
                 .collect();
-            let rect = self.ui.rect(self.ui.id("more"));
-            if let Some(rect) = rect
-                && let Some(index) =
-                    ui::popup::menu(&mut self.ui, menu, ui::Anchor::Below(rect), &items, None)
-            {
+            let anchor = ui::Anchor::Below(self.ui.id("more"));
+            if let Some(index) = ui::popup::menu(&mut self.ui, menu, anchor, &items, None) {
                 chosen = Some(peers[index].hello.peer);
             }
         }
@@ -874,7 +871,7 @@ impl State {
         let Some(session) = &self.session else {
             return;
         };
-        let Some([left, top, right, bottom]) = self.ui.rect(page()) else {
+        let Some([left, top, right, bottom]) = self.ui.laid_out(page()) else {
             return;
         };
         let here = (section(session), Some(session.space.into()));
@@ -998,7 +995,7 @@ impl State {
         [x0, y0, y1]: [f32; 3],
         selection: &[[f32; 4]],
     ) {
-        let Some([left, top, ..]) = self.ui.rect(page()) else {
+        let Some([left, top, ..]) = self.ui.laid_out(page()) else {
             return;
         };
         let id = peer.hello.peer;
