@@ -60,6 +60,10 @@ serde_json = "1"
 tempfile = "3"
 
 [[example]]
+name = "live_latency"
+required-features = ["live"]
+
+[[example]]
 name = "smb_offline_client"
 required-features = ["smb"]
 

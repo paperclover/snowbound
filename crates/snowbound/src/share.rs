@@ -62,6 +62,14 @@ enum Status {
 fn refusal(refusal: &Refusal) -> String {
     match refusal {
         Refusal::Malformed => "Check the code. It looks like 7KQ-4MZ-9XR.".into(),
+        Refusal::Version { theirs_newer: true } => {
+            "The person sharing has a newer Snowbound. Update Snowbound, then try again.".into()
+        }
+        Refusal::Version {
+            theirs_newer: false,
+        } => "The person sharing has an older \
+                                                     Snowbound. Ask them to update it."
+            .into(),
         Refusal::Wrong => "That code or password doesn’t open a notebook. Check it with the \
                            person sharing."
             .into(),

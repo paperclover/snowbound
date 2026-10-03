@@ -451,18 +451,21 @@ impl State {
         });
     }
 
-    /// `host` shares the notebook at `location`: its folder's changes reach its guests.
+    /// `host` shares the notebook at `location`: its folder's changes reach its guests, and
+    /// theirs its sections, at once.
     fn hosting(&mut self, location: String, host: Arc<Host>) {
         if let Some(background) = self
             .library_at(&location)
             .and_then(|library| library.background.clone())
         {
-            let host = Arc::downgrade(&host);
+            background.set_settle(notebook::live::share::SETTLE);
+            let shared = Arc::downgrade(&host);
             background.on_touched(Some(Box::new(move |paths| {
-                if let Some(host) = host.upgrade() {
+                if let Some(host) = shared.upgrade() {
                     host.touched(paths);
                 }
             })));
+            host.on_changed(Box::new(move |paths| background.touched(paths)));
         }
         self.peers.hosts.insert(location, host);
     }

@@ -91,6 +91,8 @@ struct Watched {
     lost: bool,
     /// The current connection's watch reports the folder's changes.
     reported: bool,
+    /// How long a report settles, where not `SETTLE` (`Background::set_settle`).
+    settle: Option<Duration>,
 }
 
 struct Watch {
@@ -356,7 +358,7 @@ impl Background {
         guest: Arc<crate::live::share::Guest>,
         notify: impl Fn() + Send + 'static,
     ) -> Result<Self> {
-        Self::start(
+        let background = Self::start(
             true,
             move |reports| {
                 guest.watch(reports)?;
@@ -366,7 +368,17 @@ impl Background {
                 Ok(((bind, list), true))
             },
             notify,
-        )
+        )?;
+        background.set_settle(crate::live::share::SETTLE);
+        Ok(background)
+    }
+
+    /// Checks what a report names after `settle` rather than a second, where reports come
+    /// one to a commit, as a Live Share host sends them.
+    pub fn set_settle(&self, settle: Duration) {
+        if let Ok(mut watched) = self.0.watched.lock() {
+            watched.settle = Some(settle);
+        }
     }
 
     /// Has `listener` hear every report of changed paths from now on, as a Live Share host
@@ -638,6 +650,7 @@ impl Watched {
     }
 
     fn touched(&mut self, paths: &[String], now: Instant) {
+        let settled = now + self.settle.unwrap_or(SETTLE);
         for path in paths {
             let path = path.trim_matches('/');
             let section = self
@@ -647,16 +660,13 @@ impl Watched {
             match section {
                 Some(index) => {
                     let watch = &mut self.sections[index];
-                    watch.due = watch.due.min(now + SETTLE);
+                    watch.due = watch.due.min(settled);
                     watch.current = false;
                     watch.reported = true;
                 }
                 None if self.sections.iter().any(|watch| within(&watch.path, path)) => {
                     self.folders.insert(path.to_owned());
-                    self.relist = Some(
-                        self.relist
-                            .map_or(now + SETTLE, |due| due.min(now + SETTLE)),
-                    );
+                    self.relist = Some(self.relist.map_or(settled, |due| due.min(settled)));
                 }
                 None => {}
             }

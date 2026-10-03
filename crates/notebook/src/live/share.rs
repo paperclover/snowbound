@@ -9,7 +9,9 @@
 
 use super::{
     Event, Hello, Line, Live, Peer, Presence, Reach, Relayed, Room,
-    wire::{self, Failure, Reply, Request, Touched, Welcome, WireEntry, WireStamp, kind},
+    wire::{
+        self, Delta, Failure, Reply, Request, Touched, Welcome, WireEntry, WireStamp, Written, kind,
+    },
 };
 use crate::{Error, Result, background::Reports, discover, session::Storage};
 use onestore::{CommitError, CommitState, RevisionIndex, Stamp, Store, Transaction};
@@ -37,8 +39,12 @@ const LIMIT: usize = 256 << 20;
 /// Snapshots of files being read, per guest, and how long one is kept unread.
 const SNAPSHOTS: usize = 8;
 const SNAPSHOT_AGE: Duration = Duration::from_secs(120);
-/// Sections whose image a host keeps to check guests' commits on.
+/// Sections whose image a host keeps to check guests' commits on and tell them what changed,
+/// and a guest keeps to take those changes on without reading.
 const IMAGES: usize = 4;
+/// How long a report of a change settles in a guest's background: its host reports each
+/// commit once, at once.
+pub const SETTLE: Duration = Duration::from_millis(20);
 /// What a host says leaving as it stops sharing.
 const STOPPED: &str = "stopped";
 /// What a host says hanging up on a guest that asks too much too fast.
@@ -95,6 +101,9 @@ pub fn location(share: &[u8; 16]) -> String {
 pub enum Refusal {
     /// Not a code, or one mistyped, which spends none of the relay's tries.
     Malformed,
+    /// The person sharing runs a Snowbound of another Live Share version: the newer one's
+    /// `true` where it is theirs, so this one should update.
+    Version { theirs_newer: bool },
     /// The code's secret or password is wrong.
     Wrong,
     /// No one shares with the code's number now.
@@ -148,6 +157,11 @@ pub fn join(
     loop {
         if let Ok(welcome) = welcome.try_recv() {
             return Ok(welcome);
+        }
+        if let Some(version) = live.other_version() {
+            return Err(Refusal::Version {
+                theirs_newer: version > wire::VERSION,
+            });
         }
         if live.failed() > 0 {
             return Err(Refusal::Wrong);
@@ -209,6 +223,7 @@ impl Host {
             snapshots: Mutex::default(),
             puts: Mutex::default(),
             guests: Mutex::default(),
+            host: Mutex::default(),
         });
         let serving = Hello {
             serves: Some(sharing.share),
@@ -296,8 +311,18 @@ impl Host {
         }
     }
 
-    /// Tells every guest the files at these catalog paths changed.
+    /// Has `listener` hear the catalog paths guests change from now on, sooner than a watch
+    /// on the notebook's folder would.
+    pub fn on_changed(&self, listener: crate::session::Listener) {
+        *self.served.host.lock().unwrap() = Some(listener);
+    }
+
+    /// Tells every guest the files at these catalog paths changed, with what changed in the
+    /// sections a guest read lately.
     pub fn touched(&self, paths: &[String]) {
+        for path in paths {
+            self.served.changed_here(path);
+        }
         self.served.tell(paths);
     }
 
@@ -355,6 +380,8 @@ struct Served {
     /// Bytes a later request carries, by guest and upload.
     puts: Mutex<ByGuest<Vec<u8>>>,
     guests: Mutex<BTreeMap<[u8; 16], Admitted>>,
+    /// Hears the paths guests changed, as the host's own notebook should.
+    host: Mutex<Option<crate::session::Listener>>,
 }
 
 /// A guest as its host serves it: the line to it, its requests waiting for its workers, and
@@ -451,6 +478,14 @@ impl Served {
             .retain(|(guest, _), _| guest != peer);
     }
 
+    /// Tells every guest, and the host, that a guest changed the files at `paths`.
+    fn changed(&self, paths: &[String]) {
+        self.tell(paths);
+        if let Some(listener) = &*self.host.lock().unwrap() {
+            listener(paths);
+        }
+    }
+
     /// Tells every guest the files at `paths` changed.
     fn tell(&self, paths: &[String]) {
         let touched = Touched {
@@ -540,7 +575,7 @@ impl Served {
             kind::COMMIT => {
                 let transaction = Transaction::from_bytes(&self.carried(peer, &request)?)?;
                 self.commit(path, &transaction)?;
-                self.tell(&[path.to_owned()]);
+                self.changed(&[path.to_owned()]);
                 done
             }
             kind::CONFIRM => {
@@ -549,12 +584,12 @@ impl Served {
             }
             kind::CREATE => {
                 self.storage.create(path, &self.carried(peer, &request)?)?;
-                self.tell(&[folder(path)]);
+                self.changed(&[folder(path)]);
                 done
             }
             kind::CREATE_DIRECTORY => {
                 self.storage.create_directory(path)?;
-                self.tell(&[folder(path)]);
+                self.changed(&[folder(path)]);
                 done
             }
             kind::HIDE => {
@@ -568,12 +603,12 @@ impl Served {
                 } else {
                     self.storage.replace(path, to)?;
                 }
-                self.tell(&[folder(path), folder(to)]);
+                self.changed(&[folder(path), folder(to)]);
                 done
             }
             kind::DELETE => {
                 self.storage.delete(path)?;
-                self.tell(&[folder(path)]);
+                self.changed(&[folder(path)]);
                 done
             }
             kind::PLACE => {
@@ -582,12 +617,12 @@ impl Served {
                     .ok_or_else(|| refused(io::ErrorKind::InvalidInput, "No ancestor"))?;
                 let name = request.name.as_deref().unwrap_or_default();
                 self.storage.place(path, ancestor, name)?;
-                self.tell(&[path.to_owned()]);
+                self.changed(&[path.to_owned()]);
                 done
             }
             kind::SUPERSEDE => {
                 self.storage.supersede(path, &stamp()?, to()?)?;
-                self.tell(&[folder(path)]);
+                self.changed(&[folder(path)]);
                 done
             }
             _ => return Err(refused(io::ErrorKind::Unsupported, "An unknown request")),
@@ -716,9 +751,103 @@ impl Served {
             )));
         }
         self.storage.commit(path, transaction)?;
+        self.tell_delta(path, &image, &next);
         self.keep(path, Arc::new(next));
         Ok(())
     }
+
+    /// Tells every guest what a commit changed in the section at `path`, from `before` to
+    /// `after`, where that is small enough to send.
+    fn tell_delta(&self, path: &str, before: &[u8], after: &[u8]) {
+        let (Ok(base), Some(writes)) = (Stamp::of(before), delta(before, after)) else {
+            return;
+        };
+        let delta = Delta {
+            path: path.to_owned(),
+            base: (&base).into(),
+            length: after.len() as u64,
+            writes,
+        };
+        for guest in self.guests.lock().unwrap().values() {
+            let _ = guest.line.send(kind::DELTA, &delta);
+        }
+    }
+
+    /// The host's own change to the section at `path`, which guests hear as a delta where
+    /// the host kept the image before it.
+    fn changed_here(&self, path: &str) {
+        let kept = self
+            .images
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|(held, at, image)| (held == path).then(|| (at.clone(), Arc::clone(image))));
+        let Some((at, before)) = kept else {
+            return;
+        };
+        if self.storage.stamp(path).is_ok_and(|now| now == at) {
+            return;
+        }
+        if let Ok(after) = self.storage.read(path) {
+            self.tell_delta(path, &before, &after);
+            self.keep(path, Arc::new(after));
+        }
+    }
+}
+
+/// The writes that make `after` of `before`, a commit's appended bytes, patches and header,
+/// where they are much less than `after` itself.
+fn delta(before: &[u8], after: &[u8]) -> Option<Vec<Written>> {
+    const BLOCK: usize = 4096;
+    if before.len() < 1024 || after.len() < before.len() {
+        return None;
+    }
+    let mut writes = vec![Written {
+        offset: 0,
+        bytes: after[..1024].to_vec(),
+    }];
+    let mut at = 1024;
+    while at < before.len() {
+        let end = (at + BLOCK).min(before.len());
+        if before[at..end] != after[at..end] {
+            let first = (at..end).find(|&i| before[i] != after[i]).unwrap_or(at);
+            let last = (at..end).rfind(|&i| before[i] != after[i]).unwrap_or(first) + 1;
+            match writes.last_mut() {
+                Some(write) if write.offset as usize + write.bytes.len() + 64 >= first => {
+                    let from = write.offset as usize;
+                    write.bytes = after[from..last].to_vec();
+                }
+                _ => writes.push(Written {
+                    offset: first as u64,
+                    bytes: after[first..last].to_vec(),
+                }),
+            }
+        }
+        at = end;
+    }
+    if after.len() > before.len() {
+        writes.push(Written {
+            offset: before.len() as u64,
+            bytes: after[before.len()..].to_vec(),
+        });
+    }
+    let sent: usize = writes.iter().map(|write| write.bytes.len()).sum();
+    (sent <= after.len() / 2).then_some(writes)
+}
+
+/// `image` with `writes`, `length` long: none where a write falls outside it.
+fn written(image: &[u8], length: u64, writes: &[Written]) -> Option<Vec<u8>> {
+    let length = usize::try_from(length)
+        .ok()
+        .filter(|length| *length >= image.len())?;
+    let mut next = image.to_vec();
+    next.resize(length, 0);
+    for write in writes {
+        let offset = usize::try_from(write.offset).ok()?;
+        next.get_mut(offset..offset.checked_add(write.bytes.len())?)?
+            .copy_from_slice(&write.bytes);
+    }
+    Some(next)
 }
 
 fn within(folder: &str, name: &str) -> String {
@@ -846,6 +975,8 @@ struct Inner {
     stopped: AtomicBool,
     /// Bytes of chunks asked for and not yet given.
     asked: (Mutex<usize>, Condvar),
+    /// The sections read lately, kept as the host's deltas change them, newest first.
+    images: Mutex<Vec<(String, Arc<Vec<u8>>)>>,
 }
 
 impl Guest {
@@ -867,6 +998,7 @@ impl Guest {
             watch: Mutex::default(),
             stopped: AtomicBool::new(false),
             asked: Default::default(),
+            images: Mutex::default(),
         });
         let heard = Arc::clone(&inner);
         let live = Live::start(me, &Room::Notebook(secret), reach, relay, move |event| {
@@ -1026,7 +1158,17 @@ impl Guest {
             image.extend_from_slice(&chunk);
         }
         image.truncate(length);
+        if kind == kind::READ {
+            self.inner.hold(path, Arc::new(image.clone()));
+        }
         Ok(image)
+    }
+
+    /// The image of the section at `path` with stamp `stamp`, where this guest holds it.
+    fn held(&self, path: &str, stamp: &Stamp) -> Option<Vec<u8>> {
+        let images = self.inner.images.lock().unwrap();
+        let (_, image) = images.iter().find(|(held, _)| held == path)?;
+        (Stamp::of(image).ok().as_ref() == Some(stamp)).then(|| image.to_vec())
     }
 
     pub(crate) fn entries(&self, folder: &str) -> io::Result<Vec<discover::Entry>> {
@@ -1101,6 +1243,46 @@ impl Guest {
 }
 
 impl Inner {
+    fn hold(&self, path: &str, image: Arc<Vec<u8>>) {
+        let mut images = self.images.lock().unwrap();
+        images.retain(|(held, _)| held != path);
+        images.insert(0, (path.to_owned(), image));
+        images.truncate(IMAGES);
+    }
+
+    /// Takes on a delta to an image held.
+    fn apply(&self, delta: &Delta) {
+        let held = self
+            .images
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|(path, image)| (*path == delta.path).then(|| Arc::clone(image)));
+        let base: Option<Stamp> = (&delta.base).try_into().ok();
+        if let Some(image) = held
+            && Stamp::of(&image).ok() == base
+            && let Some(next) = written(&image, delta.length, &delta.writes)
+        {
+            self.hold(&delta.path, Arc::new(next));
+        }
+    }
+
+    /// Takes on this guest's own commit to an image held.
+    fn published(&self, path: &str, transaction: &Transaction) {
+        let held = self
+            .images
+            .lock()
+            .unwrap()
+            .iter()
+            .find_map(|(held, image)| (held == path).then(|| Arc::clone(image)));
+        if let Some(image) = held {
+            let mut next = (*image).clone();
+            if transaction.apply(&mut next).is_ok() {
+                self.hold(path, Arc::new(next));
+            }
+        }
+    }
+
     fn heard(&self, event: Event) {
         let serves = |hello: &Hello| hello.serves == Some(self.share);
         match event {
@@ -1123,6 +1305,11 @@ impl Inner {
                         && let Some(waiting) = self.pending.lock().unwrap().remove(&reply.id)
                     {
                         let _ = waiting.send(reply);
+                    }
+                }
+                kind::DELTA if serves(from) => {
+                    if let Ok(delta) = minicbor::decode::<Delta>(body) {
+                        self.apply(&delta);
                     }
                 }
                 kind::TOUCHED if serves(from) => {
@@ -1150,6 +1337,8 @@ impl Inner {
 pub struct HostedRemote {
     guest: Arc<Guest>,
     path: String,
+    /// The stamp last asked for, which an image the guest holds may already have.
+    seen: Option<Stamp>,
 }
 
 impl HostedRemote {
@@ -1157,21 +1346,30 @@ impl HostedRemote {
         Self {
             guest: Arc::clone(guest),
             path: path.to_owned(),
+            seen: None,
         }
     }
 }
 
 impl crate::Remote for HostedRemote {
     fn read(&mut self) -> io::Result<Vec<u8>> {
+        if let Some(image) = (self.seen.as_ref()).and_then(|seen| self.guest.held(&self.path, seen))
+        {
+            return Ok(image);
+        }
         self.guest.read(kind::READ, &self.path, LIMIT)
     }
 
     fn stamp(&mut self) -> io::Result<Stamp> {
-        self.guest.stamp(&self.path)
+        let stamp = self.guest.stamp(&self.path)?;
+        self.seen = Some(stamp.clone());
+        Ok(stamp)
     }
 
     fn publish(&mut self, transaction: &Transaction) -> std::result::Result<(), CommitError> {
-        self.guest.commit(&self.path, transaction)
+        self.guest.commit(&self.path, transaction)?;
+        self.guest.inner.published(&self.path, transaction);
+        Ok(())
     }
 
     fn confirm(&mut self, base: &Stamp) -> std::result::Result<(), CommitError> {
@@ -1371,5 +1569,41 @@ impl Storage for Hosted {
             ..Request::default()
         };
         self.guest.verb(kind::SUPERSEDE, path, request)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A commit's writes, found by comparing images, rebuild the image after it from the one
+    /// before, and a change touching most of the file is left to be read whole.
+    #[test]
+    fn deltas_rebuild_the_image_after_a_commit() {
+        let before: Vec<u8> = (0..20_000u32).map(|at| (at % 251) as u8).collect();
+        let mut after = before.clone();
+        after[3] ^= 1;
+        after[5000..5010].fill(9);
+        after[5050] ^= 1;
+        after[17_000] ^= 1;
+        after.extend_from_slice(&[7; 3000]);
+        let writes = delta(&before, &after).unwrap();
+        assert_eq!(
+            writes.len(),
+            4,
+            "the header, two runs merged as one, one more, the tail"
+        );
+        assert_eq!(
+            written(&before, after.len() as u64, &writes).unwrap(),
+            after
+        );
+        let rewritten: Vec<u8> = before.iter().map(|byte| byte ^ 1).collect();
+        assert!(delta(&before, &rewritten).is_none());
+        assert!(delta(&before, &before[..10_000]).is_none());
+        let outside = [Written {
+            offset: after.len() as u64,
+            bytes: vec![1],
+        }];
+        assert!(written(&before, after.len() as u64, &outside).is_none());
     }
 }

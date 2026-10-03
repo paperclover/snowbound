@@ -11,7 +11,23 @@ use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::io::{self, Read, Write};
 
 /// The opening's version. Frames after it never change shape; they grow by kinds and fields.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
+
+/// The version of the opening a peer of another version sent, as `open` fails with it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Version(pub u16);
+
+impl std::fmt::Display for Version {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "The peer speaks Live Share version {}, this end {VERSION}",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for Version {}
 /// The largest block either side reads.
 const MOST: usize = 16 << 20;
 
@@ -24,6 +40,8 @@ pub mod kind {
     pub const PRESENCE: u16 = 16;
     /// A host's files changed: `Touched`.
     pub const TOUCHED: u16 = 18;
+    /// A section's bytes as a commit changed them: `Delta`.
+    pub const DELTA: u16 = 19;
     pub const WELCOME: u16 = 32;
     /// Storage requests to a host, each a `Request` answered by a `Reply`.
     pub const LIST: u16 = 257;
@@ -55,6 +73,7 @@ pub const KNOWN: &[u16] = &[
     kind::BYE,
     kind::PRESENCE,
     kind::TOUCHED,
+    kind::DELTA,
     kind::WELCOME,
     kind::LIST,
     kind::STAMP,
@@ -206,6 +225,31 @@ pub struct Welcome {
 pub struct Touched {
     #[n(0)]
     pub paths: Vec<String>,
+}
+
+/// What a commit changed in a section a host serves: from the image with stamp `base`, the
+/// image `length` long with `writes` in place. A guest holding the base needs read nothing.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+#[cbor(map)]
+pub struct Delta {
+    #[n(0)]
+    pub path: String,
+    #[n(1)]
+    pub base: WireStamp,
+    #[n(2)]
+    pub length: u64,
+    #[n(3)]
+    pub writes: Vec<Written>,
+}
+
+/// Bytes at an offset.
+#[derive(Clone, Debug, PartialEq, Encode, Decode)]
+#[cbor(map)]
+pub struct Written {
+    #[n(0)]
+    pub offset: u64,
+    #[cbor(n(1), with = "minicbor::bytes")]
+    pub bytes: Vec<u8>,
 }
 
 /// A storage request; its kind names the verb, and the verb what it carries.
@@ -490,11 +534,19 @@ pub fn open(
     }
     let theirs: Open =
         minicbor::decode(&read_block(stream)?).map_err(|_| invalid("A malformed opening"))?;
-    if theirs.version != VERSION || theirs.room != room {
-        return Err(invalid("The peer means another room or version"));
-    }
+    // A responder answers even a peer of another version, so that both ends can say which
+    // should update.
     if side == Side::Responder {
         write_block(stream, &minicbor::to_vec(&ours).map_err(io::Error::other)?)?;
+    }
+    if theirs.version != VERSION {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            Version(theirs.version),
+        ));
+    }
+    if theirs.room != room {
+        return Err(invalid("The peer means another room"));
     }
     let key = pake
         .finish(&theirs.pake)

@@ -192,6 +192,8 @@ struct State {
     failed: u32,
     /// The code admits no one new.
     burned: bool,
+    /// The Live Share version of the last peer met that speaks another.
+    outdated: Option<u16>,
     daemon: Option<ServiceDaemon>,
 }
 
@@ -379,6 +381,12 @@ impl Live {
         self.shared.state.lock().unwrap().failed
     }
 
+    /// The Live Share version of the last peer met that speaks another, which one of the two
+    /// must update to meet.
+    pub fn other_version(&self) -> Option<u16> {
+        self.shared.state.lock().unwrap().outdated
+    }
+
     /// Whether this end's code had too many wrong tries and admits no one new.
     pub fn burned(&self) -> bool {
         self.shared.state.lock().unwrap().burned
@@ -535,12 +543,22 @@ impl Shared {
             stream.set_read_timeout(GONE)?;
             Ok((send, receive, hello))
         })();
-        pipe.met(met.is_ok());
+        let other = (met.as_ref().err())
+            .and_then(|error| error.get_ref()?.downcast_ref::<wire::Version>())
+            .copied();
+        // A peer of another version guessed nothing, the keys never being agreed.
+        pipe.met(met.is_ok() || other.is_some());
         let (send, mut receive, hello) = match met {
             Ok(met) => met,
             Err(error) => {
                 eprintln!("Live: no meeting in {tag}: {error}");
-                if error.kind() == io::ErrorKind::InvalidData {
+                if let Some(wire::Version(version)) = other {
+                    self.state.lock().unwrap().outdated = Some(version);
+                    if matches!(self.room, Room::Code { owner: false, .. }) {
+                        self.stopped.store(true, Ordering::Release);
+                    }
+                    (self.events)(Event::Changed);
+                } else if error.kind() == io::ErrorKind::InvalidData {
                     self.failed();
                 }
                 pipe.shutdown();

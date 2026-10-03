@@ -4226,6 +4226,16 @@ impl State {
                     }
                 }
                 Event::Failed(error) => eprintln!("Synchronization stopped: {error}"),
+                // Its guests hear of it sooner than the folder's watch would tell them.
+                #[cfg(feature = "live")]
+                Event::Attempt {
+                    status: notebook::EditStatus::Published { .. },
+                    ..
+                } => {
+                    if let Some(host) = self.peers.hosts.get(&session.library.location) {
+                        host.touched(&[session.tabs[session.tab].path.clone()]);
+                    }
+                }
                 Event::Attempt { .. } | Event::Unreachable(_) => {}
             }
         }

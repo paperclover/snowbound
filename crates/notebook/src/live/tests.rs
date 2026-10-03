@@ -520,3 +520,47 @@ fn a_malicious_relay_is_caught() {
         });
     }
 }
+
+/// Ends of two versions each learn the other's version from the opening, before any key is
+/// agreed, so each can say which should update.
+#[test]
+fn another_version_is_named_before_any_key() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let older = thread::spawn(move || {
+        let mut stream = TcpStream::connect(address).unwrap();
+        #[derive(minicbor::Encode)]
+        #[cbor(map)]
+        struct Open {
+            #[n(0)]
+            version: u16,
+            #[n(1)]
+            room: String,
+            #[cbor(n(2), with = "minicbor::bytes")]
+            pake: Vec<u8>,
+        }
+        let open = minicbor::to_vec(Open {
+            version: 1,
+            room: "room".into(),
+            pake: vec![0; 33],
+        })
+        .unwrap();
+        stream
+            .write_all(&[&(open.len() as u32).to_be_bytes()[..], &open].concat())
+            .unwrap();
+        let mut length = [0; 4];
+        stream.read_exact(&mut length).unwrap();
+        let mut answer = vec![0; u32::from_be_bytes(length) as usize];
+        stream.read_exact(&mut answer).unwrap();
+        answer
+    });
+    let (mut stream, _) = listener.accept().unwrap();
+    let Err(error) = wire::open(&mut stream, Side::Responder, "room", b"secret") else {
+        panic!("met a peer of another version");
+    };
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    let version = error.get_ref().unwrap().downcast_ref::<wire::Version>();
+    assert_eq!(version, Some(&wire::Version(1)));
+    // The older end heard this one's opening, and with it its version.
+    assert!(!older.join().unwrap().is_empty());
+}
