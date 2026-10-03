@@ -196,10 +196,17 @@ fn sidebar(
             ..Spec::default()
         },
     );
+    // Room for what floats over the header's start: the notebook button's icon, and on the
+    // left Back and Forward after it.
+    let start = if right {
+        ICON
+    } else {
+        (ICON + RAIL) / 2.0 + NAV - ROW_PAD
+    };
     ui.leaf(
         "icon",
         Spec {
-            size: [px(ICON), px(ui::shell::TOOL)],
+            size: [px(start), px(ui::shell::TOOL)],
             ..Spec::default()
         },
     );
@@ -212,15 +219,16 @@ fn sidebar(
             ..Spec::default()
         },
     );
-    // Room for what floats over the header's end.
-    let end = if right { RAIL } else { NAV + MARGIN };
-    ui.leaf(
-        "end",
-        Spec {
-            size: [px(end - MARGIN - 2.0 * ROW_PAD), px(1.0)],
-            ..Spec::default()
-        },
-    );
+    // Room for the notebook button floating over the header's end.
+    if right {
+        ui.leaf(
+            "end",
+            Spec {
+                size: [px(RAIL - MARGIN - 2.0 * ROW_PAD), px(1.0)],
+                ..Spec::default()
+            },
+        );
+    }
     ui.close();
     if !rows {
         return;
@@ -970,10 +978,10 @@ impl crate::State {
         }
     }
 
-    /// Back, Forward and the notebook button, floating at the body's corner over the section
-    /// tabs' row, `height` tall as it eases. While the sidebar, `width` wide as it eases, is
-    /// open on the left, the notebook button closes it from its header's icon, and Back and
-    /// Forward ride its end.
+    /// The notebook button, then Back and Forward, floating at the body's corner over the
+    /// section tabs' row, `height` tall as it eases. While the sidebar, `width` wide as it
+    /// eases, is open on the left, the notebook button closes it from its header's icon, Back
+    /// and Forward after it.
     pub(crate) fn sidebar_button(&mut self, height: f32, width: f32) {
         use crate::commands::{Choice, Id as Cmd};
         if self.temporary {
@@ -987,9 +995,8 @@ impl crate::State {
                 .map_or(0.0, |[left, _, right, _]| right - left - RAIL);
             (0.0, edge)
         } else {
-            let open = MARGIN + ROW_PAD - (RAIL - ICON) / 2.0;
-            let toggle = NAV + (open - NAV) * width / WIDTH;
-            ((width - NAV - MARGIN).max(0.0), toggle)
+            let toggle = (MARGIN + ROW_PAD - (RAIL - ICON) / 2.0) * width / WIDTH;
+            (toggle + RAIL, toggle)
         };
         let pad = [
             (RAIL - ui::shell::TOOL) / 2.0,

@@ -1722,9 +1722,9 @@ impl State {
         );
         if !self.temporary {
             // Past the row's padding, the frame's corner and the first tab's shadow, the tabs'
-            // outlines start where Back and Forward end, and on the left the notebook button's
-            // square after them; that room shrinks on the sidebar's easing, as they move into
-            // its header, so the tabs ease with it.
+            // outlines start where Back and Forward end, after the notebook button's square on
+            // the left; that room shrinks on the sidebar's easing, as they move into its
+            // header, so the tabs ease with it.
             let room = sidebar::NAV + TAB_ROW - FRAME - self.rounding() - ui::SHADOW[0];
             let room = if self.navigation_bar_right {
                 room - TAB_ROW
