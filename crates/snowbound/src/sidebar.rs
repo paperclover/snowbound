@@ -67,6 +67,12 @@ pub struct Tree<'a> {
     rows: Vec<Entry>,
     /// The section or group held down, which a drag moves.
     held: Option<Entry>,
+    /// The notebook row held down, which a drag moves among the notebooks.
+    held_notebook: Option<Entry>,
+    /// The notebook dragged, by index, and the place among the others it would land in.
+    lifted_notebook: Option<(usize, usize)>,
+    /// Each notebook's rows but the dragged one's, in order.
+    blocks: Vec<[f32; 4]>,
     /// The row dragged, which the tree leaves out for a gap where it would land.
     lifted: Option<(&'a Entry, &'a Landing)>,
     /// The dragged row as it was built, for drawing it over the others.
@@ -95,6 +101,19 @@ struct Ghost {
     bold: bool,
 }
 
+impl Ghost {
+    fn of(row: &Row) -> Self {
+        Self {
+            label: row.label.to_owned(),
+            icon: row.icon,
+            depth: row.depth,
+            dim: row.dim,
+            selected: row.selected,
+            bold: row.bold,
+        }
+    }
+}
+
 impl<'a> Tree<'a> {
     fn new(
         theme: &'a Theme,
@@ -110,6 +129,9 @@ impl<'a> Tree<'a> {
             action: None,
             rows: Vec::new(),
             held: None,
+            held_notebook: None,
+            lifted_notebook: None,
+            blocks: Vec::new(),
             lifted: None,
             ghost: None,
             gap: None,
@@ -118,7 +140,8 @@ impl<'a> Tree<'a> {
     }
 }
 
-/// A section or group row, for dragging one onto or between the others.
+/// A section or group row, for dragging one onto or between the others; or a notebook's,
+/// with an empty `path`, among the notebooks.
 #[derive(Clone, PartialEq)]
 pub struct Entry {
     pub notebook: usize,
@@ -212,32 +235,46 @@ fn sidebar(
             ..Spec::default()
         },
     );
+    let mut place = 0;
     for (index, library) in notebooks.iter().enumerate() {
         let key = library.key("");
         let unfolded = !folded.contains(&key);
         let renamed = (tree.renaming.as_ref()).is_some_and(|renaming| renaming.notebook(library));
-        let (row, fold) = tree_row(
-            ui,
-            tree,
-            ui.id(("notebook", index)),
-            Row {
-                label: &library.name,
-                icon: Leading::Notebook(
-                    if library.in_icloud() {
-                        art::NOTEBOOK_ICLOUD
-                    } else {
-                        art::NOTEBOOK
-                    },
-                    library.color(),
-                ),
-                depth: 0,
-                dim: library.notebook.is_err(),
-                fold: Some(unfolded),
-                selected: None,
-                renamed,
-                bold: tree.unread.contains(&key),
+        let row = Row {
+            label: &library.name,
+            icon: Leading::Notebook(
+                if library.in_icloud() {
+                    art::NOTEBOOK_ICLOUD
+                } else {
+                    art::NOTEBOOK
+                },
+                library.color(),
+            ),
+            depth: 0,
+            dim: library.notebook.is_err(),
+            fold: Some(unfolded),
+            selected: None,
+            renamed,
+            bold: tree.unread.contains(&key),
+        };
+        if let Some((lifted, slot)) = tree.lifted_notebook {
+            if lifted == index {
+                tree.ghost = Some(Ghost::of(&row));
+                continue;
+            }
+            opening(ui, tree, ("notebook gap", &library.location), slot == place);
+            place += 1;
+        }
+        let block = ui.open(
+            ("notebook block", index),
+            Spec {
+                axis: Axis::Y,
+                size: [fill(), ui::children()],
+                ..Spec::default()
             },
         );
+        let id = ui.id(("notebook", index));
+        let (row, fold) = tree_row(ui, tree, id, row);
         let unsigned = library.notebook.is_err()
             && crate::library::server_address(&library.location).is_some();
         if row.clicked && unsigned {
@@ -251,6 +288,18 @@ fn sidebar(
         if let Some(point) = row.context {
             tree.action = Some(Action::Menu(Target::Notebook(Arc::clone(library)), point));
         }
+        if row.dragging
+            && !renamed
+            && let Some(rect) = ui.rect(id)
+        {
+            tree.held_notebook = Some(Entry {
+                notebook: index,
+                path: String::new(),
+                group: false,
+                rect,
+                id,
+            });
+        }
         if let Some(catalog) = library.catalog()
             && unfolding(ui, ("notebook rows", index), unfolded)
         {
@@ -258,6 +307,11 @@ fn sidebar(
             ui.close();
             ui.close();
         }
+        ui.close();
+        tree.blocks.extend(ui.rect(block));
+    }
+    if let Some((_, slot)) = tree.lifted_notebook {
+        opening(ui, tree, ("notebook gap", ""), slot == place);
     }
     ui.close();
     ui.open(
@@ -549,14 +603,7 @@ fn lifts(tree: &mut Tree, notebook: usize, path: &str, row: &Row) -> bool {
         .lifted
         .is_some_and(|(lifted, _)| lifted.notebook == notebook && lifted.path == path);
     if lifted {
-        tree.ghost = Some(Ghost {
-            label: row.label.to_owned(),
-            icon: row.icon,
-            depth: row.depth,
-            dim: row.dim,
-            selected: row.selected,
-            bold: row.bold,
-        });
+        tree.ghost = Some(Ghost::of(row));
     }
     lifted
 }
@@ -568,14 +615,20 @@ fn gap(ui: &mut Ui, tree: &mut Tree, folder: &str, before: Option<&str>) {
         return;
     };
     let here = !landing.into && landing.folder == folder && landing.before.as_deref() == before;
-    let id = ui.id(("gap", before));
+    opening(ui, tree, ("gap", before), here);
+}
+
+/// A gap, `part`, that eases open a row tall where a dragged row would land, `here`, and
+/// shut elsewhere.
+fn opening(ui: &mut Ui, tree: &mut Tree, part: impl std::hash::Hash + Copy, here: bool) {
+    let id = ui.id(part);
     let height = ui.animate(id, if here { ROW } else { 0.0 });
     if here {
         tree.gap = ui.rect(id);
     }
     if height > 0.0 {
         ui.leaf(
-            ("gap", before),
+            part,
             Spec {
                 size: [fill(), px(height)],
                 ..Spec::default()
@@ -836,6 +889,14 @@ impl crate::State {
                 Dragged::Entry { entry, landing, .. } => Some((entry, landing)),
                 _ => None,
             });
+        tree.lifted_notebook = (self.drag.as_ref())
+            .filter(|drag| drag.lifted)
+            .and_then(|drag| match &drag.what {
+                Dragged::Notebook(entry) => {
+                    Some((entry.notebook, drag.slot.unwrap_or(entry.notebook)))
+                }
+                _ => None,
+            });
         sidebar(
             &mut self.ui,
             &mut tree,
@@ -848,7 +909,9 @@ impl crate::State {
         let Tree {
             action,
             rows,
-            mut held,
+            held,
+            held_notebook,
+            blocks,
             ghost,
             gap,
             ..
@@ -856,8 +919,13 @@ impl crate::State {
         let corner = self.ui.rect(rows_id).unwrap_or_default();
         let found = ghost.is_some();
         let (ghost_held, settled) = self.lifted_row(theme, ghost, gap, &rows, corner);
-        held = held.or(ghost_held);
-        self.drag_entries(held, &rows, gap, settled || !found, corner, theme);
+        let settled = settled || !found;
+        let (held, held_notebook) = match ghost_held {
+            Some(entry) if entry.path.is_empty() => (held, Some(entry)),
+            ghost_held => (held.or(ghost_held), held_notebook),
+        };
+        self.drag_entries(held, &rows, gap, settled, corner, theme);
+        self.drag_notebooks(held_notebook, &blocks, gap, settled);
         self.ui.close();
         self.ui.close();
         match action {
@@ -976,30 +1044,25 @@ impl crate::State {
         rows: &[Entry],
         corner: [f32; 4],
     ) -> (Option<Entry>, bool) {
-        let (
-            Some(ghost),
-            Some(
-                drag @ crate::menus::Drag {
-                    what: Dragged::Entry { entry, landing, .. },
-                    ..
-                },
-            ),
-        ) = (ghost, &self.drag)
-        else {
+        let (Some(ghost), Some(drag)) = (ghost, &self.drag) else {
             return (None, true);
+        };
+        let (entry, onto) = match &drag.what {
+            Dragged::Entry { entry, landing, .. } => (
+                entry,
+                (rows.iter())
+                    .find(|row| landing.into && row.path == landing.folder)
+                    .map(|row| row.rect),
+            ),
+            Dragged::Notebook(entry) => (entry, None),
+            _ => return (None, true),
         };
         let key = self.ui.id("lifted");
         let (top, settled) = if drag.live() {
             let top = drag.corner(self.pointer)[1] - corner[1];
             (self.ui.hold(key, top), false)
         } else {
-            let place = gap
-                .or_else(|| {
-                    rows.iter()
-                        .find(|row| landing.into && row.path == landing.folder)
-                        .map(|row| row.rect)
-                })
-                .unwrap_or(entry.rect);
+            let place = gap.or(onto).unwrap_or(entry.rect);
             let target = place[1] - corner[1];
             let top = self.ui.animate(key, target);
             (top, (top - target).abs() < 0.5)
@@ -1162,6 +1225,66 @@ impl crate::State {
         let library = Arc::clone(&self.notebooks[entry.notebook]);
         self.commands
             .push(crate::Command::Structure(library, change));
+    }
+
+    /// Moves a notebook among the others by dragging its row, `held`: the others' rows,
+    /// `blocks`, open a `gap` where it would land, and let go it takes that place, which the
+    /// next launch keeps. The drag ends once the row, let go, is `settled`.
+    fn drag_notebooks(
+        &mut self,
+        held: Option<Entry>,
+        blocks: &[[f32; 4]],
+        gap: Option<[f32; 4]>,
+        settled: bool,
+    ) {
+        let mine = |what: &Dragged| matches!(what, Dragged::Notebook(_));
+        self.settle(mine, settled);
+        let held = held.map(|entry| {
+            let rect = entry.rect;
+            (Dragged::Notebook(entry), rect)
+        });
+        let dropped = self.follow_drag(held, mine);
+        let pointer = self.pointer;
+        let Some(
+            drag @ crate::menus::Drag {
+                what: Dragged::Notebook(_),
+                ..
+            },
+        ) = &mut self.drag
+        else {
+            return;
+        };
+        if drag.cancelled {
+            drag.slot = None;
+        } else if drag.live() {
+            // Where the rows stand with no gap open, as `drag_entries` finds them.
+            let spans: Vec<[f32; 2]> = blocks
+                .iter()
+                .map(|&[_, top, _, bottom]| {
+                    let shut = gap
+                        .filter(|gap| top >= gap[3] - 0.5)
+                        .map_or(0.0, |[_, start, _, end]| end - start);
+                    [top - shut, bottom - top]
+                })
+                .collect();
+            let middle = drag.corner(pointer)[1] + ROW / 2.0;
+            drag.slot = Some(ui::drop_slot(&spans, usize::MAX, middle));
+        }
+        let (true, Dragged::Notebook(entry)) = (dropped, &mut drag.what) else {
+            return;
+        };
+        let from = entry.notebook;
+        let Some(to) = drag
+            .slot
+            .filter(|to| *to != from && from < self.notebooks.len())
+        else {
+            return;
+        };
+        // It eases into its new place from where it was let go.
+        entry.notebook = to;
+        let moved = self.notebooks.remove(from);
+        self.notebooks.insert(to, moved);
+        self.save_settings();
     }
 
     /// Opens what the open panel chose: a notebook folder, a notebook's table of contents,

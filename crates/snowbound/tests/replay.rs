@@ -849,3 +849,30 @@ fn a_double_click_renames_a_sidebar_row_in_place() {
     );
     assert!(scratch.0.join("Projects/Soups.one").exists());
 }
+
+/// A notebook's row dragged below another's moves the notebook there.
+#[test]
+fn dragging_a_notebook_row_reorders_the_notebooks() {
+    let scratch = Scratch::new("drag-notebook");
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
+    copy_notebook(&notebook, &scratch.0.join("icloud/Cloudy"));
+    let settings = r#"{"user_name": "Snowbound Test", "sidebar": true}"#;
+    std::fs::write(scratch.0.join("settings.json"), settings).unwrap();
+    let mut steps = vec![
+        "wait 1000",
+        "settle",
+        "accessibility before",
+        "move 60 76",
+        "press",
+    ];
+    for y in ["move 60 84", "move 60 110", "move 60 140", "move 60 170"] {
+        steps.extend([y, "wait 50"]);
+    }
+    steps.extend(["release", "wait 400", "settle", "accessibility after"]);
+    let [before, after] = replay(&scratch, Some(&notebook), &steps)
+        .try_into()
+        .unwrap();
+    assert_eq!(notebooks(&before), ["notebook", "Cloudy"], "{before}");
+    assert_eq!(notebooks(&after), ["Cloudy", "notebook"], "{after}");
+}

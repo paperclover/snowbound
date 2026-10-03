@@ -23,6 +23,8 @@ pub enum Dragged {
     },
     /// A section tab, by index.
     Tab(usize),
+    /// A notebook's sidebar row, by its index among the notebooks.
+    Notebook(crate::sidebar::Entry),
 }
 
 /// Something held down to drag: where the pointer took it, whether it has moved far enough
