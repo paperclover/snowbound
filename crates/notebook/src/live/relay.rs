@@ -372,10 +372,12 @@ fn session(
                 Ok(Notice::Nameplate(number)) => {
                     *nameplate = Some(number);
                     tag = Some(format!("code-{number}"));
-                    let super::Room::Code { code: words, .. } = &shared.room else {
+                    let super::Room::Code { code, .. } = &shared.room else {
                         continue;
                     };
-                    let code = format!("{number}-{}", code_parts(words).1);
+                    let Some(code) = super::code::format(number, &code_parts(code).1) else {
+                        continue;
+                    };
                     let mut state = shared.state.lock().unwrap();
                     if state.code.as_ref() != Some(&code) {
                         state.code = Some(code);

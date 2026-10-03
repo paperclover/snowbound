@@ -538,10 +538,12 @@ physical power-loss durability.
 `live::Live::start(hello, room, reach, relay, events)` listens on a TCP port and, with a
 `Reach`, advertises `_snowbound._tcp` by mDNS on every network or on loopback alone,
 connecting to the peers in the same `Room` that it finds: a notebook's or a share's random
-secret (`Room::Notebook`), or a code typed on both (`Room::join("4-violet-otter", password)`).
+secret (`Room::Notebook`), or a code typed on both (`Room::join("7KQ-4MZ-9XR", password)`).
 With a `relay` (`wss://live.example.net`, `crates/relay`) it also joins the room there and
 meets its peers through it; the end sharing a code (`Room::share`) has the relay number its
-words, `code()` then has the whole code, and it burns a code after too many wrong tries.
+secret, `code()` then has the whole code, and it burns a code after too many wrong tries.
+Codes are Crockford base32 (`live::code`): two symbols numbering the room, six of secret
+(30 bits) and a check symbol that refuses a typo before it spends one of the relay's tries.
 `connect(address)` meets a peer discovery did not find. Peers meet through SPAKE2 on the
 room's secret, then every frame is AES-256-GCM under the keys it agreed: its number, which is
 also its nonce, then a message kind and a CBOR map (`live::wire`). A frame lost, repeated,
@@ -558,7 +560,7 @@ a notebook's presence room, kept in `.snowbound/live.json` and made where it has
 `live::share` is Live Share. `Host::start(storage, hello, sharing, name, reach, relay, events)`
 serves `Notebook::into_storage()` to the peers in the share's room and welcomes whoever knows
 `Sharing::code` (and its password) from the code's room; `code()` replaces a burned code with
-new words, `guests()` lists who is connected, `touched(paths)` passes the host's own changes
+a new secret, `guests()` lists who is connected, `touched(paths)` passes the host's own changes
 on, and `stop()` lets every guest go. `join(hello, code, password, reach, relay)` returns the
 `Welcome` (the share and its secret), or a `Refusal` saying why not: a wrong code, no one
 sharing it, an expired code, too many wrong tries, or no relay. `Guest::start` joins the share;

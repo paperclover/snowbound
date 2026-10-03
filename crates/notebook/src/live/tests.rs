@@ -1,6 +1,11 @@
 use super::*;
 use std::time::Instant;
 
+/// The code for room `number` and `secret`.
+fn code(number: u32, secret: &str) -> String {
+    super::code::format(number, secret).unwrap()
+}
+
 fn hello(name: &str) -> Hello {
     Hello::new(name.into(), Some(vec![1, 2, 3])).unwrap()
 }
@@ -43,7 +48,7 @@ fn caret(offset: u32) -> Presence {
 /// caret, and see the other leave.
 #[test]
 fn peers_meet_and_follow_presence() {
-    let room = Room::join("7-violet-otter", "");
+    let room = Room::join(&code(7, "ABCDEF"), "");
     let ada = Live::start(hello("Ada"), &room, None, None, |_| {}).unwrap();
     let grace = Live::start(hello("Grace"), &room, None, None, |_| {}).unwrap();
     ada.set_presence(caret(1));
@@ -70,7 +75,7 @@ fn peers_meet_and_follow_presence() {
 fn another_code_never_meets() {
     let ada = Live::start(
         hello("Ada"),
-        &Room::join("7-violet-otter", ""),
+        &Room::join(&code(7, "ABCDEF"), ""),
         None,
         None,
         |_| {},
@@ -78,7 +83,7 @@ fn another_code_never_meets() {
     .unwrap();
     let mallory = Live::start(
         hello("Mallory"),
-        &Room::join("7-violet-ocelot", ""),
+        &Room::join(&code(7, "ABCDEG"), ""),
         None,
         None,
         |_| {},
@@ -115,7 +120,7 @@ fn later_fields_and_kinds_are_skipped() {
         }
     );
 
-    let room = Room::join("4-quiet-heron", "");
+    let room = Room::join(&code(4, "QJETHR"), "");
     let grace = Live::start(hello("Grace"), &room, None, None, |_| {}).unwrap();
     // A later version: it greets, says something new, then where it is.
     let later = thread::spawn(move || {
@@ -298,7 +303,7 @@ fn a_relay_numbers_a_code_and_burns_it_after_wrong_tries() {
     });
     let host = Live::start(
         hello("Ada"),
-        &Room::share("violet-otter", ""),
+        &Room::share("ABCDEF", ""),
         None,
         Some(&url),
         |_| {},
@@ -312,8 +317,8 @@ fn a_relay_numbers_a_code_and_burns_it_after_wrong_tries() {
         assert!(Instant::now() < deadline, "no code");
         thread::sleep(Duration::from_millis(20));
     };
-    let (number, words) = code.split_once('-').unwrap();
-    assert_eq!(words, "violet-otter");
+    let (number, secret) = super::code::parse(&code).unwrap();
+    assert_eq!(secret, "ABCDEF");
     let guest = Live::start(
         hello("Grace"),
         &Room::join(&code, ""),
@@ -326,7 +331,7 @@ fn a_relay_numbers_a_code_and_burns_it_after_wrong_tries() {
     until(&guest, |peers| peers.len() == 1);
 
     let path = format!("/v1/room/code-{number}");
-    let wrong = Room::join(&format!("{number}-violet-ocelot"), "");
+    let wrong = Room::join(&self::code(number, "ABCDEG"), "");
     // An end that typed a wrong code gives up at once; Mallory tries twice, and the second
     // wrong try burns the code.
     for _ in 0..2 {

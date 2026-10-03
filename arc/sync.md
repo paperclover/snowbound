@@ -320,7 +320,8 @@ in the share's room; a guest runs the replica, queue and merge it runs on an SMB
 them (`Notebook::open_hosted`, `Section::resume_hosted`, `Background::hosted`), so offline
 queueing, rebases and conflict pages behave as on a share, and the host's files are only ever
 written by its own storage, OneNote's locks included. A guest meets the host first in the
-room of a short code (`412-violet-otter`, SPAKE2 on its words and any password) through
+room of a short code (`7KQ-4MZ-9XR`: Crockford base32, its room's number, 30 bits of
+secret and a check symbol; SPAKE2 on its secret and any password) through
 Snowbound's relay or by mDNS, and is welcomed with the share's room and its random secret;
 stopping or restarting a share retires the secret. A guest's commit is checked on the host's
 image before it is committed, and a guest can name nothing outside the notebook. Large reads

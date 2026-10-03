@@ -61,7 +61,7 @@ enum Status {
 /// What to tell someone whose code didn't open a notebook.
 fn refusal(refusal: &Refusal) -> String {
     match refusal {
-        Refusal::Malformed => "Enter the code as it was given, like 412-violet-otter.".into(),
+        Refusal::Malformed => "Check the code. It looks like 7KQ-4MZ-9XR.".into(),
         Refusal::Wrong => "That code or password doesn’t open a notebook. Check it with the \
                            person sharing."
             .into(),
@@ -449,7 +449,7 @@ impl State {
         text(ui, "what", "Enter the code from the person sharing.", false);
         labelled(ui, "Code:", |ui| {
             let spec = field_spec(ui);
-            ui::text_field(ui, code_field(), &mut dialog.code, "412-violet-otter", spec);
+            ui::text_field(ui, code_field(), &mut dialog.code, "7KQ-4MZ-9XR", spec);
             if let Some(node) = ui.access(code_field()) {
                 node.set_label("Code");
             }

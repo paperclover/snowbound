@@ -7,6 +7,7 @@
 //! and one writing. A connection whose frames arrive out of order is dropped and met again
 //! from scratch.
 
+pub mod code;
 mod relay;
 pub mod share;
 pub mod wire;
@@ -44,10 +45,10 @@ const TRIES: u32 = 5;
 pub enum Room {
     /// A notebook's room, or a share's: a random secret only its members hold.
     Notebook([u8; 16]),
-    /// A code typed on both ends, `412-violet-otter`, with a password where one is set: its
-    /// number names it on the network, and its words and password only the two people know.
+    /// A code typed on both ends (`code`), with a password where one is set: its room's
+    /// number names it on the network, and its secret and password only the two people know.
     /// Its `owner`, the end sharing it, takes the number from a relay (the one the code has,
-    /// coming back; any free one for words alone) or picks one where it has no relay, and
+    /// coming back; any free one for a secret alone) or picks one where it has no relay, and
     /// judges every try, burning the code after too many wrong ones.
     Code {
         code: String,
@@ -60,16 +61,16 @@ impl Room {
     /// The room a code typed on this end leads to.
     pub fn join(code: &str, password: &str) -> Self {
         Self::Code {
-            code: code.trim().to_lowercase(),
+            code: code.to_owned(),
             password: password.to_owned(),
             owner: false,
         }
     }
 
-    /// The room of a code this end shares: its words, or a whole code to keep its number.
+    /// The room of a code this end shares: its secret, or a whole code to keep its number.
     pub fn share(code: &str, password: &str) -> Self {
         Self::Code {
-            code: code.trim().to_lowercase(),
+            code: code.to_owned(),
             password: password.to_owned(),
             owner: true,
         }
@@ -90,7 +91,7 @@ impl Room {
         match self {
             Room::Notebook(id) => id.to_vec(),
             Room::Code { code, password, .. } => {
-                let mut secret = code_parts(code).1.to_lowercase().into_bytes();
+                let mut secret = code_parts(code).1.into_bytes();
                 if !password.is_empty() {
                     secret.push(b'\n');
                     secret.extend_from_slice(password.as_bytes());
@@ -105,12 +106,11 @@ impl Room {
     }
 }
 
-/// A code's number, if it has one, and its words.
-fn code_parts(code: &str) -> (Option<u32>, &str) {
-    let code = code.trim();
-    match code.split_once('-') {
-        Some((number, words)) if number.parse::<u32>().is_ok() => (number.parse().ok(), words),
-        _ => (None, code),
+/// A code's room number, if it has one, and its secret: a whole code, or a secret alone.
+fn code_parts(code: &str) -> (Option<u32>, String) {
+    match code::parse(code) {
+        Some((number, secret)) => (Some(number), secret),
+        None => (None, code.trim().to_uppercase()),
     }
 }
 
@@ -309,18 +309,18 @@ impl Live {
             address.set_ip(IpAddr::V4(Ipv4Addr::LOCALHOST));
         }
         let code = match room {
-            Room::Code { code, .. } if room.tag().is_some() => Some(code.clone()),
-            // Off any relay, the end sharing words alone numbers them itself.
-            Room::Code { code, .. } if relay.is_none() => {
-                let mut number = [0; 2];
-                getrandom::fill(&mut number)
-                    .map_err(|_| io::Error::other("System random source failed"))?;
-                Some(format!(
-                    "{}-{code}",
-                    1000 + u16::from_le_bytes(number) % 9000
-                ))
-            }
-            _ => None,
+            Room::Code { code, .. } => match code_parts(code) {
+                (Some(number), secret) => code::format(number, &secret),
+                // Off any relay, the end sharing a secret alone numbers it itself.
+                (None, secret) if relay.is_none() => {
+                    let mut number = [0; 4];
+                    getrandom::fill(&mut number)
+                        .map_err(|_| io::Error::other("System random source failed"))?;
+                    code::format(u32::from_le_bytes(number) % code::NAMEPLATES, &secret)
+                }
+                (None, _) => None,
+            },
+            Room::Notebook(_) => None,
         };
         let shared = Arc::new(Shared {
             me,

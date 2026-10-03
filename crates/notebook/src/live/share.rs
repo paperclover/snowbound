@@ -6,9 +6,6 @@
 //! the host welcomes it with the share's room and secret; a new share has a new secret, so
 //! stopping retires every guest. Large bodies travel a chunk at a time, each answered before
 //! the next, so a relay never holds much for a slow peer.
-//!
-//! The code's words come from the EFF's short word list
-//! (<https://www.eff.org/dice>, CC BY 3.0 US), `yo-yo` replaced by `yarn`.
 
 use super::{
     Event, Hello, Line, Live, Peer, Presence, Reach, Relayed, Room,
@@ -55,42 +52,11 @@ const WORKERS: usize = 2;
 const STARTS: f64 = 100.0;
 const BURST: f64 = 200.0;
 
-const WORDS: &str = include_str!("words.txt");
-
-/// Two random words for a code, `violet-otter`.
-pub fn words() -> io::Result<String> {
-    let list: Vec<&str> = WORDS.lines().collect();
-    let mut bytes = [0; 8];
-    getrandom::fill(&mut bytes).map_err(|_| io::Error::other("System random source failed"))?;
-    let [first, second] = [&bytes[..4], &bytes[4..]]
-        .map(|bytes| u32::from_le_bytes(bytes.try_into().expect("4 bytes")) as usize);
-    let first = first % list.len();
-    let mut second = second % (list.len() - 1);
-    if second >= first {
-        second += 1;
-    }
-    Ok(format!("{}-{}", list[first], list[second]))
-}
-
-/// A code as typed, `412 Violet otter`, in the form it is met by, `412-violet-otter`; none
-/// where it is not a number and two words.
+/// A code as typed, `7kq 4mz 9xr`, as it is shown, `7KQ-4MZ-9XR`; none where it is not a
+/// code (`super::code`).
 pub fn code(typed: &str) -> Option<String> {
-    let parts: Vec<String> = typed
-        .split(|c: char| c.is_whitespace() || c == '-')
-        .filter(|part| !part.is_empty())
-        .map(str::to_lowercase)
-        .collect();
-    match &parts[..] {
-        [number, first, second]
-            if number.parse::<u32>().is_ok()
-                && [first, second]
-                    .iter()
-                    .all(|word| word.chars().all(|c| c.is_ascii_lowercase())) =>
-        {
-            Some(parts.join("-"))
-        }
-        _ => None,
-    }
+    let (number, secret) = super::code::parse(typed)?;
+    super::code::format(number, &secret)
 }
 
 /// What a host keeps of a share to take it up again after a relaunch.
@@ -99,13 +65,13 @@ pub struct Sharing {
     pub share: [u8; 16],
     /// The share room's secret, which every guest welcomed holds.
     pub secret: [u8; 16],
-    /// The code: its words, with its number in front once one was given.
+    /// The code, or its secret alone until it has a number (`super::code`).
     pub code: String,
     pub password: String,
 }
 
 impl Sharing {
-    /// A new share: its own id and secret, and new words.
+    /// A new share: its own id, room secret and code.
     pub fn new(password: &str) -> io::Result<Self> {
         let mut random = [0; 32];
         getrandom::fill(&mut random)
@@ -113,7 +79,7 @@ impl Sharing {
         Ok(Self {
             share: random[..16].try_into().expect("16 bytes"),
             secret: random[16..].try_into().expect("16 bytes"),
-            code: words()?,
+            code: super::code::secret()?,
             password: password.to_owned(),
         })
     }
@@ -127,9 +93,9 @@ pub fn location(share: &[u8; 16]) -> String {
 /// Why joining failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// Not a number and two words.
+    /// Not a code, or one mistyped, which spends none of the relay's tries.
     Malformed,
-    /// The code's words or password are wrong.
+    /// The code's secret or password is wrong.
     Wrong,
     /// No one shares with the code's number now.
     NoOne,
@@ -281,13 +247,13 @@ impl Host {
     }
 
     /// The code guests type, once it has its number, and none once stopped. A code with too
-    /// many wrong tries is replaced by one with new words.
+    /// many wrong tries is replaced by one with a new secret.
     pub fn code(&self) -> Option<String> {
         let mut pairing = self.pairing.lock().unwrap();
         let pairing = pairing.as_mut()?;
         if pairing.burned() {
             let mut sharing = self.sharing.lock().unwrap();
-            sharing.code = words().ok()?;
+            sharing.code = super::code::secret().ok()?;
             let relay = self.relay.as_deref();
             *pairing = pair(
                 &self.me,

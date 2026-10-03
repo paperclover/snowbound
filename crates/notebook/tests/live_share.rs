@@ -37,6 +37,12 @@ fn relay(config: relay::server::Config) -> String {
     url
 }
 
+/// Another secret than `secret`, as a guess makes one.
+fn mistaken(secret: &str) -> String {
+    let first = if secret.starts_with('A') { 'B' } else { 'A' };
+    format!("{first}{}", &secret[1..])
+}
+
 fn hello(name: &str) -> Hello {
     Hello::new(name.into(), None).unwrap()
 }
@@ -338,13 +344,24 @@ fn wrong_codes_are_refused_and_counted() {
     let sharing = Sharing::new("").unwrap();
     let host = host(&folder, &directory.path().join("host"), &sharing, &url);
     let code = code(&host);
-    let number = code.split('-').next().unwrap();
-    let wrong = format!("{number}-violet-ocelot");
+    let (number, secret) = notebook::live::code::parse(&code).unwrap();
+    let wrong = notebook::live::code::format(number, &mistaken(&secret)).unwrap();
     let join = |code: &str| share::join(hello("Mallory"), code, "", None, Some(&url));
     assert_eq!(join("not a code").unwrap_err(), Refusal::Malformed);
+    // A symbol mistyped fails its check here, spending none of the two tries before a burn.
+    let typo = format!(
+        "{}{}",
+        if code.starts_with('7') { '8' } else { '7' },
+        &code[1..]
+    );
+    assert_eq!(join(&typo).unwrap_err(), Refusal::Malformed);
+    assert_eq!(
+        join(&code.to_lowercase().replace('-', " ")).map(|_| ()),
+        Ok(())
+    );
     assert_eq!(join(&wrong).unwrap_err(), Refusal::Wrong);
     assert_eq!(join(&wrong).unwrap_err(), Refusal::Wrong);
-    // The code burned, and the host shares new words, under a number of their own.
+    // The code burned, and the host shares a new secret, under a number of its own.
     until("the code never changed", || {
         host.code()
             .is_some_and(|now| now != code && share::code(&now).is_some())
@@ -354,11 +371,9 @@ fn wrong_codes_are_refused_and_counted() {
         join(&code).unwrap_err(),
         Refusal::Expired | Refusal::NoOne
     ));
-    let number = fresh.split('-').next().unwrap();
-    assert_eq!(
-        join(&format!("{number}-violet-ocelot")).unwrap_err(),
-        Refusal::Wrong
-    );
+    let (number, secret) = notebook::live::code::parse(&fresh).unwrap();
+    let wrong = notebook::live::code::format(number, &mistaken(&secret)).unwrap();
+    assert_eq!(join(&wrong).unwrap_err(), Refusal::Wrong);
     // A third wrong code in a minute locks this network out, even from the right code.
     assert!(matches!(
         join(&fresh).unwrap_err(),
