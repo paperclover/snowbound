@@ -113,10 +113,12 @@ pub(crate) const DEFAULT_FONT: &str = "Arial";
 pub(crate) const DEFAULT_FONT_SIZE: f32 = 11.0;
 
 /// Metric-compatible faces for the fonts OneNote pages use most, under the SIL Open Font
-/// Licence files beside them, by the family each stands in for. The browser fetches them
-/// beside the module instead (`register_substitute`), keeping them out of it.
-#[cfg(not(target_arch = "wasm32"))]
-const BUNDLED: [(&str, &[&[u8]]); 4] = [
+/// Licence files beside them, by the family each stands in for. Each is left out where the
+/// system ships the family it stands in for: Windows ships all four, macOS and iOS all but
+/// Calibri. The browser fetches them beside the module instead (`register_substitute`),
+/// keeping them out of it.
+#[cfg(not(any(windows, target_arch = "wasm32")))]
+const BUNDLED: &[(&str, &[&[u8]])] = &[
     (
         "Calibri",
         &[
@@ -126,6 +128,7 @@ const BUNDLED: [(&str, &[&[u8]]); 4] = [
             include_bytes!("../assets/fonts/Carlito-BoldItalic.ttf"),
         ],
     ),
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     (
         "Arial",
         &[
@@ -133,6 +136,7 @@ const BUNDLED: [(&str, &[&[u8]]); 4] = [
             include_bytes!("../assets/fonts/Arimo-Italic.ttf"),
         ],
     ),
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     (
         "Times New Roman",
         &[
@@ -142,6 +146,7 @@ const BUNDLED: [(&str, &[&[u8]]); 4] = [
             include_bytes!("../assets/fonts/Tinos-BoldItalic.ttf"),
         ],
     ),
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
     (
         "Courier New",
         &[
@@ -156,7 +161,7 @@ const BUNDLED: [(&str, &[&[u8]]); 4] = [
 impl Default for TextEngine {
     /// An engine that lays out each bundled family in its substitute where it is missing.
     fn default() -> Self {
-        #[cfg_attr(target_arch = "wasm32", allow(unused_mut))]
+        #[cfg_attr(any(windows, target_arch = "wasm32"), allow(unused_mut))]
         let mut engine = Self {
             // Clones share loaded font files, so glyphs one lays out draw from the same cache.
             fonts: FontContext {
@@ -167,8 +172,8 @@ impl Default for TextEngine {
             arial_substitutes: BTreeSet::new(),
             substitutes: BTreeMap::new(),
         };
-        #[cfg(not(target_arch = "wasm32"))]
-        for (family, faces) in BUNDLED {
+        #[cfg(not(any(windows, target_arch = "wasm32")))]
+        for &(family, faces) in BUNDLED {
             if engine.fonts.collection.family_id(family).is_none() {
                 for face in faces {
                     engine
@@ -706,7 +711,9 @@ mod tests {
         if engine.substitute("Calibri").is_none() {
             return;
         }
-        let explicit = Blob::new(Arc::new(BUNDLED[0].1[0].to_vec()));
+        let explicit = Blob::new(Arc::new(
+            include_bytes!("../assets/fonts/Carlito-Regular.ttf").to_vec(),
+        ));
         assert_eq!(engine.register_substitute(explicit.clone()), Ok("Calibri"));
         let substitute = engine.substitute("Calibri").unwrap();
         assert_eq!(substitute.faces.len(), 1);
