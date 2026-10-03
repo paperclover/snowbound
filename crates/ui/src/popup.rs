@@ -20,7 +20,7 @@ pub(crate) const PAD: f32 = 4.0;
 /// A palette's rows and filter field, and Snowbound's more compact menu rows.
 const ROW: f32 = 26.0;
 pub(crate) const MENU_ROW: f32 = 22.0;
-/// Rows a list shows before it scrolls.
+/// Rows a palette or a dialog's list shows before it scrolls; a menu runs to the window's edge.
 const ROWS: f32 = 12.0;
 /// How long the pointer rests on a row before its submenu opens, as Windows waits by default.
 const SUBMENU_DELAY: Duration = Duration::from_millis(200);
@@ -115,6 +115,12 @@ pub fn menu(
                 .map_or(0.0, |badge| crate::badge_width(ui, badge) + ICON_GAP)
         })
         .collect();
+    let window = ui.rect(Id::ROOT).map_or(0.0, |window| window[3]);
+    let field = if filter.is_some() {
+        ROW + style.pad
+    } else {
+        0.0
+    };
     let mut measure = |text| ui.texts.label(text, style.font_size, ui.frame).size[0];
     let [text, shortcut] =
         items
@@ -140,7 +146,7 @@ pub fn menu(
         } else {
             0.0
         } + if icons(items) { ICON + ICON_GAP } else { 0.0 }
-            + if items.len() as f32 > ROWS {
+            + if items.len() as f32 * style.row > window - 4.0 * PAD - field {
                 GUTTER
             } else {
                 0.0
@@ -510,9 +516,13 @@ fn choose(
         0.0
     };
     let content = matches.count() as f32 * row + matches.space_before(matches.count());
-    let view = content
-        .max(row)
-        .min((ROWS * row).min(window - 4.0 * PAD - field).max(row));
+    let room = window - 4.0 * PAD - field;
+    let most = if role == Role::Menu {
+        room
+    } else {
+        (ROWS * row).min(room)
+    };
+    let view = content.max(row).min(most.max(row));
     let chosen = if matches.count() == 0 {
         ui.leaf(
             "empty",

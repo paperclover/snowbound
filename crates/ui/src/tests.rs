@@ -2025,6 +2025,36 @@ fn keys_move_the_selection_and_the_view_eases_after_it() {
 }
 
 #[test]
+fn a_menu_runs_to_the_window_edge_before_it_scrolls() {
+    let names: Vec<String> = (0..20).map(|index| format!("Item {index}")).collect();
+    let items: Vec<_> = names
+        .iter()
+        .map(|text| popup::Item {
+            text,
+            ..popup::Item::default()
+        })
+        .collect();
+    let build = |ui: &mut Ui, height: f32| {
+        sized_frame(ui, [400.0, height], |ui| {
+            popup::menu(ui, menu_id(), BELOW, &items, None);
+        })
+    };
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    build(&mut ui, 800.0);
+    ui.open_popup(menu_id());
+    for _ in 0..3 {
+        build(&mut ui, 800.0);
+    }
+    let bar = |ui: &Ui| ui.rect(menu_id().child("rows").child("bar"));
+    assert!(bar(&ui).is_none(), "twenty rows fit a tall window whole");
+    assert!(ui.rect(menu_id().child("rows").child(19u64)).is_some());
+    for _ in 0..3 {
+        build(&mut ui, 300.0);
+    }
+    assert!(bar(&ui).is_some(), "a short window scrolls them");
+}
+
+#[test]
 fn a_long_menu_scrolls_by_dragging_its_thumb() {
     let names: Vec<String> = (0..40).map(|index| format!("Item {index}")).collect();
     let items: Vec<_> = names
