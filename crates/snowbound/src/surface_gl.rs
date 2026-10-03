@@ -1,6 +1,8 @@
-//! Frames reach the window through an OpenGL context on its view, where wgpu has no
-//! backend: Mac OS X 10.6. Frames draw into an sRGB target and are copied to the view.
+//! Frames reach the window through an OpenGL context on its view: where wgpu has no
+//! backend, Mac OS X 10.6, or where OpenGL is chosen. Frames draw into an sRGB target and are
+//! copied to the view.
 
+use crate::settings::Backend;
 use draw::{Renderer, Target};
 use objc2::{
     ffi::NSInteger,
@@ -29,14 +31,24 @@ pub struct Frame {
     pub target: Target,
 }
 
+#[link(name = "OpenGL", kind = "framework")]
+unsafe extern "C" {
+    fn glGetString(name: u32) -> *const u8;
+}
+
 pub type Offscreen = Frame;
 
 impl Surface {
-    /// With `backdrop`, the surface is transparent where frames are.
+    /// Draws with OpenGL, the only `backend` it has; with `backdrop`, the surface is
+    /// transparent where frames are. Answers the driver's name too.
     pub async fn new(
         window: Arc<Window>,
         backdrop: bool,
-    ) -> Result<(Self, Renderer), Box<dyn Error>> {
+        backend: Backend,
+    ) -> Result<(Self, Renderer, String), Box<dyn Error>> {
+        if backend != Backend::Gl {
+            return Err(format!("This Mac has no {}", backend.label()).into());
+        }
         let RawWindowHandle::AppKit(handle) = window.window_handle()?.as_raw() else {
             unreachable!()
         };
@@ -70,7 +82,19 @@ impl Surface {
             context
         };
         let renderer = Renderer::opengl()?;
-        eprintln!("Canvas GPU: OpenGL");
+        let string = |name| unsafe {
+            let text = glGetString(name);
+            if text.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(text.cast())
+                    .to_string_lossy()
+                    .into_owned()
+            }
+        };
+        // GL_RENDERER and GL_VERSION.
+        let driver = format!("{} (OpenGL {})", string(0x1F01), string(0x1F02));
+        eprintln!("Canvas GPU: {driver}");
         let size = window.inner_size();
         Ok((
             Self {
@@ -80,6 +104,7 @@ impl Surface {
                 target: None,
             },
             renderer,
+            driver,
         ))
     }
 
@@ -123,5 +148,16 @@ impl Surface {
         offscreen: Offscreen,
     ) -> Result<Vec<u8>, Box<dyn Error>> {
         Ok(renderer.read_pixels(&offscreen.target)?)
+    }
+}
+
+/// Leaves the view to whatever draws next.
+impl Drop for Surface {
+    fn drop(&mut self) {
+        let class = AnyClass::get("NSOpenGLContext").expect("AppKit is linked");
+        unsafe {
+            let _: () = msg_send![&self.context, clearDrawable];
+            let _: () = msg_send![class, clearCurrentContext];
+        }
     }
 }

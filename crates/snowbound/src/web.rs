@@ -88,6 +88,10 @@ extern "C" {
     /// Keeps what `index.html`'s loading shell paints on the next visit.
     #[wasm_bindgen(js_name = keepLook)]
     fn keep_look(look: &str);
+    /// Puts `canvas` in the page in place of the canvas called page, which its input
+    /// follows.
+    #[wasm_bindgen(js_name = adoptCanvas)]
+    pub fn adopt_canvas(canvas: &web_sys::HtmlCanvasElement);
 }
 
 /// Where the browser keeps its notebooks, which a first visit makes one in.
@@ -221,6 +225,16 @@ pub fn canvas() -> web_sys::HtmlCanvasElement {
         .and_then(|document| document.get_element_by_id("page"))
         .and_then(|canvas| canvas.dyn_into().ok())
         .expect("index.html has a canvas called page")
+}
+
+/// A canvas like the page's, out of the page, with no context yet.
+pub fn fresh_canvas() -> Result<web_sys::HtmlCanvasElement, String> {
+    use wasm_bindgen::JsCast;
+    canvas()
+        .clone_node()
+        .map_err(|error| format!("{error:?}"))?
+        .dyn_into()
+        .map_err(|_| "A canvas's copy is a canvas".into())
 }
 
 fn host<T>(act: impl FnOnce(&mut Host) -> T) -> T {
@@ -921,9 +935,17 @@ pub async fn start(
         notebook::fs::mount(&root);
         restore(folder.get(1).into());
     }
-    let mut state = open(fonts)
-        .await
-        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    let renderer = location_renderer().map_err(|error| JsValue::from_str(&error))?;
+    let mut state = open(fonts, renderer).await.map_err(|error| {
+        // The page tells this apart from other failures: no way to draw at all.
+        if error.downcast_ref::<crate::NoGraphics>().is_some() {
+            let thrown = js_sys::Error::new(&error.to_string());
+            thrown.set_name("NoGraphicsError");
+            return JsValue::from(thrown);
+        }
+        JsValue::from_str(&error.to_string())
+    })?;
+    state.surface.show();
     // The first frame is the loading shell's layout, a toolbar over the page; `loaded` eases
     // the rest in.
     state.full_page = true;
@@ -1015,7 +1037,51 @@ fn store() {
 
 /// The window, as `launch` opens it with the notebooks the settings list, making the
 /// browser's first notebook on a first visit.
-async fn open(fonts: Vec<js_sys::Uint8Array>) -> Result<State, Box<dyn Error>> {
+/// The renderer the page's address asks for with `?renderer=NAME`, over the settings', as
+/// `--renderer` does on the desktop.
+fn location_renderer() -> Result<Option<settings::Backend>, String> {
+    let search = web_sys::window()
+        .and_then(|window| window.location().search().ok())
+        .unwrap_or_default();
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("renderer="))
+        .map(settings::Backend::named)
+        .transpose()
+}
+
+/// Draws with `chosen` from now on: its surface starts on a canvas of its own while the
+/// old one goes on drawing, then takes the old one's place.
+pub fn switch_renderer(state: &mut State, chosen: settings::Backend) {
+    let window = state.window.clone();
+    let mut unavailable = state.unavailable.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        let started = crate::start_surface(&window, false, chosen, &mut unavailable).await;
+        STATE.with_borrow_mut(|slot| {
+            let Some(state) = slot else {
+                return;
+            };
+            state.unavailable = unavailable;
+            match started {
+                Ok((surface, renderer, drawing)) => {
+                    surface.show();
+                    state.surface = surface;
+                    state.renderer = renderer;
+                    state.drawing = drawing;
+                    state.started_surface(chosen);
+                }
+                Err(error) => report(error),
+            }
+        });
+        request_frame();
+    });
+}
+
+async fn open(
+    fonts: Vec<js_sys::Uint8Array>,
+    renderer: Option<settings::Backend>,
+) -> Result<State, Box<dyn Error>> {
     let cache = PathBuf::from(CACHE);
     for folder in [NOTEBOOKS, CACHE, SETTINGS, CHOSEN] {
         notebook::fs::create_dir_all(folder)?;
@@ -1031,7 +1097,12 @@ async fn open(fonts: Vec<js_sys::Uint8Array>) -> Result<State, Box<dyn Error>> {
         locations: saved.notebooks.clone(),
         current: saved.current.clone(),
     };
-    let launch = settings::Launch { file, saved, cache };
+    let launch = settings::Launch {
+        file,
+        saved,
+        renderer,
+        cache,
+    };
     // Where `State` reads them from, kept out of what IndexedDB stores.
     let substitutes: Vec<PathBuf> = fonts
         .iter()

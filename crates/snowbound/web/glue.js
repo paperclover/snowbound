@@ -9,6 +9,9 @@ let picker;
 let framePending = false;
 let wakeTimer;
 let storage;
+// What `attach` hangs on the page's canvas, for `adoptCanvas` to move to the next one.
+const canvasListeners = [];
+let resizeObserver;
 
 /** The storage worker: the only place OPFS hands out synchronous handles, which write a
  * file's changed ranges in place. Runs as a worker of its own, from this source. */
@@ -508,6 +511,21 @@ function read(list) {
 
 const NOTEBOOK_FILES = /\.(one|onetoc2|onepkg)$/i;
 
+/** Puts `fresh` in the page in place of the canvas called page, as a renderer started on a
+ * canvas of its own needs; the page's input moves to it. */
+export function adoptCanvas(fresh) {
+  const old = document.getElementById("page");
+  if (old !== fresh) old.replaceWith(fresh);
+  if (!canvas) return;
+  for (const [type, listener, options] of canvasListeners) {
+    canvas.removeEventListener(type, listener, options);
+    fresh.addEventListener(type, listener, options);
+  }
+  resizeObserver.unobserve(canvas);
+  canvas = fresh;
+  resizeObserver.observe(canvas);
+}
+
 /** Wires the page's canvas, text area and file input to `module`'s exports. */
 export function attach(module) {
   wasm = module;
@@ -519,6 +537,10 @@ export function attach(module) {
     return [event.clientX - rect.left, event.clientY - rect.top];
   };
   const pressure = (event) => (event.pointerType === "pen" ? event.pressure : NaN);
+  const listen = (type, listener, options) => {
+    canvasListeners.push([type, listener, options]);
+    canvas.addEventListener(type, listener, options);
+  };
 
   // A finger pans the page or, with a second, pinches it; one that doesn't move taps it.
   const touches = new Map();
@@ -546,7 +568,7 @@ export function attach(module) {
     }
   };
 
-  canvas.addEventListener("pointerdown", (event) => {
+  listen("pointerdown", (event) => {
     event.preventDefault();
     input.focus({ preventScroll: true });
     canvas.setPointerCapture(event.pointerId);
@@ -559,7 +581,7 @@ export function attach(module) {
     wasm.pointer(0, ...point(event), -1, pressure(event), modifiers(event));
     wasm.pointer(1, ...point(event), event.button, pressure(event), modifiers(event));
   });
-  canvas.addEventListener("pointermove", (event) => {
+  listen("pointermove", (event) => {
     if (event.pointerType === "touch") {
       if (touches.has(event.pointerId)) touchMoved(event);
       return;
@@ -580,13 +602,13 @@ export function attach(module) {
     }
     wasm.pointer(2, ...point(event), event.button, pressure(event), modifiers(event));
   };
-  canvas.addEventListener("pointerup", up);
-  canvas.addEventListener("pointercancel", up);
-  canvas.addEventListener("pointerleave", (event) => {
+  listen("pointerup", up);
+  listen("pointercancel", up);
+  listen("pointerleave", (event) => {
     if (event.pointerType !== "touch") wasm.pointer(3, 0, 0, -1, NaN, modifiers(event));
   });
-  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
-  canvas.addEventListener(
+  listen("contextmenu", (event) => event.preventDefault());
+  listen(
     "wheel",
     (event) => {
       event.preventDefault();
@@ -666,12 +688,13 @@ export function attach(module) {
   };
   // Device pixels from the CSS size: emulated pixel ratios leave devicePixelContentBoxSize
   // at the CSS size.
-  new ResizeObserver(([entry]) =>
+  resizeObserver = new ResizeObserver(([entry]) =>
     resized(
       Math.round(entry.contentRect.width * devicePixelRatio),
       Math.round(entry.contentRect.height * devicePixelRatio),
     ),
-  ).observe(canvas);
+  );
+  resizeObserver.observe(canvas);
   offerAccessibility();
   input.focus({ preventScroll: true });
 }

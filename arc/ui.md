@@ -159,8 +159,10 @@ for itself, so F6 leaves it.
 
 ## `draw`: the renderer
 
-`draw` is a small wgpu renderer. A frame is a list of layers, each with its
-own transform and clip. A layer is a flat sequence of primitives: glyph runs,
+`draw` is a small renderer submitting through wgpu, or Direct3D 11, OpenGL 2.1
+or a browser's 2D canvas where wgpu can't; the backends share everything but
+their device layer. A frame is a list of layers, each with its own transform and
+clip. A layer is a flat sequence of primitives: glyph runs,
 SVG icons (tinted or in their own colours), SVG paths filled or stroked,
 rounded or gradient rectangles, pen strokes and raster images.
 

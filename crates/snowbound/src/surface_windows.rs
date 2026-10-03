@@ -1,18 +1,17 @@
 //! Frames reach the window through Direct3D 12 where Windows has it (10 and 11), otherwise
-//! through Direct3D 11, as on Windows 7, and failing both through OpenGL 2.1 on a WGL
-//! context. The last two draw into an sRGB target, copied to the window's back buffer.
-//! `SNOWBOUND_RENDERER` set to `d3d11` or `gl` picks one of those, and to anything else
-//! insists on Direct3D 12.
+//! through Direct3D 11, as on Windows 7, or OpenGL 2.1 on a WGL context. The last two draw
+//! into an sRGB target, copied to the window's back buffer.
 
 #[path = "surface.rs"]
 mod webgpu;
 
+use crate::settings::Backend as Chosen;
 use draw::{Renderer, Target};
 use std::{error::Error, sync::Arc};
 use windows_sys::Win32::{
     Foundation::HWND,
     Graphics::{
-        Gdi::{GetDC, HDC},
+        Gdi::{GetDC, HDC, ReleaseDC},
         OpenGL as gl,
     },
 };
@@ -31,8 +30,9 @@ enum Backend {
     Wgpu(Box<webgpu::Surface>),
     /// Direct3D 11 or OpenGL, which present the renderer's own targets.
     Native {
-        /// For OpenGL, the window's device context, which the context draws to.
-        opengl: Option<HDC>,
+        /// For OpenGL, the window, its device context, which the context draws to, and the
+        /// context.
+        opengl: Option<(HWND, HDC, gl::HGLRC)>,
         /// Frames leave the desktop's glass showing through their transparent pixels.
         translucent: bool,
         /// The frame target, kept between frames.
@@ -53,47 +53,40 @@ pub struct Offscreen {
 }
 
 impl Surface {
-    /// With `backdrop`, frames leave the system's material showing through their
-    /// transparent pixels.
+    /// Draws with `chosen`; with `backdrop`, frames leave the system's material showing
+    /// through their transparent pixels. Answers the adapter's name too.
     pub async fn new(
         window: Arc<Window>,
         backdrop: bool,
-    ) -> Result<(Self, Renderer), Box<dyn Error>> {
-        let forced = std::env::var("SNOWBOUND_RENDERER").ok();
-        let forced = forced.as_deref();
+        chosen: Chosen,
+    ) -> Result<(Self, Renderer, String), Box<dyn Error>> {
         let size = window.inner_size();
         let size = [size.width, size.height];
-        let native = |opengl, translucent, renderer| {
+        let native = |opengl, translucent, renderer, adapter| {
             let backend = Backend::Native {
                 opengl,
                 translucent,
                 target: None,
             };
-            Ok((Self { size, backend }, renderer))
+            Ok((Self { size, backend }, renderer, adapter))
         };
-        if !matches!(forced, Some("d3d11" | "gl")) {
-            match webgpu::Surface::new(window.clone(), backdrop).await {
-                Ok((surface, renderer)) => {
-                    let backend = Backend::Wgpu(Box::new(surface));
-                    return Ok((Self { size, backend }, renderer));
-                }
-                Err(error) if forced.is_some() => return Err(error),
-                Err(error) => eprintln!("No Direct3D 12 ({error})"),
-            }
+        if chosen == Chosen::D3d12 {
+            let (surface, renderer, adapter) =
+                webgpu::Surface::new(window.clone(), backdrop, chosen).await?;
+            let backend = Backend::Wgpu(Box::new(surface));
+            return Ok((Self { size, backend }, renderer, adapter));
         }
         let RawWindowHandle::Win32(handle) = window.window_handle()?.as_raw() else {
             unreachable!()
         };
         let hwnd = handle.hwnd.get() as HWND;
-        if forced != Some("gl") {
-            match Renderer::direct3d11(hwnd) {
-                Ok((renderer, adapter)) => {
-                    eprintln!("Canvas GPU: Direct3D 11 ({adapter})");
-                    return native(None, backdrop, renderer);
-                }
-                Err(error) if forced.is_some() => return Err(error.into()),
-                Err(error) => eprintln!("No Direct3D 11 ({error}); drawing with OpenGL"),
-            }
+        if chosen == Chosen::D3d11 {
+            let (renderer, adapter) = Renderer::direct3d11(hwnd)?;
+            eprintln!("Canvas GPU: Direct3D 11 ({adapter})");
+            return native(None, backdrop, renderer, adapter);
+        }
+        if chosen != Chosen::Gl {
+            return Err(format!("Windows has no {}", chosen.label()).into());
         }
         let device = unsafe { GetDC(hwnd) };
         let request = |alpha| gl::PIXELFORMATDESCRIPTOR {
@@ -123,16 +116,18 @@ impl Surface {
         };
         let mut format = request(if backdrop { 8 } else { 0 });
         let mut translucent = backdrop;
-        let mut chosen = accelerated(&format);
-        if chosen.is_none() && backdrop {
+        let mut picked = accelerated(&format);
+        if picked.is_none() && backdrop {
             eprintln!("No accelerated OpenGL format with alpha; drawing opaque");
             format = request(0);
             translucent = false;
-            chosen = accelerated(&format);
+            picked = accelerated(&format);
         }
-        unsafe {
-            let chosen = chosen.unwrap_or_else(|| gl::ChoosePixelFormat(device, &format));
-            if chosen == 0 || gl::SetPixelFormat(device, chosen, &format) == 0 {
+        let context = unsafe {
+            // A window takes its pixel format once, so OpenGL started again keeps the first.
+            let set = gl::GetPixelFormat(device);
+            let picked = picked.unwrap_or_else(|| gl::ChoosePixelFormat(device, &format));
+            if set == 0 && (picked == 0 || gl::SetPixelFormat(device, picked, &format) == 0) {
                 return Err("No OpenGL pixel format".into());
             }
             let context = gl::wglCreateContext(device);
@@ -146,7 +141,8 @@ impl Surface {
                     1,
                 );
             }
-        }
+            context
+        };
         let string = |name| unsafe {
             let text = gl::glGetString(name);
             if text.is_null() {
@@ -170,7 +166,7 @@ impl Surface {
                  the driver from your graphics card's maker. ({error})"
             )
         })?;
-        native(Some(device), translucent, renderer)
+        native(Some((hwnd, device, context)), translucent, renderer, driver)
     }
 
     /// Whether frames leave the system's backdrop showing.
@@ -234,7 +230,7 @@ impl Surface {
                 None,
             ) => {
                 renderer.present(&target, *translucent);
-                if let Some(device) = opengl {
+                if let Some((_, device, _)) = opengl {
                     unsafe { gl::SwapBuffers(*device) };
                 }
                 *kept = Some(target);
@@ -273,6 +269,23 @@ impl Surface {
             }
             (Backend::Native { .. }, target, None) => Ok(renderer.read_pixels(&target)?),
             _ => unreachable!("Snapshots come from the surface's own backend"),
+        }
+    }
+}
+
+/// Gives the window back its device context, for a renderer started after this one.
+impl Drop for Surface {
+    fn drop(&mut self) {
+        if let Backend::Native {
+            opengl: Some((window, device, context)),
+            ..
+        } = self.backend
+        {
+            unsafe {
+                gl::wglMakeCurrent(std::ptr::null_mut(), std::ptr::null_mut());
+                gl::wglDeleteContext(context);
+                ReleaseDC(window, device);
+            }
         }
     }
 }

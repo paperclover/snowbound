@@ -783,7 +783,7 @@ impl View {
         let primitives = canvas.page.primitives(canvas.colors())?;
         renderer
             .draw(
-                &frame.texture.create_view(&Default::default()),
+                &frame.texture.create_view(&Default::default()).into(),
                 [self.config.width, self.config.height],
                 paper.color,
                 &[canvas.page.viewport.layer(&primitives)],

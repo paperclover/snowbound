@@ -778,3 +778,41 @@ fn open_shared_notebook_is_offered_with_notebooks_open() {
         "{dialog}"
     );
 }
+
+/// Switching between Metal and OpenGL, again and again, leaves the page, its edits and the
+/// interface as they were.
+#[test]
+fn switching_renderers_keeps_the_window_as_it_was() {
+    let scratch = Scratch::new("renderer-switch");
+    let notebook = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/search/notebook");
+    let mut steps = vec![
+        "move 600 400".to_owned(),
+        "press".to_owned(),
+        "release".to_owned(),
+        "type switching renderers ".to_owned(),
+        "settle".to_owned(),
+        "accessibility before".to_owned(),
+    ];
+    for round in 0..5 {
+        for renderer in ["gl", "metal"] {
+            steps.push(format!("renderer {renderer}"));
+            steps.push("settle".to_owned());
+            steps.push(format!("accessibility {renderer}-{round}"));
+        }
+    }
+    steps.extend([
+        "type and after".to_owned(),
+        "accessibility after".to_owned(),
+    ]);
+    let steps: Vec<&str> = steps.iter().map(String::as_str).collect();
+    let trees = replay(&scratch, Some(&notebook), &steps);
+    let (before, after) = (&trees[0], &trees[trees.len() - 1]);
+    assert!(before.contains("switching renderers"), "{before}");
+    for tree in &trees[1..trees.len() - 1] {
+        assert_eq!(tree, before, "a switch changed the window");
+    }
+    assert!(
+        after.contains("switching renderers and after"),
+        "the caret stayed put: {after}"
+    );
+}

@@ -434,6 +434,11 @@ impl Gpu {
         }
     }
 
+    /// Blends in linear light, its targets being sRGB.
+    pub(super) fn blends_linear(&self) -> bool {
+        true
+    }
+
     /// Offscreen pictures' rows run bottom first.
     pub(super) fn flipped(&self) -> bool {
         true
@@ -581,8 +586,8 @@ impl Gpu {
                 );
             }
             glEnable(BLEND);
-            for (batches, picture) in frame.groups.iter().zip(&gpu.groups) {
-                paint(picture, [0.0; 4], batches);
+            for (group, picture) in frame.groups.iter().zip(&gpu.groups) {
+                paint(picture, [0.0; 4], &group.batches);
             }
             paint(target, clear, frame.batches);
             glDisable(SCISSOR_TEST);

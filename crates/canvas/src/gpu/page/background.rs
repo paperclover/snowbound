@@ -1009,7 +1009,7 @@ mod tests {
         };
         renderer
             .draw(
-                &target.create_view(&Default::default()),
+                &target.create_view(&Default::default()).into(),
                 size,
                 DARK.color,
                 &[viewport.layer(&primitives)],

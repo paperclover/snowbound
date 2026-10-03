@@ -79,7 +79,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     renderer
         .draw(
-            &target.create_view(&Default::default()),
+            &target.create_view(&Default::default()).into(),
             size,
             [1.0; 4],
             &[viewport.layer(&primitives)],

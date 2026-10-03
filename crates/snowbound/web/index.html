@@ -191,10 +191,6 @@
     fail("Snowbound is open in another tab. Close it, then reload this one.");
     throw new Error("Snowbound is open in another tab");
   }
-  if (!navigator.gpu && !document.createElement("canvas").getContext("webgl2")) {
-    fail("This browser can’t draw Snowbound: it has neither WebGPU nor WebGL 2.\nOpen it in a current Chrome, Edge, Safari or Firefox.");
-    throw new Error("No WebGPU or WebGL 2");
-  }
   try {
     const [, fonts, dictionaries] = await Promise.all([
       // Typed here, so the module compiles as it streams in from any server.
@@ -207,9 +203,22 @@
     ]);
     status.textContent = "Starting Snowbound";
     await snowbound.start(snowbound, fonts, dictionaries);
+    sessionStorage.removeItem("snowbound.refetched");
   } catch (error) {
-    // A download that failed rejects with a TypeError, or a status `counted` names.
-    fail(error instanceof TypeError || /: \d{3}$/.test(error.message)
+    // A module and JavaScript from different builds can't link: an old cached copy. Once,
+    // load the page afresh, which names the newest build's.
+    if (error instanceof WebAssembly.LinkError && !sessionStorage.getItem("snowbound.refetched")) {
+      sessionStorage.setItem("snowbound.refetched", "1");
+      const fresh = new URL(location.href);
+      fresh.searchParams.set("fresh", Date.now());
+      location.replace(fresh);
+      throw error;
+    }
+    // `start` rejects with a NoGraphicsError where not even the 2D canvas draws; a download
+    // that failed rejects with a TypeError, or a status `counted` names.
+    fail(error.name === "NoGraphicsError"
+      ? "This browser can’t draw Snowbound.\nOpen it in a current Chrome, Edge, Safari or Firefox."
+      : error instanceof TypeError || /: \d{3}$/.test(error.message)
       ? "Snowbound couldn’t download. Check your connection, then reload."
       : `Snowbound couldn’t start: ${error.message ?? error}`);
     throw error;

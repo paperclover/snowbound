@@ -1,6 +1,6 @@
 //! Frames reach the window through wgpu.
 
-use crate::{Window, platform, trace_input};
+use crate::{Window, platform, settings::Backend, trace_input};
 use draw::Renderer;
 use std::{error::Error, sync::Arc};
 
@@ -8,6 +8,9 @@ pub struct Surface {
     /// Device pixels frames and snapshots are drawn at; `configure` gives the window it.
     pub size: [u32; 2],
     window: Arc<Window>,
+    /// The canvas a browser's frames show in.
+    #[cfg(target_arch = "wasm32")]
+    canvas: web_sys::HtmlCanvasElement,
     device: wgpu::Device,
     queue: wgpu::Queue,
     instance: wgpu::Instance,
@@ -32,47 +35,56 @@ pub struct Offscreen {
 }
 
 impl Surface {
-    /// With `backdrop`, frames leave the system's material showing through their
-    /// transparent pixels.
+    /// Draws with `backend` through wgpu; with `backdrop`, frames leave the system's
+    /// material showing through their transparent pixels. Answers the adapter's name too.
     pub async fn new(
         window: Arc<Window>,
         backdrop: bool,
-    ) -> Result<(Self, Renderer), Box<dyn Error>> {
+        backend: Backend,
+        #[cfg(target_arch = "wasm32")] canvas: web_sys::HtmlCanvasElement,
+    ) -> Result<(Self, Renderer, String), Box<dyn Error>> {
         #[cfg(target_arch = "wasm32")]
-        let instance = {
-            let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
-            descriptor.backends = wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL;
-            wgpu::util::new_instance_with_webgpu_detection(descriptor).await
-        };
+        let mut descriptor = wgpu::InstanceDescriptor::new_without_display_handle();
         #[cfg(not(target_arch = "wasm32"))]
-        #[cfg_attr(not(any(windows, target_os = "linux")), expect(unused_mut))]
         let mut descriptor =
             wgpu::InstanceDescriptor::new_with_display_handle_from_env(Box::new(window.clone()));
+        descriptor.backends = match backend {
+            Backend::Webgpu => wgpu::Backends::BROWSER_WEBGPU,
+            Backend::Webgl2 | Backend::Gl => wgpu::Backends::GL,
+            Backend::Metal => wgpu::Backends::METAL,
+            Backend::Vulkan => wgpu::Backends::VULKAN,
+            Backend::D3d12 => wgpu::Backends::DX12,
+            _ => return Err(format!("wgpu has no {}", backend.label()).into()),
+        };
         // wgpu's OpenGL panics drawing to a Wayland window without libwayland-egl.
         #[cfg(target_os = "linux")]
         {
             use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
-            if matches!(
-                window.window_handle()?.as_raw(),
-                RawWindowHandle::Wayland(_)
-            ) && !crate::loader::loads(c"libwayland-egl.so.1")
+            if backend == Backend::Gl
+                && matches!(
+                    window.window_handle()?.as_raw(),
+                    RawWindowHandle::Wayland(_)
+                )
+                && !crate::loader::loads(c"libwayland-egl.so.1")
             {
-                descriptor.backends.remove(wgpu::Backends::GL);
+                return Err("Needs libwayland-egl".into());
             }
         }
-        // Direct3D 12, which Windows 10 and 11 always have, and through DirectComposition
-        // where the backdrop shows through; elsewhere `surface_windows` draws with OpenGL.
+        // Through DirectComposition where the backdrop shows through.
         #[cfg(windows)]
-        {
-            descriptor.backends = wgpu::Backends::DX12;
-            if backdrop {
-                descriptor.backend_options.dx12.presentation_system =
-                    wgpu::Dx12SwapchainKind::DxgiFromVisual;
-            }
+        if backdrop {
+            descriptor.backend_options.dx12.presentation_system =
+                wgpu::Dx12SwapchainKind::DxgiFromVisual;
         }
+        #[cfg(target_arch = "wasm32")]
+        let instance = wgpu::util::new_instance_with_webgpu_detection(descriptor).await;
         #[cfg(not(target_arch = "wasm32"))]
         let instance = wgpu::Instance::new(descriptor);
-        let surface = instance.create_surface(target(&window))?;
+        #[cfg(target_arch = "wasm32")]
+        let target = wgpu::SurfaceTarget::Canvas(canvas.clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        let target: wgpu::SurfaceTarget<'static> = window.clone().into();
+        let surface = instance.create_surface(target)?;
         platform::configure_presentation(&surface);
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -121,12 +133,15 @@ impl Surface {
             config.view_formats.push(view_format);
         }
         surface.configure(&device, &config);
-        eprintln!("Canvas GPU: {:?}", adapter.get_info());
+        let info = adapter.get_info();
+        eprintln!("Canvas GPU: {info:?}");
         let renderer = Renderer::new(device.clone(), queue.clone(), view_format);
         Ok((
             Self {
                 size: [config.width, config.height],
                 window,
+                #[cfg(target_arch = "wasm32")]
+                canvas,
                 device,
                 queue,
                 instance,
@@ -136,6 +151,7 @@ impl Surface {
                 translucent,
             },
             renderer,
+            info.name,
         ))
     }
 
@@ -163,7 +179,7 @@ impl Surface {
                 return Ok(None);
             }
             wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface = self.instance.create_surface(target(&self.window))?;
+                self.surface = self.instance.create_surface(self.target())?;
                 platform::configure_presentation(&self.surface);
                 self.configure(renderer);
                 self.window.request_redraw();
@@ -237,6 +253,14 @@ impl Surface {
         })
     }
 
+    /// What the surface presents to: the window, or in the browser its canvas.
+    fn target(&self) -> wgpu::SurfaceTarget<'static> {
+        #[cfg(target_arch = "wasm32")]
+        return wgpu::SurfaceTarget::Canvas(self.canvas.clone());
+        #[cfg(not(target_arch = "wasm32"))]
+        self.window.clone().into()
+    }
+
     /// The offscreen target's sRGB RGBA rows, top first.
     pub fn read(&self, _: &Renderer, offscreen: Offscreen) -> Result<Vec<u8>, Box<dyn Error>> {
         let size = self.size;
@@ -283,20 +307,20 @@ impl Surface {
     }
 }
 
-/// What the surface presents to: the window, or in the browser the page's canvas.
-fn target(window: &Arc<Window>) -> wgpu::SurfaceTarget<'static> {
-    #[cfg(target_arch = "wasm32")]
-    return {
-        let _ = window;
-        wgpu::SurfaceTarget::Canvas(platform::canvas())
-    };
-    #[cfg(not(target_arch = "wasm32"))]
-    window.clone().into()
+/// Takes the layer out of the view, for whatever draws next.
+#[cfg(target_os = "macos")]
+impl Drop for Surface {
+    fn drop(&mut self) {
+        platform::release_presentation(&self.surface);
+    }
 }
 
 /// `view` as what the renderer draws into, which is the view itself unless `draw` also
-/// paints through OpenGL, as on Windows.
-#[cfg_attr(not(windows), expect(clippy::useless_conversion))]
+/// paints otherwise: through Direct3D 11 or OpenGL, or a browser's 2D canvas.
+#[cfg_attr(
+    not(any(windows, target_os = "macos", target_arch = "wasm32")),
+    expect(clippy::useless_conversion)
+)]
 fn target_of(view: wgpu::TextureView) -> draw::Target {
     view.into()
 }

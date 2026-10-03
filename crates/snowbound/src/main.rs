@@ -77,7 +77,9 @@ mod sidebar;
 #[cfg_attr(target_arch = "wasm32", path = "spell_web.rs")]
 mod spell;
 #[cfg_attr(not(feature = "wgpu"), path = "surface_gl.rs")]
+#[cfg_attr(all(target_os = "macos", feature = "wgpu"), path = "surface_macos.rs")]
 #[cfg_attr(windows, path = "surface_windows.rs")]
+#[cfg_attr(target_arch = "wasm32", path = "surface_web.rs")]
 mod surface;
 mod symbol;
 mod sync;
@@ -305,6 +307,8 @@ enum UserEvent {
     /// forward despite the desktop's focus-stealing prevention.
     #[cfg(target_os = "linux")]
     Activate(String),
+    /// Draws with this backend from now on.
+    Renderer(settings::Backend),
 }
 
 /// Asks the event loop for a frame from any thread.
@@ -384,6 +388,8 @@ enum Replay {
     Appearance(winit::window::Theme),
     /// Resizes the window's content, in points.
     Resize([f32; 2]),
+    /// Draws with this backend from then on, as Options' Renderer does.
+    Renderer(settings::Backend),
     Quit,
 }
 
@@ -783,8 +789,18 @@ struct State {
     swipe: navigation::Swipe,
     /// Asks for a frame when a worker thread finishes something the page shows.
     redraw: std::task::Waker,
-    surface: surface::Surface,
+    /// Dropped before `surface`, as an OpenGL renderer needs its context.
     renderer: Renderer,
+    surface: surface::Surface,
+    /// Whether the system's material shows behind the window, which a surface started
+    /// again keeps.
+    backdrop: bool,
+    /// Options' Renderer, as the settings keep it.
+    renderer_choice: settings::Backend,
+    /// The backend frames are drawn with, and its adapter's name.
+    drawing: (settings::Backend, String),
+    /// Backends that failed to start this run, and why.
+    unavailable: Vec<(settings::Backend, String)>,
     ui: Ui,
     view: PageView,
     /// The open notebooks in the sidebar's order.
@@ -972,6 +988,62 @@ fn sections() -> Id {
     Id::ROOT.child("sections")
 }
 
+/// Why no backend could draw the window: each one tried, and how it failed.
+#[derive(Debug)]
+struct NoGraphics(Vec<(settings::Backend, String)>);
+
+impl std::fmt::Display for NoGraphics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tried: Vec<_> = (self.0.iter())
+            .map(|(backend, error)| format!("{} ({error})", backend.label()))
+            .collect();
+        write!(f, "Nothing could draw the window: {}", tried.join("; "))
+    }
+}
+
+impl Error for NoGraphics {}
+
+/// Notes what drawing started or failed with, where the platform keeps such notes.
+fn note(message: &str) {
+    #[cfg(target_arch = "wasm32")]
+    web_sys::console::info_1(&message.into());
+    #[cfg(not(target_arch = "wasm32"))]
+    eprintln!("{message}");
+}
+
+/// Starts the window's surface with `chosen`, or else with the platform's backends in turn,
+/// skipping those in `unavailable`, which gains each that fails. Answers the backend that
+/// started and its adapter's name.
+async fn start_surface(
+    window: &Arc<Window>,
+    backdrop: bool,
+    chosen: settings::Backend,
+    unavailable: &mut Vec<(settings::Backend, String)>,
+) -> Result<(surface::Surface, Renderer, (settings::Backend, String)), Box<dyn Error>> {
+    let mut order = vec![chosen];
+    order.extend(settings::Backend::PLATFORM.iter().filter(|backend| {
+        **backend != chosen && !unavailable.iter().any(|(failed, _)| failed == *backend)
+    }));
+    for backend in order {
+        if backend == settings::Backend::Default {
+            continue;
+        }
+        match surface::Surface::new(window.clone(), backdrop, backend).await {
+            Ok((surface, renderer, adapter)) => {
+                note(&format!("Drawing with {} ({adapter})", backend.label()));
+                unavailable.retain(|(failed, _)| *failed != backend);
+                return Ok((surface, renderer, (backend, adapter)));
+            }
+            Err(error) => {
+                note(&format!("{} didn't start: {error}", backend.label()));
+                unavailable.retain(|(failed, _)| *failed != backend);
+                unavailable.push((backend, error.to_string()));
+            }
+        }
+    }
+    Err(Box::new(NoGraphics(unavailable.clone())))
+}
+
 impl State {
     async fn new(
         event_loop: &ActiveEventLoop,
@@ -982,6 +1054,7 @@ impl State {
         settings::Launch {
             file: settings,
             saved: stored,
+            renderer: forced,
             cache,
         }: settings::Launch,
     ) -> Result<Self, Box<dyn Error>> {
@@ -1022,7 +1095,10 @@ impl State {
         let access_adapter =
             AccessAdapter::with_event_loop_proxy(event_loop, &window, proxy.clone());
         window.set_visible(visible);
-        let (surface, renderer) = surface::Surface::new(window.clone(), backdrop).await?;
+        let chosen = forced.unwrap_or(stored.renderer);
+        let mut unavailable = Vec::new();
+        let (surface, renderer, drawing) =
+            start_surface(&window, backdrop, chosen, &mut unavailable).await?;
         let size = window.inner_size();
         let mut engine = TextEngine::default();
         let fallbacks = platform::symbol_fonts();
@@ -1161,11 +1237,11 @@ impl State {
             .unwrap_or_else(|| platform::appearance(&window));
         platform::follow_appearance(&window, appearance);
         let mut ui = Ui::new(
-            theme(appearance, stored.light_pages, backdrop),
+            theme(appearance, stored.light_pages, surface.translucent()),
             platform::double_click_interval(),
         );
         let titlebar = platform::titlebar(appearance)
-            .filter(|_| !backdrop)
+            .filter(|_| !surface.translucent())
             .unwrap_or([ui.theme.strip; 2]);
         // A window shown but never focused hears no focus event; a hidden one draws as focused.
         ui.window_focused = !visible || window.has_focus();
@@ -1205,8 +1281,12 @@ impl State {
             window,
             redraw,
             proxy,
-            surface,
             renderer,
+            surface,
+            backdrop,
+            renderer_choice: stored.renderer,
+            drawing,
+            unavailable,
             ui,
             view: PageView::new(
                 editor,
@@ -1336,7 +1416,66 @@ impl State {
         state.show_spelling();
         state.title();
         platform::update_tag_menu(&state.tags);
+        state.tell_fallback(chosen);
         Ok(state)
+    }
+
+    /// Says so where `chosen` didn't start and another backend draws instead.
+    fn tell_fallback(&self, chosen: settings::Backend) {
+        if chosen != settings::Backend::Default && self.drawing.0 != chosen {
+            platform::alert(
+                &format!("Couldn't start {}", chosen.label()),
+                &format!(
+                    "Snowbound is drawing with {} instead.",
+                    self.drawing.0.label()
+                ),
+            );
+        }
+    }
+
+    /// Draws with `chosen` from now on, in place of what draws now, the window's state
+    /// staying as it is. The window takes one swap chain or context at a time, so the old
+    /// renderer and surface go first; where nothing starts, the window can't go on.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn switch_renderer(mut self, chosen: settings::Backend) -> Result<Self, Box<dyn Error>> {
+        drop(self.renderer);
+        drop(self.surface);
+        let (surface, renderer, drawing) = pollster::block_on(start_surface(
+            &self.window,
+            self.backdrop,
+            chosen,
+            &mut self.unavailable,
+        ))?;
+        self.surface = surface;
+        self.renderer = renderer;
+        self.drawing = drawing;
+        self.started_surface(chosen);
+        Ok(self)
+    }
+
+    /// Switches to the renderer the settings file names, where it was edited to name another
+    /// while the window was away.
+    fn follow_renderer_setting(&mut self) {
+        let Some(path) = &self.settings else {
+            return;
+        };
+        let chosen = settings::Settings::load(path).renderer;
+        if chosen != self.renderer_choice {
+            self.renderer_choice = chosen;
+            let _ = self.proxy.send_event(UserEvent::Renderer(chosen));
+        }
+    }
+
+    /// Fits a surface just started to the window, and says where it isn't what was chosen.
+    fn started_surface(&mut self, chosen: settings::Backend) {
+        let ratio = self.scale() / self.window.scale_factor() as f32;
+        let size = self.window.inner_size();
+        self.surface.size = [size.width, size.height].map(|side| (side as f32 * ratio) as u32);
+        self.surface.configure(&self.renderer);
+        // Its colours follow whether the system's material shows through.
+        self.follow_color_scheme();
+        self.tell_fallback(chosen);
+        self.window.request_redraw();
     }
 
     /// Builds, lays out and paints one frame, then does what it asked for and asks for the
@@ -6010,6 +6149,10 @@ impl State {
                 self.window.request_redraw();
             }
             UserEvent::Redraw => self.window.request_redraw(),
+            #[cfg(target_arch = "wasm32")]
+            UserEvent::Renderer(chosen) => platform::switch_renderer(self, chosen),
+            #[cfg(not(target_arch = "wasm32"))]
+            UserEvent::Renderer(_) => unreachable!("The app switches renderers"),
             UserEvent::Replay(replay) => {
                 let mark = match replay {
                     Replay::Mark(at) => Some(at),
@@ -6036,6 +6179,7 @@ impl State {
                             .window
                             .request_inner_size(LogicalSize::new(width, height));
                     }
+                    Replay::Renderer(_) => unreachable!("The app switches renderers"),
                 }
                 // A covered window gets no redraws, so each step draws its own frame.
                 if let Err(error) = self.frame() {
@@ -6163,6 +6307,16 @@ impl ApplicationHandler<UserEvent> for App {
         match event {
             UserEvent::Quit | UserEvent::Replay(Replay::Quit) => self.close(event_loop),
             UserEvent::Exit => self.exit(event_loop),
+            UserEvent::Renderer(chosen) | UserEvent::Replay(Replay::Renderer(chosen)) => {
+                let state = self.state.take().expect("The window is open");
+                match state.switch_renderer(chosen) {
+                    Ok(state) => self.state = Some(state),
+                    Err(error) => {
+                        self.startup_error = Some(error);
+                        event_loop.exit();
+                    }
+                }
+            }
             event => state.user_event(event),
         }
     }
@@ -6266,6 +6420,7 @@ impl ApplicationHandler<UserEvent> for App {
                     } else {
                         // Notebooks another device added or removed meanwhile.
                         state.list_icloud();
+                        state.follow_renderer_setting();
                     }
                     state.window.request_redraw();
                 }
@@ -6457,6 +6612,7 @@ fn replay(script: String, proxy: EventLoopProxy<UserEvent>) -> Result<(), Box<dy
             "snapshot" => Ok(Replay::Snapshot(rest.into())),
             "settle" => Ok(Replay::Settle(None, settle.clone())),
             "accessibility" => Ok(Replay::Settle(Some(rest.into()), settle.clone())),
+            "renderer" => Ok(Replay::Renderer(settings::Backend::named(rest)?)),
             "appearance" => Ok(Replay::Appearance(match rest {
                 "light" => winit::window::Theme::Light,
                 "dark" => winit::window::Theme::Dark,
@@ -6538,6 +6694,7 @@ fn launch() -> Result<(), Box<dyn Error>> {
     let mut cache = None;
     let mut settings_file = None;
     let mut screenshot = None;
+    let mut renderer = None;
     let mut opening = Vec::new();
     while let Some(arg) = args.next() {
         if arg == "--substitute-font" {
@@ -6574,6 +6731,9 @@ fn launch() -> Result<(), Box<dyn Error>> {
                 args.next()
                     .ok_or("Provide a settings file after --settings.")?,
             ));
+        } else if arg == "--renderer" {
+            let name = args.next().ok_or("Provide a renderer after --renderer.")?;
+            renderer = Some(settings::Backend::named(&name.to_string_lossy())?);
         } else if arg == "--screenshot" {
             screenshot = Some(PathBuf::from(
                 args.next()
@@ -6606,6 +6766,11 @@ fn launch() -> Result<(), Box<dyn Error>> {
             positional.push(arg);
         }
     }
+    let renderer = match (renderer, std::env::var("SNOWBOUND_RENDERER")) {
+        (Some(renderer), _) => Some(renderer),
+        (None, Ok(name)) => Some(settings::Backend::named(&name)?),
+        (None, Err(_)) => None,
+    };
     AUTOMATED.store(
         screenshot.is_some() || std::env::var_os("SNOWBOUND_REPLAY").is_some(),
         Ordering::Relaxed,
@@ -6620,7 +6785,7 @@ fn launch() -> Result<(), Box<dyn Error>> {
     }
     if positional.len() > 2 {
         return Err(
-            "Usage: snowbound [NOTEBOOK_FOLDER | SECTION.one | TOC.onetoc2]... [TEXT_FILE] [WIDTH_POINTS] [--reference SECTION PAGE_TITLE | --page SECTION PAGE_TITLE | --section SECTION PAGE_TITLE | --notebook FOLDER] [--cache DIR] [--settings FILE] [--screenshot PNG_PREFIX] [--substitute-font FONT_FILE]..."
+            "Usage: snowbound [NOTEBOOK_FOLDER | SECTION.one | TOC.onetoc2]... [TEXT_FILE] [WIDTH_POINTS] [--reference SECTION PAGE_TITLE | --page SECTION PAGE_TITLE | --section SECTION PAGE_TITLE | --notebook FOLDER] [--cache DIR] [--settings FILE] [--renderer NAME] [--screenshot PNG_PREFIX] [--substitute-font FONT_FILE]..."
                 .into(),
         );
     }
@@ -6700,6 +6865,7 @@ fn launch() -> Result<(), Box<dyn Error>> {
         launch: Some(settings::Launch {
             file: settings_file.filter(|_| screenshot.is_none()),
             saved,
+            renderer,
             cache,
         }),
         opening,

@@ -7,10 +7,10 @@ publish = false
 [features]
 default = ["wgpu"]
 # The renderer; `edit` needs only parley. It submits through wgpu, or without it through
-# OpenGL 2.1, for Mac OS X 10.6. On Windows it has Direct3D 11 and OpenGL besides, and its
-# maker picks one, as Windows 7 has no Direct3D 12.
+# OpenGL 2.1, for Mac OS X 10.6. On Windows it has Direct3D 11 and OpenGL besides, as Windows
+# 7 has no Direct3D 12, on macOS OpenGL, and in a browser the 2D canvas; its maker picks one.
 render = ["dep:base64", "dep:bytemuck", "dep:image", "dep:linebender_resource_handle", "dep:roxmltree", "dep:skrifa", "dep:swash"]
-wgpu = ["render", "dep:wgpu", "dep:windows"]
+wgpu = ["render", "dep:wgpu", "dep:windows", "dep:js-sys", "dep:wasm-bindgen", "dep:web-sys"]
 # Writes layers as PDF pages, text as real text in subset fonts.
 pdf = ["render", "dep:miniz_oxide", "dep:pdf-writer", "dep:subsetter"]
 
@@ -40,6 +40,25 @@ windows = { version = "0.62", default-features = false, optional = true, feature
     "Win32_Graphics_Dxgi_Common",
     "Win32_System_LibraryLoader",
     "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { version = "0.3", optional = true }
+wasm-bindgen = { version = "0.2", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "CanvasGradient",
+    "CanvasRenderingContext2d",
+    "CanvasWindingRule",
+    "console",
+    "CssStyleDeclaration",
+    "Document",
+    "DomRect",
+    "Element",
+    "HtmlCanvasElement",
+    "HtmlElement",
+    "ImageData",
+    "Node",
+    "Window",
 ] }
 
 [dev-dependencies]

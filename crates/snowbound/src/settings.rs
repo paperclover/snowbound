@@ -54,6 +54,96 @@ pub struct Settings {
     pub live: Live,
     /// Options' "Default for new notebooks": the built-in theme new notebooks take.
     pub notebook_theme: NotebookTheme,
+    /// Options' Renderer, which `--renderer` and `SNOWBOUND_RENDERER` override.
+    pub renderer: Backend,
+}
+
+/// What the window draws with: one of the platform's backends, or the first of them that
+/// starts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "String", into = "&'static str")]
+pub enum Backend {
+    #[default]
+    Default,
+    D3d12,
+    D3d11,
+    Metal,
+    Vulkan,
+    Gl,
+    Webgpu,
+    Webgl2,
+    Canvas2d,
+}
+
+impl Backend {
+    /// Each backend's name in the settings and on the command line, and as Options shows it.
+    const NAMES: [(Self, &str, &str); 9] = [
+        (Self::Default, "default", "Default"),
+        (Self::D3d12, "d3d12", "Direct3D 12"),
+        (Self::D3d11, "d3d11", "Direct3D 11"),
+        (Self::Metal, "metal", "Metal"),
+        (Self::Vulkan, "vulkan", "Vulkan"),
+        (Self::Gl, "gl", "OpenGL"),
+        (Self::Webgpu, "webgpu", "WebGPU"),
+        (Self::Webgl2, "webgl2", "WebGL 2"),
+        (Self::Canvas2d, "canvas2d", "Canvas 2D"),
+    ];
+
+    /// The platform's backends, in the order the default tries them.
+    pub const PLATFORM: &[Self] = if cfg!(target_arch = "wasm32") {
+        &[Self::Webgpu, Self::Webgl2, Self::Canvas2d]
+    } else if cfg!(windows) {
+        &[Self::D3d12, Self::D3d11, Self::Gl]
+    } else if cfg!(all(target_os = "macos", feature = "wgpu")) {
+        &[Self::Metal, Self::Gl]
+    } else if cfg!(target_os = "macos") {
+        &[Self::Gl]
+    } else {
+        &[Self::Vulkan, Self::Gl]
+    };
+
+    /// The backend `name` names, or why it names none.
+    pub fn named(name: &str) -> Result<Self, String> {
+        let platform = || std::iter::once(&Self::Default).chain(Self::PLATFORM);
+        platform()
+            .find(|backend| backend.name() == name)
+            .copied()
+            .ok_or_else(|| {
+                let names: Vec<_> = platform().map(|backend| backend.name()).collect();
+                format!("Unknown renderer {name}; use one of {}.", names.join(", "))
+            })
+    }
+
+    fn entry(self) -> (Self, &'static str, &'static str) {
+        Self::NAMES
+            .into_iter()
+            .find(|(backend, ..)| *backend == self)
+            .expect("Every backend is named")
+    }
+
+    pub fn name(self) -> &'static str {
+        self.entry().1
+    }
+
+    pub fn label(self) -> &'static str {
+        self.entry().2
+    }
+}
+
+/// A name another platform's backend, or none, has falls back to the default.
+impl From<String> for Backend {
+    fn from(name: String) -> Self {
+        Self::named(&name).unwrap_or_else(|error| {
+            eprintln!("{error}");
+            Self::Default
+        })
+    }
+}
+
+impl From<Backend> for &'static str {
+    fn from(backend: Backend) -> Self {
+        backend.name()
+    }
 }
 
 /// Options' Live Share.
@@ -232,6 +322,7 @@ impl crate::State {
             passwords: self.passwords,
             notebook_theme: NotebookTheme(self.notebook_theme.clone()),
             live: self.live_options.clone(),
+            renderer: self.renderer_choice,
         };
         if let Err(error) = settings.save(path) {
             eprintln!("Cannot save the settings in {}: {error}", path.display());
@@ -244,6 +335,8 @@ pub struct Launch {
     /// Where the settings are saved; `None` leaves them as they were read.
     pub file: Option<PathBuf>,
     pub saved: Settings,
+    /// The renderer `--renderer` or `SNOWBOUND_RENDERER` asks for, over the settings'.
+    pub renderer: Option<Backend>,
     /// The directory holding the sections' replicas.
     pub cache: PathBuf,
 }
@@ -322,6 +415,7 @@ mod tests {
                 relay: Some("wss://relay.example.net".into()),
             },
             notebook_theme: NotebookTheme(None),
+            renderer: Backend::PLATFORM[0],
         };
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
@@ -341,6 +435,11 @@ mod tests {
         // New notebooks take Modern until another theme, or none, is picked.
         let theme = Settings::load(&path).notebook_theme;
         assert_eq!(theme.0.as_deref(), Some(notebook::sidecar::themes::DEFAULT));
+        // A renderer this platform lacks keeps the other settings and draws with the default.
+        notebook::fs::write(&path, br#"{"sidebar": true, "renderer": "glide"}"#).unwrap();
+        let settings = Settings::load(&path);
+        assert!(settings.sidebar);
+        assert_eq!(settings.renderer, Backend::Default);
         notebook::fs::remove_dir_all(&directory).unwrap();
     }
 }

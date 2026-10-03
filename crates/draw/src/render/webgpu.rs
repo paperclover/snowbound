@@ -2,7 +2,7 @@
 use super::*;
 
 /// What a frame is drawn into.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos", target_arch = "wasm32")))]
 pub type Target = wgpu::TextureView;
 
 /// A picture's texture, as its batches bind it.
@@ -34,14 +34,25 @@ impl Renderer {
         Self::with_gpu(Gpu::new(device, queue, format))
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos", target_arch = "wasm32")))]
     pub fn device(&self) -> &wgpu::Device {
-        &self.gpu.device
+        self.gpu.device()
     }
 
-    #[cfg(not(windows))]
+    #[cfg(not(any(windows, target_os = "macos", target_arch = "wasm32")))]
     pub fn queue(&self) -> &wgpu::Queue {
-        &self.gpu.queue
+        self.gpu.queue()
+    }
+}
+
+#[cfg(not(windows))]
+impl Gpu {
+    pub(super) fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub(super) fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 }
 
@@ -152,6 +163,11 @@ impl Gpu {
             format,
             groups: Vec::new(),
         }
+    }
+
+    /// Blends in linear light, its targets being sRGB.
+    pub(super) fn blends_linear(&self) -> bool {
+        true
     }
 
     pub(super) fn flipped(&self) -> bool {
@@ -273,8 +289,12 @@ impl Gpu {
                 pass.draw(batch.vertices.clone(), 0..1);
             }
         };
-        for (batches, (picture, _)) in frame.groups.iter().zip(&gpu.groups) {
-            paint(&picture.create_view(&Default::default()), [0.0; 4], batches);
+        for (group, (picture, _)) in frame.groups.iter().zip(&gpu.groups) {
+            paint(
+                &picture.create_view(&Default::default()),
+                [0.0; 4],
+                &group.batches,
+            );
         }
         paint(target, clear, frame.batches);
         gpu.queue.submit([encoder.finish()]);

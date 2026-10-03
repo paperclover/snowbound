@@ -354,6 +354,11 @@ impl Gpu {
         Ok(pixels)
     }
 
+    /// Blends in linear light, its targets being sRGB.
+    pub(super) fn blends_linear(&self) -> bool {
+        true
+    }
+
     /// Offscreen pictures' rows run top first.
     pub(super) fn flipped(&self) -> bool {
         false
@@ -514,8 +519,8 @@ impl Gpu {
                 context.Draw(batch.vertices.len() as u32, batch.vertices.start);
             }
         };
-        for (batches, picture) in frame.groups.iter().zip(&gpu.groups) {
-            paint(picture, [0.0; 4], batches);
+        for (group, picture) in frame.groups.iter().zip(&gpu.groups) {
+            paint(picture, [0.0; 4], &group.batches);
         }
         paint(target, clear, frame.batches);
         unsafe {

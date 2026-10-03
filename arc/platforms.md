@@ -10,7 +10,7 @@ drawn by Snowbound versus the operating system.
 shell    snowbound + ui       snowbound + ui       snowbound + ui           UIKit (apps/ios)
 glue     snowbound/src/macos  snowbound/src/linux  snowbound/src/windows    crates/mobile (C ABI)
 page     canvas ─────────────────────────────────────────────────────────────────────►
-paint    draw (wgpu: Metal)   draw (Vulkan or GL)  draw (D3D12; D3D11 on 7) draw (Metal)
+paint    draw (Metal or GL)   draw (Vulkan or GL)  draw (D3D12, D3D11, GL)  draw (Metal)
 data     notebook::session + embedded SMB client ────────────────────────────────────►
 format   onestore ───────────────────────────────────────────────────────────────────►
 ```
@@ -24,6 +24,12 @@ everything else in the crate is shared: library and settings, the sidebar,
 menus, page and section management, templates, and screenshot and replay
 support. Accessibility goes through AccessKit's winit adapter on all three:
 the interface's tree, with the page's grafted into it.
+Each platform draws through one of several backends (the table's `paint` row; in a
+browser WebGPU, WebGL 2 or the 2D canvas). By default the first that starts draws;
+Options' Renderer, the settings' `renderer`, `SNOWBOUND_RENDERER` or `--renderer`
+(each over the last) picks one, and one that fails to start falls back to the
+default and says so. Choosing another in Options starts it at once: the renderer and
+surface go and new ones begin, the window and everything in it staying as they are.
 `commands.rs` is the one table of commands: each one's title, its chords on
 macOS and elsewhere, when it is enabled or checked, and what it does. The
 keyboard, the toolbar and the macOS menu bar all run commands from it.
@@ -112,7 +118,7 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   imports, and aarch64 for Windows 11 on Arm. The few imports of Windows 8
   and later that dependencies still name are answered by
   `platform/windows/rt/shims.c`; everything newer is looked up at run time.
-- `draw` builds three backends on Windows and the surface picks one:
+- `draw` builds three backends on Windows, tried in turn by default:
   Direct3D 12 through wgpu where Windows has it (10 and 11), otherwise
   Direct3D 11, as on Windows 7, on WARP where no device reaches feature
   level 10_0, and OpenGL 2.1 on a WGL context only where neither starts
@@ -187,6 +193,16 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   lack takes Noto's, fetched by script the first time a page holds it (a CJK face cut to
   the national standards' characters by `tools/web/subset_cjk.py`; emoji in Noto Color
   Emoji's COLRv1 outlines, which `draw` paints itself), and the page is laid out again.
+- Frames draw through WebGPU, else WebGL 2, both by wgpu, else the 2D canvas, which a
+  browser with WebGL turned off still has; `?renderer=` in the address picks one, as
+  `--renderer` does. The canvas draws each of `draw`'s quads with its own calls (paths,
+  `drawImage` from the glyph atlas, glyphs of a colour from a sheet coloured once), and
+  corrects translucent colours' opacity for blending sRGB-encoded. A popup leaning in as it
+  opens draws into a canvas of its own laid over the page and leaned by a CSS 3D transform
+  of the same perspective, which the browser's compositor draws. A canvas keeps the first
+  kind of context it gives, so each renderer starts on a canvas of its own, which then takes
+  the page's place and its input. Only where even the 2D canvas fails does `start` reject,
+  with a `NoGraphicsError`.
 - AccessKit has no web adapter, so once a screen reader asks for it (a visually hidden
   button, then on every visit) the trees AccessKit would get are mirrored as hidden
   elements with ARIA roles; acting on one sends AccessKit's action back.

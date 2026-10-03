@@ -488,6 +488,25 @@ pub fn install_backdrop(window: &Window) -> bool {
     true
 }
 
+/// Shows or hides the material `install_backdrop` put behind the window's frames: OpenGL
+/// draws into the view's own layer, which the material's view covers.
+#[cfg(feature = "wgpu")]
+pub fn show_backdrop(window: &Window, shown: bool) {
+    let Some(class) = BACKDROP_CLASS.get() else {
+        return;
+    };
+    let view = &*ns_view(window);
+    unsafe {
+        let subviews: Retained<objc2_foundation::NSArray<AnyObject>> = msg_send_id![view, subviews];
+        for subview in subviews.iter() {
+            let ours: bool = msg_send![subview, isKindOfClass: *class];
+            if ours {
+                let _: () = msg_send![subview, setHidden: !shown];
+            }
+        }
+    }
+}
+
 /// AppKit's window frame takes resizing presses.
 pub fn resize_direction(_: &Window, _: [f32; 2]) -> Option<winit::window::ResizeDirection> {
     None
@@ -1336,6 +1355,14 @@ pub fn configure_presentation(surface: &wgpu::Surface<'_>) {
         layer.setPresentsWithTransaction(true);
         // Over the backdrop's layer, which AppKit orders after it.
         layer.setZPosition(1.0);
+    }
+}
+
+/// Takes the surface's layer out of the view, for a renderer started after it.
+#[cfg(feature = "wgpu")]
+pub fn release_presentation(surface: &wgpu::Surface<'_>) {
+    if let Some(surface) = unsafe { surface.as_hal::<wgpu::hal::api::Metal>() } {
+        surface.render_layer().lock().removeFromSuperlayer();
     }
 }
 

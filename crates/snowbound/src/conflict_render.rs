@@ -156,7 +156,7 @@ fn paint(
     });
     renderer
         .draw(
-            &texture.create_view(&Default::default()),
+            &texture.create_view(&Default::default()).into(),
             size,
             ui.theme.base,
             &layers,

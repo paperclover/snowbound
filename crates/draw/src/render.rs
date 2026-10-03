@@ -1,9 +1,14 @@
+#[cfg(all(feature = "wgpu", target_arch = "wasm32"))]
+mod canvas2d;
 mod colr;
 #[cfg(all(feature = "wgpu", windows))]
 mod d3d11;
-#[cfg(all(feature = "wgpu", windows))]
+#[cfg(all(
+    feature = "wgpu",
+    any(windows, target_os = "macos", target_arch = "wasm32")
+))]
 mod dual;
-#[cfg(any(windows, not(feature = "wgpu")))]
+#[cfg(any(windows, target_os = "macos", not(feature = "wgpu")))]
 mod gl;
 mod icon;
 #[cfg(feature = "pdf")]
@@ -14,11 +19,17 @@ mod translucent;
 #[cfg(feature = "wgpu")]
 mod webgpu;
 
-#[cfg(all(feature = "wgpu", windows))]
+#[cfg(all(
+    feature = "wgpu",
+    any(windows, target_os = "macos", target_arch = "wasm32")
+))]
 use dual as backend;
 #[cfg(not(feature = "wgpu"))]
 use gl as backend;
-#[cfg(all(feature = "wgpu", not(windows)))]
+#[cfg(all(
+    feature = "wgpu",
+    not(any(windows, target_os = "macos", target_arch = "wasm32"))
+))]
 use webgpu as backend;
 
 pub use backend::Target;
@@ -178,7 +189,7 @@ impl RasterImage {
 /// own, then the batches painting the target, and the images they show.
 struct Frame<'a> {
     vertices: &'a [Vertex],
-    groups: &'a [Vec<Batch>],
+    groups: &'a [Group],
     batches: &'a [Batch],
     images: &'a HashMap<u64, CachedImage>,
 }
@@ -204,6 +215,14 @@ struct Batch {
     vertices: Range<u32>,
     blend: Blend,
     scissor: [u32; 4],
+}
+
+/// Layers appearing as one, as `Blend::Group` paints their picture.
+struct Group {
+    batches: Vec<Batch>,
+    /// What the 2D canvas, which can't draw the group's strips in perspective, leans it by.
+    #[cfg_attr(not(target_arch = "wasm32"), expect(dead_code))]
+    motion: Motion,
 }
 
 /// How a batch meets what lies beneath it, and what it samples: the atlas unless it paints
@@ -361,10 +380,12 @@ pub struct Motion {
 }
 
 impl Motion {
+    /// Target heights away the viewer sees a turn from, so a small one reads as depth.
+    const DISTANCE: f32 = 2.0;
+
     /// Where device point `[x, y]` on a target `height` tall shows, turned.
     fn project(&self, [x, y]: [f32; 2], height: f32) -> [f32; 2] {
-        // Seen from twice the target's height away, so a small turn reads as depth.
-        let distance = 2.0 * height;
+        let distance = Self::DISTANCE * height;
         let below = y - self.pivot[1];
         let near = distance / (distance + below * self.tilt.sin());
         [
@@ -586,7 +607,7 @@ pub struct Renderer {
     glyphs: HashMap<AtlasKey, Option<AtlasGlyph>>,
     images: HashMap<u64, CachedImage>,
     batches: Vec<Batch>,
-    groups: Vec<Vec<Batch>>,
+    groups: Vec<Group>,
     /// Batches before this one take no more primitives.
     barrier: usize,
     scaler: ScaleContext,
@@ -594,7 +615,7 @@ pub struct Renderer {
     row_height: u32,
 }
 
-#[cfg(any(windows, not(feature = "wgpu")))]
+#[cfg(any(windows, target_os = "macos", not(feature = "wgpu")))]
 impl Renderer {
     /// Draws with the OpenGL context current on this thread, which must stay current
     /// whenever the renderer or a `Target` is used.
@@ -613,8 +634,16 @@ impl Renderer {
     pub fn present(&self, target: &Target, translucent: bool) {
         self.gpu.present(target, translucent);
     }
+}
 
-    /// The sRGB RGBA rows of `target`, from `Renderer::target`, top first.
+#[cfg(any(
+    windows,
+    target_os = "macos",
+    target_arch = "wasm32",
+    not(feature = "wgpu")
+))]
+impl Renderer {
+    /// The sRGB RGBA rows of `target`, from `Renderer::target` or a 2D canvas, top first.
     pub fn read_pixels(&self, target: &Target) -> Result<Vec<u8>, String> {
         self.gpu.read_pixels(target)
     }
@@ -688,7 +717,12 @@ impl Renderer {
             images: self.images.len(),
             image_bytes,
             vertices: self.vertices.len(),
-            batches: self.batches.len() + self.groups.iter().map(Vec::len).sum::<usize>(),
+            batches: self.batches.len()
+                + self
+                    .groups
+                    .iter()
+                    .map(|group| group.batches.len())
+                    .sum::<usize>(),
             vertex_capacity_bytes: self.vertices.capacity() * size_of::<Vertex>(),
             batch_capacity_bytes: self.batches.capacity() * size_of::<Batch>(),
             glyph_capacity: self.glyphs.capacity(),
@@ -873,7 +907,7 @@ impl Renderer {
             blend: Blend::Group(self.groups.len()),
             scissor: [0, 0, size[0], size[1]],
         });
-        self.groups.push(batches);
+        self.groups.push(Group { batches, motion });
         Ok(())
     }
 
@@ -1132,7 +1166,7 @@ impl Renderer {
                 )
                 .or_else(|| render.render(&mut scaler, glyph_id))
                 .map(|mut image| {
-                    if image.content == Content::Mask {
+                    if image.content == Content::Mask && self.gpu.blends_linear() {
                         let coverage = text_coverage(tone);
                         for alpha in &mut image.data {
                             *alpha = coverage[usize::from(*alpha)];
@@ -1996,7 +2030,7 @@ mod tests {
 
         fn draw(&self, renderer: &mut Renderer, layers: &[Layer<'_>]) -> Result<(), RenderError> {
             renderer.draw(
-                &self.texture.create_view(&Default::default()),
+                &self.texture.create_view(&Default::default()).into(),
                 [512, 256],
                 [1.0; 4],
                 layers,
@@ -2636,7 +2670,7 @@ mod tests {
         ];
         renderer
             .draw(
-                &target.texture.create_view(&Default::default()),
+                &target.texture.create_view(&Default::default()).into(),
                 [512, 256],
                 [0.0; 4],
                 &[Layer {
@@ -2679,7 +2713,7 @@ mod tests {
                 color: [0.2, 0.2, 0.2, 1.0],
             },
         ];
-        let frame = translucent.target(&device, [512, 256]);
+        let frame = translucent.target(&device, [512, 256]).into();
         renderer
             .draw(
                 &frame,

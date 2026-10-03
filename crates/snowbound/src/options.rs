@@ -2,7 +2,11 @@
 //! indexed on the left, filtered by the search field above, each choice kept when OK is
 //! chosen.
 
-use crate::{State, platform, settings::ColorScheme, update};
+use crate::{
+    State, UserEvent, platform,
+    settings::{Backend, ColorScheme},
+    update,
+};
 use accesskit::Role;
 use canvas::editor::DefaultFont;
 use ui::{Anchor, Axis, Extent, Flags, Id, Size, Spec, Theme, Ui, fill, popup::Item, px};
@@ -181,6 +185,12 @@ const SECTIONS: &[Section] = &[
                     keywords: "notebooks sidebar side right layout",
                     control: Control::Check(|options| &mut options.navigation_bar_left),
                 },
+                Row {
+                    label: "Renderer:",
+                    keywords: "graphics gpu backend drawing metal opengl vulkan direct3d \
+                               webgpu webgl canvas",
+                    control: Control::Field(renderer),
+                },
             ],
         }],
     },
@@ -282,6 +292,7 @@ pub struct Options {
     /// Live Share's relay; empty uses Snowbound's.
     relay: String,
     notebook_theme: Option<String>,
+    renderer: Backend,
     pub(crate) keyboard: crate::keys::Keyboard,
 }
 
@@ -323,6 +334,10 @@ fn font_colors() -> Id {
 
 fn notebook_themes() -> Id {
     id().child("notebook-themes")
+}
+
+fn renderers() -> Id {
+    id().child("renderers")
 }
 
 /// Whether `word`, lowercase, starts a word of `text`: "pen" finds "Pen" and "pen-like",
@@ -386,6 +401,7 @@ impl State {
             picture: self.live_options.picture,
             relay: self.live_options.relay.clone().unwrap_or_default(),
             notebook_theme: self.notebook_theme.clone(),
+            renderer: self.renderer_choice,
             keyboard: crate::keys::Keyboard::new(),
         });
         self.ui.open_popup(id());
@@ -706,7 +722,12 @@ impl State {
             self.show_spelling();
             self.follow_color_scheme();
             self.install_keymap(options.keyboard.keymap);
+            let switch = options.renderer != self.renderer_choice;
+            self.renderer_choice = options.renderer;
             self.save_settings();
+            if switch {
+                let _ = self.proxy.send_event(UserEvent::Renderer(options.renderer));
+            }
         } else if !cancel {
             self.options = Some(options);
             return;
@@ -836,6 +857,75 @@ fn notebook_theme(state: &mut State, options: &mut Options) {
     if let Some(index) = ui::popup::menu(ui, notebook_themes(), anchor, &items, None) {
         options.notebook_theme = choices[index].0.map(Into::into);
     }
+}
+
+/// The platform's backends, the one the default starts with marked, those that didn't start
+/// this run disabled; then the backend and adapter drawing now.
+fn renderer(state: &mut State, options: &mut Options) {
+    let State {
+        ui,
+        unavailable,
+        drawing,
+        ..
+    } = state;
+    let failed = |backend: Backend| {
+        let (_, reason) = unavailable.iter().find(|(failed, _)| *failed == backend)?;
+        // A long reason is the system's, kept in the log.
+        Some(if reason.chars().count() <= 28 {
+            reason.as_str()
+        } else {
+            "Didn't start"
+        })
+    };
+    let automatic = (Backend::PLATFORM.iter().copied()).find(|backend| failed(*backend).is_none());
+    let label = |backend: Backend| {
+        if Some(backend) == automatic {
+            format!("{} (Default)", backend.label())
+        } else {
+            backend.label().to_owned()
+        }
+    };
+    let shown = match options.renderer {
+        Backend::Default => automatic,
+        chosen => Some(chosen),
+    };
+    let labels: Vec<String> = Backend::PLATFORM.iter().copied().map(label).collect();
+    let current = shown.map(label).unwrap_or_default();
+    let combo = ui.id("combo");
+    ui::shell::combo(ui, "combo", "Renderer", &current, 160.0, renderers(), true);
+    let items: Vec<Item> = (Backend::PLATFORM.iter().zip(&labels))
+        .map(|(backend, text)| Item {
+            text,
+            checked: Some(Some(*backend) == shown),
+            current: Some(*backend) == shown,
+            disabled: failed(*backend).is_some(),
+            badge: failed(*backend),
+            ..Item::default()
+        })
+        .collect();
+    let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
+    if let Some(index) = ui::popup::menu(ui, renderers(), anchor, &items, None) {
+        let picked = Backend::PLATFORM[index];
+        options.renderer = if Some(picked) == automatic {
+            Backend::Default
+        } else {
+            picked
+        };
+    }
+    let (backend, adapter) = &*drawing;
+    let used = match adapter.as_str() {
+        "" => backend.label().to_owned(),
+        adapter if adapter == backend.label() => adapter.to_owned(),
+        adapter => format!("{} · {adapter}", backend.label()),
+    };
+    let spec = Spec {
+        flags: Flags::CLIP,
+        size: [fill(), px(row_height(&ui.theme))],
+        text: Some(&used),
+        color: Some(ui.theme.text_dim),
+        ..Spec::default()
+    };
+    ui.leaf("adapter", spec);
 }
 
 fn lock_after(state: &mut State, options: &mut Options) {

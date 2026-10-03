@@ -54,7 +54,7 @@ fn renderer_cost() {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
-    let view = target.create_view(&Default::default());
+    let view: draw::Target = target.create_view(&Default::default()).into();
     let mut renderer = Renderer::new(device, queue, format);
     let occupancy = renderer.occupancy();
     eprintln!(
@@ -217,7 +217,7 @@ fn frame_cost() {
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
         view_formats: &[],
     });
-    let target = target.create_view(&Default::default());
+    let target: draw::Target = target.create_view(&Default::default()).into();
     let mut renderer = Renderer::new(device, queue, format);
     let colors = TextColors {
         caret: [0.0, 0.0, 0.0, 1.0],
