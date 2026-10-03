@@ -356,16 +356,25 @@ const BOTH: [bool; 2] = [true, true];
 const NONE: [f32; 2] = [0.0; 2];
 
 /// The theme new notebooks take unless the user chooses another.
-pub const DEFAULT: &str = "modern-2";
+pub const DEFAULT: &str = "modern-3";
 
-/// Built-ins a page wears still but no longer offered: a changed look ships under a new id.
-const RETIRED: [&str; 1] = ["modern"];
+/// Built-ins a page wears still but no longer offered, each with the one offered in its
+/// place: a changed look ships under a new id.
+const RETIRED: [(&str, &str); 2] = [("modern", "modern-3"), ("modern-2", "modern-3")];
 
 /// The themes Snowbound offers, OneNote 2010's first.
 pub fn built_in() -> Vec<Theme> {
     let mut offered = shipped();
-    offered.retain(|theme| !RETIRED.contains(&theme.id.as_str()));
+    offered.retain(|theme| RETIRED.iter().all(|(retired, _)| theme.id != *retired));
     offered
+}
+
+/// The built-in offered in place of theme `id`, as a choice kept for later takes it; `id`
+/// where it isn't retired.
+pub fn successor(id: &str) -> &str {
+    (RETIRED.iter())
+        .find(|(retired, _)| *retired == id)
+        .map_or(id, |(_, successor)| successor)
 }
 
 /// Every theme Snowbound ever shipped. Once shipped a built-in's look never changes: two
@@ -441,10 +450,27 @@ fn shipped() -> Vec<Theme> {
                 style("Calibri", 11.5, PLAIN, Some("#262626"), [0.0, 3.0]),
             ],
         ),
-        // OneNote's page title in Arial; its accent the section's.
+        // OneNote's page title in Arial, its text automatic but for the section's accent.
+        theme(
+            "modern-3",
+            "Modern",
+            [
+                tinted(style("Arial", 16.0, BOLD, None, [10.0, 2.0])),
+                style("Arial", 13.0, BOLD, None, [8.0, 2.0]),
+                style("Arial", 11.0, BOLD, None, [6.0, 0.0]),
+                style("Arial", 10.5, BOTH, None, [6.0, 0.0]),
+                tinted(style("Arial", 10.5, BOLD, None, [6.0, 0.0])),
+                tinted(style("Arial", 10.5, ITALIC, None, [6.0, 0.0])),
+                style("Arial", 17.0, PLAIN, None, NONE),
+                style("Arial", 8.0, PLAIN, None, NONE),
+                style("Arial", 10.5, ITALIC, None, [0.0, 3.0]),
+                style("Courier New", 10.0, PLAIN, None, NONE),
+                style("Arial", 10.5, PLAIN, None, [0.0, 3.0]),
+            ],
+        ),
         theme(
             "modern-2",
-            "Modern",
+            "Modern (coloured text)",
             [
                 tinted(style("Arial", 16.0, BOLD, None, [10.0, 2.0])),
                 style("Arial", 13.0, BOLD, Some("#1B2631"), [8.0, 2.0]),
@@ -584,17 +610,30 @@ mod tests {
         assert_eq!(json["accent"], true);
     }
 
-    /// Modern's title is OneNote's in Arial. The Modern first shipped, its title bold, is
-    /// no longer offered, but pages given it keep it.
+    /// Modern's title is OneNote's in Arial, and its text automatic but for the accent. The Moderns shipped
+    /// before are no longer offered, but pages given them keep them, and a default kept for
+    /// new notebooks moves on.
     #[test]
     fn modern_keeps_onenote_s_page_title_and_the_first_modern_stays() {
-        let [onenote, modern] = ["onenote", "modern-2"]
+        let [onenote, modern] = ["onenote", "modern-3"]
             .map(|id| built_in().into_iter().find(|theme| theme.id == id).unwrap());
         let title = |theme: &Theme| definition("PageTitle", &theme.styles["PageTitle"], None);
         let mut expected = title(&onenote);
         expected.format.font = Some("Arial".into());
         assert_eq!(title(&modern), expected);
+        for (name, style) in &modern.styles {
+            let accent = matches!(name.as_str(), "h1" | "h5" | "h6");
+            assert_eq!(style.accent, accent, "{name}");
+            assert_eq!(style.colorref(None).is_none(), !accent, "{name}");
+        }
+        assert!(
+            built_in()
+                .iter()
+                .all(|theme| !theme.id.starts_with("modern-2"))
+        );
         assert!(built_in().iter().all(|theme| theme.id != "modern"));
+        assert_eq!(successor("modern-2"), DEFAULT);
+        assert_eq!(successor("editorial"), "editorial");
         let themes = Themes {
             assignments: vec![Assignment {
                 scope: Scope::Notebook,

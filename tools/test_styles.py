@@ -45,8 +45,10 @@ class StylesTest(unittest.TestCase):
             self.assertEqual(set(defined), GALLERY, theme)
             self.assertEqual(defined['h1'], [heading[theme]], theme)
             if theme == 'Modern':
-                # OneNote's own page title, in Arial.
+                # OneNote's own page title, in Arial, and text automatic but for the accent.
                 self.assertEqual(defined['PageTitle'], [('Arial', 17.0, False, 'automatic')])
+                self.assertEqual(defined['p'], [('Arial', 10.5, False, 'automatic')])
+                self.assertEqual(defined['h2'], [('Arial', 13.0, True, 'automatic')])
         self.assertEqual(seen, set(heading))
 
     def test_onenote_s_own_styles_read_under_the_same_names(self):

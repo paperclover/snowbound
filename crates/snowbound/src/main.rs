@@ -1259,7 +1259,8 @@ impl State {
             locked,
             password: None,
             passwords: stored.passwords,
-            notebook_theme: stored.notebook_theme.0,
+            notebook_theme: (stored.notebook_theme.0)
+                .map(|id| notebook::sidecar::themes::successor(&id).to_owned()),
             live_options: stored.live,
             drag: None,
             templates: templates::View::Strip,
