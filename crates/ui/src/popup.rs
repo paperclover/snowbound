@@ -220,7 +220,7 @@ pub fn submenus(ui: &mut Ui, id: Id, items: &[Item], submenu: impl Fn(usize) -> 
 }
 
 /// Shows `title`, with the `keys` that run it and a `description` under it, in a tooltip
-/// below the box built last while the pointer rests on it or on a box inside it:
+/// centred below the box built last while the pointer rests on it or on a box inside it:
 /// after a delay, or at once while another has just shown. A press or the wheel hides it
 /// until the pointer leaves. It names the box to assistive technology, or where the box has
 /// no role, the unnamed controls inside it.
@@ -316,7 +316,7 @@ fn tooltip_below(
         radius: 4.0,
         pad: [8.0, 5.0],
         gap: 3.0,
-        anchor: Some(Anchor::Below(part.unwrap_or(id))),
+        anchor: Some(Anchor::Tip(part.unwrap_or(id))),
         ..Spec::default()
     };
     ui.open_as(id.child("tooltip"), spec);

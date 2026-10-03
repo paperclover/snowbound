@@ -1267,6 +1267,48 @@ fn tooltips_wait_then_switch_at_once_and_hide_on_press_until_left() {
 }
 
 #[test]
+fn a_tooltip_centres_under_its_control_and_shifts_only_to_stay_in_the_window() {
+    let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
+    let mut shown_at = |x: f32| {
+        ui.event(Event::PointerMoved([x + 10.0, 110.0]));
+        let mut tip = None;
+        for _ in 0..40 {
+            frame(&mut ui, |ui| {
+                let id = ui.open(
+                    "tool",
+                    Spec {
+                        flags: Flags::CLICKABLE | Flags::FLOAT,
+                        size: [px(20.0), px(20.0)],
+                        position: [x, 100.0],
+                        ..Spec::default()
+                    },
+                );
+                ui.close();
+                popup::tooltip(ui, "Bold", "Ctrl+B", Some("Makes the selected text bold."));
+                tip = Some(id.child("tooltip"));
+            });
+        }
+        ui.laid_out(tip.unwrap()).unwrap()
+    };
+    let middle = shown_at(190.0);
+    assert_eq!(middle[1], 120.0 + popup::PAD, "under the control");
+    assert!(
+        ((middle[0] + middle[2]) / 2.0 - 200.0).abs() <= 0.5,
+        "centred on it: {middle:?}"
+    );
+    let width = middle[2] - middle[0];
+    assert_eq!(
+        shown_at(2.0)[..3],
+        [POPUP_MARGIN, 120.0 + popup::PAD, POPUP_MARGIN + width]
+    );
+    assert_eq!(
+        shown_at(378.0)[0],
+        400.0 - POPUP_MARGIN - width,
+        "shifted only to fit"
+    );
+}
+
+#[test]
 fn a_popup_opens_beside_a_box_first_laid_out_in_the_same_frame() {
     let mut ui = Ui::new(Theme::dark(), DOUBLE_CLICK);
     ui.open_popup(menu_id());

@@ -230,6 +230,8 @@ pub enum Anchor {
     /// Over the box from its corner, the popup's contents covering it, as a combo box opens
     /// into its own list; at least as wide as it.
     Over(Id),
+    /// Under the box, centred on it, as a tooltip shows.
+    Tip(Id),
     /// At a point, as a context menu opens.
     Point([f32; 2]),
     /// Centred across the window near its top, over the interface, which dims, as a dialog
@@ -252,6 +254,10 @@ impl Anchor {
             Anchor::Below(_) | Anchor::Point(_) => Some(1),
             Anchor::Right(_) => Some(0),
             Anchor::Over(_) => None,
+            Anchor::Tip(_) if axis == 0 => {
+                return ((around[0] + around[2] - size) / 2.0).clamp(POPUP_MARGIN, most);
+            }
+            Anchor::Tip(_) => Some(1),
             Anchor::Dialog | Anchor::Top if axis == 0 => {
                 return ((room - size) / 2.0).max(POPUP_MARGIN);
             }
@@ -593,6 +599,7 @@ impl Placed {
         } = self;
         let pivot = match anchor {
             Anchor::Below(_) | Anchor::Point(_) => [around[0], around[3]],
+            Anchor::Tip(_) => [(around[0] + around[2]) / 2.0, around[3]],
             Anchor::Right(_) => [around[2], around[1]],
             Anchor::Over(_) => [around[0], around[1]],
             Anchor::Dialog | Anchor::Top => [(rect[0] + rect[2]) / 2.0, rect[1]],
