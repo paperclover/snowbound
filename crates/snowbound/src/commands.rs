@@ -1234,8 +1234,9 @@ impl State {
             Id::Copy => enabled(selected),
             Id::Paste => enabled(text && !field),
             Id::SelectAll => enabled(field || page),
-            Id::Back => enabled(!modal && self.trail.open()[0]),
-            Id::Forward => enabled(!modal && self.trail.open()[1]),
+            Id::Back | Id::Forward => {
+                enabled(!modal && self.can_travel()[usize::from(id == Id::Forward)])
+            }
             Id::ZoomIn | Id::ZoomOut | Id::ActualSize => enabled(page),
             Id::Sidebar => Status {
                 enabled: !welcome && !modal,

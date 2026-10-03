@@ -3489,7 +3489,11 @@ impl State {
                     since: Instant::now(),
                 })))
             });
-            let _ = sender.send((id, laid.map_err(|error| error.to_string())));
+            let laid = laid.map_err(|error| {
+                eprintln!("{error}");
+                plain(&*error, "page")
+            });
+            let _ = sender.send((id, laid));
             redraw.wake();
         });
     }
@@ -3508,7 +3512,6 @@ impl State {
                     if id == self.loading {
                         self.switching = None;
                     }
-                    eprintln!("{error}");
                     platform::alert("Couldn't open", &error);
                 }
             }
@@ -5766,6 +5769,51 @@ fn divider(ui: &mut Ui, theme: &Theme) {
     );
 }
 
+/// The kind of the file or network failure behind `error`, if one is.
+pub fn io_kind(error: &(dyn Error + 'static)) -> Option<std::io::ErrorKind> {
+    let mut next = Some(error);
+    while let Some(error) = next {
+        if let Some(error) = error.downcast_ref::<std::io::Error>() {
+            return Some(error.kind());
+        }
+        // Transparent variants forward `source` past the I/O error they hold.
+        if let Some(notebook::Error::Io(error) | notebook::Error::RemoteIo(error)) =
+            error.downcast_ref()
+        {
+            return Some(error.kind());
+        }
+        next = error.source();
+    }
+    None
+}
+
+/// `error` as an alert tells it about `thing`: a file or network failure in plain words,
+/// never the system's; any other error as it reads.
+pub fn plain(error: &(dyn Error + 'static), thing: &str) -> String {
+    use std::io::ErrorKind::*;
+    match io_kind(error) {
+        None | Some(Other) => error.to_string(),
+        Some(NotFound) => format!("This {thing} was moved or deleted."),
+        Some(PermissionDenied | ReadOnlyFilesystem) => {
+            format!("You don't have permission to use this {thing}.")
+        }
+        Some(StorageFull | QuotaExceeded) => {
+            "The disk is full. Free up space, then try again.".into()
+        }
+        Some(WouldBlock | ResourceBusy) => {
+            format!("This {thing} is in use. Try again in a moment.")
+        }
+        Some(AlreadyExists) => {
+            "Something with that name is already there. Choose another name.".into()
+        }
+        Some(
+            TimedOut | ConnectionRefused | ConnectionReset | ConnectionAborted | NotConnected
+            | HostUnreachable | NetworkUnreachable | NetworkDown | BrokenPipe,
+        ) => "The server can't be reached. Check your connection, then try again.".into(),
+        Some(_) => format!("Something went wrong with this {thing}. Try again."),
+    }
+}
+
 /// The session for `section`, at catalog `path` in `library`, showing `space` or its first
 /// page, and that page.
 fn read_session(
@@ -6635,6 +6683,27 @@ fn launch() -> Result<(), Box<dyn Error>> {
 mod tests {
     use super::*;
     use canvas::document::TextPosition;
+
+    /// Alerts tell a file or network failure in plain words, however deep it is wrapped,
+    /// and pass the app's own messages on.
+    #[test]
+    fn alerts_never_show_the_systems_words() {
+        use std::io::{Error as Io, ErrorKind};
+        let missing: Box<dyn Error> = Box::new(Io::from(ErrorKind::NotFound));
+        assert_eq!(plain(&*missing, "page"), "This page was moved or deleted.");
+        let wrapped: Box<dyn Error> = Box::new(notebook::Error::Io(Io::from_raw_os_error(2)));
+        assert_eq!(plain(&*wrapped, "page"), "This page was moved or deleted.");
+        let discovered = notebook::discover::Error::Io {
+            path: "/a".into(),
+            error: Io::from(ErrorKind::TimedOut),
+        };
+        assert!(plain(&discovered, "notebook").starts_with("The server can't be reached."));
+        let refused: Box<dyn Error> = "The section is password protected".into();
+        assert_eq!(
+            plain(&*refused, "page"),
+            "The section is password protected"
+        );
+    }
 
     /// A notebook opened from the desktop is listed once and shown first, whether it was
     /// listed already or not.

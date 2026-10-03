@@ -144,7 +144,7 @@ impl State {
         let dialog = self.save_as.take().expect("The dialog is open");
         self.ui.close_popup(id());
         if go && let Err(error) = self.save(dialog) {
-            platform::alert("Couldn't save", &error.to_string());
+            platform::alert("Couldn't save", &crate::plain(&*error, "file"));
         }
     }
 
@@ -213,7 +213,7 @@ impl State {
                     notebook::fs::write(&path, bytes)?;
                     Ok(())
                 })();
-                let written = written.map_err(|error| error.to_string());
+                let written = written.map_err(|error| crate::plain(&*error, "file"));
                 let _ = proxy.send_event(UserEvent::Then(Box::new(move |_| {
                     written.map_err(|error| {
                         platform::alert("Couldn't save", &error);

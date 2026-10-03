@@ -273,7 +273,7 @@ impl State {
         if go {
             self.printing.last = Some(setup);
             if let Err(error) = self.print(setup, export) {
-                platform::alert("Couldn't print", &error.to_string());
+                platform::alert("Couldn't print", &crate::plain(&*error, "page"));
             }
         }
     }
@@ -379,7 +379,7 @@ impl State {
             } else {
                 "Couldn't print"
             };
-            let done = done.map_err(|error| error.to_string());
+            let done = done.map_err(|error| crate::plain(&*error, "file"));
             let _ = proxy.send_event(UserEvent::Then(Box::new(move |state| {
                 match done {
                     Ok(Some(pdf)) => printer::print(&state.window, &pdf, &title),

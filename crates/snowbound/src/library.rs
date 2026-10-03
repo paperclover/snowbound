@@ -409,7 +409,10 @@ impl Library {
             tag_art: Mutex::new(Arc::new(
                 notebook.as_ref().map(read_tag_art).unwrap_or_default(),
             )),
-            notebook: notebook.map(Some).map_err(|error| error.to_string()),
+            notebook: notebook.map(Some).map_err(|error| {
+                eprintln!("{location}: {error}");
+                crate::plain(&error, "notebook")
+            }),
             notice,
             ..Self::new(location, name, cache)
         }
@@ -544,13 +547,7 @@ impl Library {
             .reopen()
             .and_then(|notebook| Ok(notebook.rename_folder(name)?));
         if let Err(error) = renamed {
-            let kind = match error.downcast_ref::<notebook::Error>() {
-                Some(notebook::Error::Io(error) | notebook::Error::RemoteIo(error)) => {
-                    Some(error.kind())
-                }
-                _ => error.downcast_ref::<io::Error>().map(io::Error::kind),
-            };
-            return Err(match kind {
+            return Err(match crate::io_kind(&*error) {
                 Some(io::ErrorKind::WouldBlock | io::ErrorKind::ResourceBusy) => {
                     "Another computer is saving to this notebook. Try again in a moment.".into()
                 }
@@ -564,7 +561,7 @@ impl Library {
                 Some(io::ErrorKind::InvalidInput) => "A folder name can’t contain \\ / : * ? \" \
                     < > | or end with a dot or space."
                     .into(),
-                _ => error.to_string(),
+                _ => crate::plain(&*error, "folder"),
             });
         }
         // The folder's own name shows now.

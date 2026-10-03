@@ -233,7 +233,7 @@ impl State {
                 }
                 Ok(location)
             })()
-            .map_err(|error| error.to_string());
+            .map_err(|error| crate::plain(&*error, "package"));
             let _ = proxy.send_event(UserEvent::Then(Box::new(move |state: &mut State| {
                 match unpacked {
                     Ok(location) => state.open_notebook(location, None),

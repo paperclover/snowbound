@@ -540,7 +540,10 @@ impl State {
                     Some(Dialog::Unlock(Zeroizing::default(), true))
                 }
                 Err(error) => {
-                    crate::platform::alert("Couldn't unlock the section", &error.to_string());
+                    crate::platform::alert(
+                        "Couldn't unlock the section",
+                        &crate::plain(&error, "section"),
+                    );
                     None
                 }
             },
@@ -622,7 +625,10 @@ impl State {
                 Ok(())
             });
             if let Err(error) = closed {
-                return crate::platform::alert("Couldn't set the password", &error.to_string());
+                return crate::platform::alert(
+                    "Couldn't set the password",
+                    &crate::plain(&*error, "section"),
+                );
             }
             self.prefetch.forget(&library.key(&path));
         }

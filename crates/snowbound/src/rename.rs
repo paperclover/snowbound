@@ -115,7 +115,10 @@ impl State {
             }
             Target::Page(space) => {
                 if let Err(error) = self.retitle(space, name) {
-                    crate::platform::alert("Couldn't rename the page", &error.to_string());
+                    crate::platform::alert(
+                        "Couldn't rename the page",
+                        &crate::plain(&*error, "page"),
+                    );
                 }
             }
         }

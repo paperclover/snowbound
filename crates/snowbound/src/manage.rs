@@ -554,7 +554,10 @@ impl State {
                 None => Ok(()),
             });
             if let Err(error) = closed {
-                return platform::alert("Couldn't rename the folder", &error.to_string());
+                return platform::alert(
+                    "Couldn't rename the folder",
+                    &crate::plain(&*error, "section"),
+                );
             }
         }
         let showing = shown.is_some() || self.sectionless.as_ref().is_some_and(ours);
@@ -584,7 +587,7 @@ impl State {
                 });
                 match colored {
                     Ok(colored) => reopened = colored,
-                    Err(error) => problem = Some(error.to_string()),
+                    Err(error) => problem = Some(crate::plain(&*error, "notebook")),
                 }
             }
             let reopened = Arc::new(reopened);
@@ -651,7 +654,10 @@ impl State {
             Structure::NewSection { .. } => match self.dated_page(None) {
                 Ok(page) => Some(page),
                 Err(error) => {
-                    return platform::alert("Couldn't add the section", &error.to_string());
+                    return platform::alert(
+                        "Couldn't add the section",
+                        &crate::plain(&*error, "section"),
+                    );
                 }
             },
             _ => None,

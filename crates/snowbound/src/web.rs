@@ -612,7 +612,7 @@ pub fn open_file(path: &Path) {
             &bytes,
             "application/octet-stream",
         ),
-        Err(error) => alert("Couldn't open the file", &error.to_string()),
+        Err(error) => alert("Couldn't open the file", &crate::plain(&error, "file")),
     }
 }
 

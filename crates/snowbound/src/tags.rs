@@ -621,7 +621,10 @@ impl State {
                 }
             });
         if let Err(error) = written {
-            return platform::alert("Couldn't keep the picture", &error.to_string());
+            return platform::alert(
+                "Couldn't keep the picture",
+                &crate::plain(&error, "picture"),
+            );
         }
         tag.art = Some(art);
         if tag.shape == 0 {

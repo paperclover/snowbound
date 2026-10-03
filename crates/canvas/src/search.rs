@@ -285,6 +285,8 @@ pub struct Entry {
     /// The section's key, which the host chooses.
     pub section: String,
     pub space: ExGuid,
+    /// The page's own identity, which it keeps moving to another section.
+    pub identity: Option<[u8; 16]>,
     pub title: String,
     /// When the page last changed, in any unit that orders.
     pub modified: u64,
@@ -301,6 +303,7 @@ impl Entry {
         Self {
             section: section.to_owned(),
             space,
+            identity: page.identity,
             folded_title: fold(&page.title),
             folded_text: fold(&text),
             title: page.title.clone(),

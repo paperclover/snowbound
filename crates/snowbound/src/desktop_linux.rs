@@ -435,7 +435,9 @@ pub fn install() {
                 "To uninstall it, open Options from the notebook menu. Uninstall is under Updates.",
             );
         }
-        Err(error) => crate::platform::alert("Couldn't install Snowbound", &error.to_string()),
+        Err(error) => {
+            crate::platform::alert("Couldn't install Snowbound", &crate::plain(&error, "file"))
+        }
     }
 }
 
@@ -525,7 +527,10 @@ fn remove() {
     }
     refresh_caches(&data);
     match failed {
-        Some(error) => crate::platform::alert("Couldn't uninstall Snowbound", &error.to_string()),
+        Some(error) => crate::platform::alert(
+            "Couldn't uninstall Snowbound",
+            &crate::plain(&error, "file"),
+        ),
         None => *INSTALLED.lock().unwrap() = Installed::No,
     }
 }

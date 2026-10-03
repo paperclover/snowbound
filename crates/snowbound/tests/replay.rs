@@ -274,6 +274,104 @@ fn undo_walks_back_through_new_pages_and_their_titles() {
     }
 }
 
+/// Whether `tree`'s toolbar offers Back and Forward.
+fn travels(tree: &str) -> [bool; 2] {
+    ["Back", "Forward"].map(|name| {
+        tree.lines()
+            .find(|line| line.trim_start().starts_with(&format!("Button \"{name}\"")))
+            .is_some_and(|line| !line.ends_with("[disabled]"))
+    })
+}
+
+const BACK: [&str; 4] = [
+    "modifiers command control",
+    "key Left",
+    "modifiers",
+    "settle",
+];
+const FORWARD: [&str; 4] = [
+    "modifiers command control",
+    "key Right",
+    "modifiers",
+    "settle",
+];
+const NEW_PAGE: [&str; 4] = ["modifiers command", "key n", "modifiers", "settle"];
+
+/// Forward reaches a page whose section was renamed after going Back from it, where the
+/// path it was visited at no longer opens.
+#[test]
+fn forward_follows_a_section_renamed_since() {
+    let scratch = Scratch::new("forward-renamed");
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
+    let mut steps = Vec::from(NEW_PAGE);
+    steps.push("type Two");
+    steps.extend(BACK);
+    // The section's tab menu, Rename.
+    steps.extend(["move 110 53", "press right", "release right", "settle"]);
+    steps.extend([
+        "key Down",
+        "key Enter",
+        "settle",
+        "type Renamed",
+        "key Enter",
+        "settle",
+    ]);
+    steps.push("accessibility renamed");
+    steps.extend(FORWARD);
+    steps.push("accessibility forward");
+    let [renamed, forward] = replay(&scratch, Some(&notebook), &steps)
+        .try_into()
+        .unwrap();
+    assert!(scratch.0.join("notebook/Renamed.one").exists());
+    assert_eq!(travels(&renamed), [false, true], "{renamed}");
+    let shown = |tree: &str| page_tabs(tree).into_iter().find(|tab| tab.starts_with('*'));
+    assert_eq!(shown(&forward).as_deref(), Some("*Two"), "{forward}");
+    assert!(forward.contains(r#"Tab "Renamed" [selected]"#), "{forward}");
+    assert_eq!(travels(&forward), [true, false], "{forward}");
+}
+
+/// Back passes over a page deleted since it was shown, and goes dark once nothing is left
+/// behind.
+#[test]
+fn back_passes_over_a_page_deleted_since() {
+    let scratch = Scratch::new("back-deleted");
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
+    let mut steps = Vec::new();
+    for title in ["type Two", "type Three"] {
+        steps.extend(NEW_PAGE);
+        steps.push(title);
+    }
+    // Two's tab menu, Delete.
+    steps.extend([
+        "settle",
+        "move 1003 198",
+        "press right",
+        "release right",
+        "settle",
+    ]);
+    steps.extend(["key Down", "key Down", "key Enter", "settle"]);
+    steps.push("accessibility deleted");
+    steps.extend(BACK);
+    steps.push("accessibility back");
+    let [deleted, back] = replay(&scratch, Some(&notebook), &steps)
+        .try_into()
+        .unwrap();
+    let shown = |tree: &str| page_tabs(tree).into_iter().find(|tab| tab.starts_with('*'));
+    assert!(
+        !page_tabs(&deleted).contains(&"Two".to_owned()),
+        "{deleted}"
+    );
+    assert_eq!(shown(&deleted).as_deref(), Some("*Three"), "{deleted}");
+    assert_eq!(
+        shown(&back).as_deref(),
+        Some("*Delete into a table"),
+        "{back}"
+    );
+    assert_eq!(travels(&back), [false, true], "{back}");
+}
+
 /// The search box's results in `tree`, one a line.
 fn search_results(tree: &str) -> Vec<&str> {
     tree.lines()
