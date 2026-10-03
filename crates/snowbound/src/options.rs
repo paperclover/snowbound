@@ -3,7 +3,7 @@
 //! chosen.
 
 use crate::{
-    State, UserEvent, platform,
+    State, UserEvent,
     settings::{Backend, ColorScheme},
     update,
 };
@@ -12,15 +12,14 @@ use canvas::editor::DefaultFont;
 use ui::{Anchor, Axis, Extent, Flags, Id, Size, Spec, Theme, Ui, fill, popup::Item, px};
 use winit::keyboard::NamedKey;
 
-const WIDTH: f32 = 680.0;
+const WIDTH: f32 = 700.0;
 const NAV: f32 = 150.0;
-/// The column the fields' labels share.
-const LABEL: f32 = 104.0;
 const SCHEMES: [(ColorScheme, &str); 3] = [
     (ColorScheme::System, "System"),
     (ColorScheme::Light, "Light"),
     (ColorScheme::Dark, "Dark"),
 ];
+const SIDES: [&str; 2] = ["Left", "Right"];
 /// The sizes Default font offers, OneNote 2010's list in points.
 const SIZES: [f32; 19] = [
     8.0, 9.0, 9.5, 10.0, 10.5, 11.0, 11.5, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0, 26.0, 28.0,
@@ -42,16 +41,35 @@ struct Group {
 
 struct Row {
     label: &'static str,
+    /// A line under the control for what the label can't say; empty for none.
+    hint: &'static str,
     /// Other words search finds the row by.
     keywords: &'static str,
     control: Control,
 }
 
+impl Row {
+    const fn new(label: &'static str, keywords: &'static str, control: Control) -> Self {
+        Self {
+            label,
+            hint: "",
+            keywords,
+            control,
+        }
+    }
+
+    const fn hint(self, hint: &'static str) -> Self {
+        Self { hint, ..self }
+    }
+}
+
+/// Every control stands in one column, after the labels' column.
 enum Control {
-    /// A check box before the label, bound to a choice.
+    /// A check box labelled by the row, bound to a choice.
     Check(fn(&mut Options) -> &mut bool),
-    /// The label in the labels' column, then what the function builds.
-    Field(fn(&mut State, &mut Options)),
+    /// The row's label in the labels' column, then what the function builds, given the
+    /// label to name its control by.
+    Field(fn(&mut State, &mut Options, &str)),
     /// What `build` makes across the row, unlabelled, from the search's words; `finds` tells
     /// whether they find anything in it. Words found in the row's own texts give it none.
     Block {
@@ -60,33 +78,33 @@ enum Control {
     },
 }
 
-/// Every section, in the list's order.
+/// Every section, in the list's order, with only the rows that apply here.
 const SECTIONS: &[Section] = &[
     Section {
         name: "General",
         groups: &[
             Group {
-                heading: "User Interface Options",
+                heading: "Interface",
                 rows: &[
-                    Row {
-                        label: "Appearance:",
-                        keywords: "color colour scheme dark light mode system theme",
-                        control: Control::Field(appearance),
-                    },
-                    Row {
-                        label: "Pages match UI theme",
-                        keywords: "dark white paper background",
-                        control: Control::Check(|options| &mut options.pages_match),
-                    },
+                    Row::new(
+                        "Appearance:",
+                        "color colour scheme dark light mode system theme",
+                        Control::Field(appearance),
+                    ),
+                    Row::new(
+                        "Pages match the appearance",
+                        "dark white paper background ui theme",
+                        Control::Check(|options| &mut options.pages_match),
+                    )
+                    .hint("Turned off, pages stay white"),
                 ],
             },
             Group {
                 heading: "Personalize",
-                rows: &[Row {
-                    label: "User name:",
-                    keywords: "author name",
-                    control: Control::Field(user_name_field),
-                }],
+                rows: &[
+                    Row::new("User name:", "author", Control::Field(user_name_field))
+                        .hint("Shown with your edits in shared notebooks"),
+                ],
             },
         ],
     },
@@ -96,76 +114,68 @@ const SECTIONS: &[Section] = &[
             Group {
                 heading: "Default font",
                 rows: &[
-                    Row {
-                        label: "Font:",
-                        keywords: "typeface text new",
-                        control: Control::Field(font_face),
-                    },
-                    Row {
-                        label: "Size:",
-                        keywords: "font points text new",
-                        control: Control::Field(font_size),
-                    },
-                    Row {
-                        label: "Font color:",
-                        keywords: "colour text new automatic",
-                        control: Control::Field(font_color),
-                    },
+                    Row::new(
+                        "Font:",
+                        "typeface size points text new",
+                        Control::Field(font_face),
+                    ),
+                    Row::new(
+                        "Color:",
+                        "font colour text new automatic",
+                        Control::Field(font_color),
+                    ),
                 ],
             },
             Group {
-                heading: "Default style theme",
-                rows: &[Row {
-                    label: "New notebooks:",
-                    keywords: "default for new notebooks styles headings modern",
-                    control: Control::Field(notebook_theme),
-                }],
+                heading: "Font styles",
+                rows: &[Row::new(
+                    "New notebooks:",
+                    "default style theme headings modern",
+                    Control::Field(notebook_theme),
+                )
+                .hint("The styles a new notebook starts with")],
             },
             Group {
                 heading: "Proofing",
-                rows: &[Row {
-                    label: "Hide spelling errors",
-                    keywords: "spell check misspelled words",
-                    control: Control::Check(|options| &mut options.hide_spelling),
-                }],
+                rows: &[Row::new(
+                    "Hide spelling errors",
+                    "spell check misspelled words",
+                    Control::Check(|options| &mut options.hide_spelling),
+                )],
             },
             Group {
                 heading: "AutoFormat",
-                rows: &[Row {
-                    label: "Markdown shortcuts",
-                    keywords: "markdown autoformat heading bullet numbering list to do quote \
-                               bold italic strikethrough code typing",
-                    control: Control::Check(|options| &mut options.markdown),
-                }],
+                rows: &[Row::new(
+                    "Markdown shortcuts",
+                    "markdown autoformat heading bullet numbering list to do quote bold \
+                     italic strikethrough code typing",
+                    Control::Check(|options| &mut options.markdown),
+                )
+                .hint("Type # for a heading, - for a bullet, **bold** and more")],
             },
             Group {
                 heading: "Pen",
-                rows: &[Row {
-                    label: "Use pen pressure sensitivity",
-                    keywords: "tablet stylus ink stroke width drawing",
-                    control: Control::Check(|options| &mut options.pen_pressure),
-                }],
+                rows: &[Row::new(
+                    "Use pen pressure sensitivity",
+                    "tablet stylus ink stroke width drawing",
+                    Control::Check(|options| &mut options.pen_pressure),
+                )],
             },
             Group {
                 heading: "Passwords",
                 rows: &[
-                    Row {
-                        label: "Lock password protected sections after I have not worked in \
-                                them for:",
-                        keywords: "protect protected lock unlock idle minutes timeout security",
-                        control: Control::Check(|options| &mut options.lock_idle),
-                    },
-                    Row {
-                        label: "Amount of time:",
-                        keywords: "password protect protected lock idle minutes hours timeout",
-                        control: Control::Field(lock_after),
-                    },
-                    Row {
-                        label: "Lock password protected sections as soon as I navigate away \
-                                from them",
-                        keywords: "password protect protected lock leave switch security",
-                        control: Control::Check(|options| &mut options.lock_on_leave),
-                    },
+                    Row::new(
+                        "Lock when idle for:",
+                        "password protect protected lock unlock idle minutes hours timeout \
+                         security",
+                        Control::Field(lock_after),
+                    )
+                    .hint("Password-protected sections you haven't worked in"),
+                    Row::new(
+                        "Lock when I leave a section",
+                        "password protect protected lock navigate away switch security",
+                        Control::Check(|options| &mut options.lock_on_leave),
+                    ),
                 ],
             },
         ],
@@ -175,55 +185,61 @@ const SECTIONS: &[Section] = &[
         groups: &[Group {
             heading: "",
             rows: &[
-                Row {
-                    label: "Page tabs appear on the left",
-                    keywords: "pages list side layout",
-                    control: Control::Check(|options| &mut options.page_tabs_left),
-                },
-                Row {
-                    label: "Navigation bar appears on the left",
-                    keywords: "notebooks sidebar side right layout",
-                    control: Control::Check(|options| &mut options.navigation_bar_left),
-                },
-                Row {
-                    label: "Renderer:",
-                    keywords: "graphics gpu backend drawing metal opengl vulkan direct3d \
-                               webgpu webgl canvas",
-                    control: Control::Field(renderer),
-                },
+                Row::new(
+                    "Page tabs:",
+                    "pages list side left right layout",
+                    Control::Field(|state, options, name| {
+                        side(state, name, &mut options.page_tabs_left)
+                    }),
+                ),
+                Row::new(
+                    "Notebooks:",
+                    "navigation bar sidebar side left right layout",
+                    Control::Field(|state, options, name| {
+                        side(state, name, &mut options.navigation_bar_left)
+                    }),
+                ),
+                Row::new(
+                    "Renderer:",
+                    "graphics gpu backend drawing metal opengl vulkan direct3d webgpu webgl \
+                     canvas",
+                    Control::Field(renderer),
+                ),
             ],
         }],
     },
     Section {
         name: "Sync & Storage",
         groups: &[
+            #[cfg(not(target_arch = "wasm32"))]
             Group {
-                heading: "Cache file location",
-                rows: &[Row {
-                    label: "Path:",
-                    keywords: "folder replica data disk",
-                    control: Control::Field(cache),
-                }],
+                heading: "Cache",
+                rows: &[Row::new(
+                    "Location:",
+                    "cache file folder path replica data disk",
+                    Control::Field(cache),
+                )
+                .hint("Where Snowbound keeps a copy of each section it syncs")],
             },
             #[cfg(feature = "live")]
             Group {
                 heading: "Live Share",
                 rows: &[
-                    Row {
-                        label: "Show others where I am in shared notebooks",
-                        keywords: "presence privacy cursor caret avatar collaborate people",
-                        control: Control::Check(|options| &mut options.presence),
-                    },
-                    Row {
-                        label: "Show my account picture with my name",
-                        keywords: "presence privacy photo avatar",
-                        control: Control::Check(|options| &mut options.picture),
-                    },
-                    Row {
-                        label: "Relay:",
-                        keywords: "live share server internet network presence",
-                        control: Control::Field(relay),
-                    },
+                    Row::new(
+                        "Show others where I am in shared notebooks",
+                        "presence privacy cursor caret avatar collaborate people",
+                        Control::Check(|options| &mut options.presence),
+                    ),
+                    Row::new(
+                        "Show my account picture with my name",
+                        "presence privacy photo avatar",
+                        Control::Check(|options| &mut options.picture),
+                    ),
+                    Row::new(
+                        "Relay:",
+                        "live share server internet network presence",
+                        Control::Field(relay),
+                    ),
                 ],
             },
         ],
@@ -233,22 +249,19 @@ const SECTIONS: &[Section] = &[
         groups: &[Group {
             heading: "",
             rows: &[
-                Row {
-                    label: "Version:",
-                    keywords: "about build release",
-                    control: Control::Field(version),
-                },
-                Row {
-                    label: "Check for updates automatically",
-                    keywords: "update download",
-                    control: Control::Check(|options| &mut options.automatic_updates),
-                },
+                Row::new("Version:", "about build release", Control::Field(version)),
+                #[cfg(not(target_arch = "wasm32"))]
+                Row::new(
+                    "Check for updates automatically",
+                    "update download",
+                    Control::Check(|options| &mut options.automatic_updates),
+                ),
                 #[cfg(target_os = "linux")]
-                Row {
-                    label: "Installed:",
-                    keywords: "install uninstall app menu remove",
-                    control: Control::Field(installed),
-                },
+                Row::new(
+                    "Installed:",
+                    "install uninstall app menu remove",
+                    Control::Field(installed),
+                ),
             ],
         }],
     },
@@ -256,14 +269,14 @@ const SECTIONS: &[Section] = &[
         name: "Keyboard",
         groups: &[Group {
             heading: "",
-            rows: &[Row {
-                label: "Shortcuts",
-                keywords: "keys chords hotkeys bindings commands menus",
-                control: Control::Block {
+            rows: &[Row::new(
+                "Shortcuts",
+                "keys chords hotkeys bindings commands menus",
+                Control::Block {
                     build: |state, options, query| options.keyboard.build(&mut state.ui, query),
                     finds: crate::keys::searched,
                 },
-            }],
+            )],
         }],
     },
 ];
@@ -283,9 +296,8 @@ pub struct Options {
     default_font: DefaultFont,
     page_tabs_left: bool,
     navigation_bar_left: bool,
-    lock_idle: bool,
-    /// Minutes, as `protection::AFTER` lists them.
-    lock_minutes: u32,
+    /// Minutes, as `protection::AFTER` lists them; none never locks.
+    lock_after: Option<u32>,
     lock_on_leave: bool,
     presence: bool,
     picture: bool,
@@ -312,32 +324,12 @@ fn user_name() -> Id {
     id().child("user-name")
 }
 
-fn schemes() -> Id {
-    id().child("color-schemes")
-}
-
 fn fonts() -> Id {
     id().child("fonts")
 }
 
-fn sizes() -> Id {
-    id().child("sizes")
-}
-
-fn lock_times() -> Id {
-    id().child("lock-times")
-}
-
 fn font_colors() -> Id {
     id().child("font-colors")
-}
-
-fn notebook_themes() -> Id {
-    id().child("notebook-themes")
-}
-
-fn renderers() -> Id {
-    id().child("renderers")
 }
 
 /// Whether `word`, lowercase, starts a word of `text`: "pen" finds "Pen" and "pen-like",
@@ -394,8 +386,7 @@ impl State {
             default_font: self.view.editor.default_font.clone(),
             page_tabs_left: self.page_tabs_left,
             navigation_bar_left: !self.navigation_bar_right,
-            lock_idle: self.passwords.lock_after.is_some(),
-            lock_minutes: self.passwords.lock_after.unwrap_or(10),
+            lock_after: self.passwords.lock_after,
             lock_on_leave: self.passwords.lock_on_leave,
             presence: self.live_options.presence,
             picture: self.live_options.picture,
@@ -409,7 +400,8 @@ impl State {
     }
 
     /// Builds the Options dialog while it is open. OK, or Enter in the user name, keeps its
-    /// choices with a non-empty user name; Cancel, Escape or a press outside leave them.
+    /// choices, and a user name that isn't blank; Cancel, Escape or a press outside leave
+    /// them.
     pub(crate) fn options_dialog(&mut self) {
         let Some(mut options) = self.options.take() else {
             return;
@@ -420,6 +412,7 @@ impl State {
         let theme = self.ui.theme.clone();
         let row = row_height(&theme);
         let ui = &mut self.ui;
+        let column = labels_column(ui);
         let entered = ui::popup::navigation(ui, &[user_name()], &[NamedKey::Enter])
             .contains(&NamedKey::Enter);
         // As tall as its contents up to the window, which the list then scrolls within.
@@ -636,28 +629,11 @@ impl State {
                             ..Spec::default()
                         },
                     );
-                    match row.control {
-                        Control::Check(choice) => {
-                            let checked = choice(&mut options);
-                            if ui::check_box(&mut self.ui, "check", row.label, *checked).clicked {
-                                *checked = !*checked;
-                            }
-                        }
-                        Control::Field(build) => {
-                            self.ui.leaf(
-                                "label",
-                                Spec {
-                                    size: [px(LABEL), px(row_height(&theme))],
-                                    text: Some(row.label),
-                                    ..Spec::default()
-                                },
-                            );
-                            build(self, &mut options);
-                        }
-                        Control::Block { build, .. } => {
-                            let titled = titled(&query, section, group, row);
-                            build(self, &mut options, if titled { &[] } else { &query });
-                        }
+                    if let Control::Block { build, .. } = row.control {
+                        let titled = titled(&query, section, group, row);
+                        build(self, &mut options, if titled { &[] } else { &query });
+                    } else {
+                        self.row(&mut options, row, column);
                     }
                     self.ui.close();
                 }
@@ -694,9 +670,11 @@ impl State {
         let ok = ok || entered;
         ui.close();
         ui.close();
-        let name = options.user_name.trim();
-        if ok && !name.is_empty() {
-            self.author = name.to_owned();
+        if ok {
+            let name = options.user_name.trim();
+            if !name.is_empty() {
+                self.author = name.to_owned();
+            }
             self.color_scheme = options.color_scheme;
             self.light_pages = !options.pages_match;
             self.hide_spelling = options.hide_spelling;
@@ -706,7 +684,7 @@ impl State {
             self.page_tabs_left = options.page_tabs_left;
             self.navigation_bar_right = !options.navigation_bar_left;
             self.passwords = crate::settings::Passwords {
-                lock_after: options.lock_idle.then_some(options.lock_minutes),
+                lock_after: options.lock_after,
                 lock_on_leave: options.lock_on_leave,
             };
             self.notebook_theme = options.notebook_theme;
@@ -734,10 +712,79 @@ impl State {
         }
         self.ui.close_popup(id());
     }
+
+    /// A row's label in the labels' column `column` wide, then its control over its hint.
+    fn row(&mut self, options: &mut Options, row: &Row, column: f32) {
+        let theme = self.ui.theme.clone();
+        let height = row_height(&theme);
+        let field = matches!(row.control, Control::Field(_));
+        self.ui.leaf(
+            "label",
+            Spec {
+                size: [px(column), px(height)],
+                text: field.then_some(row.label),
+                ..Spec::default()
+            },
+        );
+        self.ui.open(
+            "control",
+            Spec {
+                axis: Axis::Y,
+                size: [fill(), ui::children()],
+                ..Spec::default()
+            },
+        );
+        match row.control {
+            Control::Check(choice) => {
+                let checked = choice(options);
+                if ui::check_box(&mut self.ui, "check", row.label, *checked).clicked {
+                    *checked = !*checked;
+                }
+            }
+            Control::Field(build) => {
+                self.ui.open(
+                    "field",
+                    Spec {
+                        size: [fill(), ui::children()],
+                        gap: 8.0,
+                        ..Spec::default()
+                    },
+                );
+                build(self, options, row.label.trim_end_matches(':'));
+                self.ui.close();
+            }
+            Control::Block { .. } => {}
+        }
+        if !row.hint.is_empty() {
+            self.ui.leaf(
+                "hint",
+                Spec {
+                    size: [fill(), ui::fit()],
+                    text: Some(row.hint),
+                    font_size: Some((theme.font_size * 0.92).round()),
+                    color: Some(theme.text_dim),
+                    overflow: ui::Overflow::Wrap,
+                    pad: [0.0, 3.0],
+                    ..Spec::default()
+                },
+            );
+        }
+        self.ui.close();
+    }
+}
+
+/// How wide the labels' column stands: as the widest field label, so every control lines up.
+fn labels_column(ui: &mut Ui) -> f32 {
+    let labels = (SECTIONS.iter())
+        .flat_map(|section| section.groups)
+        .flat_map(|group| group.rows)
+        .filter(|row| matches!(row.control, Control::Field(_)));
+    let widest = labels.fold(0.0_f32, |widest, row| widest.max(ui.measure(row.label)[0]));
+    (widest + 12.0).ceil()
 }
 
 #[cfg(feature = "live")]
-fn relay(state: &mut State, options: &mut Options) {
+fn relay(state: &mut State, options: &mut Options, name: &str) {
     let ui = &mut state.ui;
     let theme = ui.theme.clone();
     let field = id().child("relay");
@@ -756,7 +803,7 @@ fn relay(state: &mut State, options: &mut Options) {
         },
     );
     if let Some(node) = ui.access(field) {
-        node.set_label("Live Share relay");
+        node.set_label(name);
     }
 }
 
@@ -806,62 +853,60 @@ fn heading(ui: &mut Ui, theme: &Theme, text: &str, lit: bool) {
     );
 }
 
-fn appearance(state: &mut State, options: &mut Options) {
-    let ui = &mut state.ui;
+/// A combo named `name` showing `choices[chosen]`, `width` wide, whose menu picks another.
+fn dropdown(ui: &mut Ui, name: &str, choices: &[&str], chosen: usize, width: f32) -> Option<usize> {
+    let menu = id().child(name);
     let combo = ui.id("combo");
-    let current = SCHEMES
-        .iter()
-        .find(|(scheme, _)| *scheme == options.color_scheme)
-        .map_or("", |(_, name)| name);
-    ui::shell::combo(ui, "combo", "Appearance", current, 140.0, schemes(), true);
-    let items = SCHEMES.map(|(scheme, name)| Item {
-        text: name,
-        checked: Some(scheme == options.color_scheme),
-        current: scheme == options.color_scheme,
-        ..Item::default()
-    });
-    let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
-    if let Some(index) = ui::popup::menu(ui, schemes(), anchor, &items, None) {
-        options.color_scheme = SCHEMES[index].0;
-    }
-}
-
-fn notebook_theme(state: &mut State, options: &mut Options) {
-    let ui = &mut state.ui;
-    let combo = ui.id("combo");
-    let themes = notebook::sidecar::themes::built_in();
-    let choices: Vec<(Option<&str>, &str)> = std::iter::once((None, "No Theme"))
-        .chain(
-            themes
-                .iter()
-                .map(|theme| (Some(theme.id.as_str()), theme.name.as_str())),
-        )
-        .collect();
-    let chosen = options.notebook_theme.as_deref();
-    let current = choices
-        .iter()
-        .find(|(id, _)| *id == chosen)
-        .map_or("", |(_, name)| name);
-    let title = "Default for new notebooks";
-    ui::shell::combo(ui, "combo", title, current, 140.0, notebook_themes(), true);
-    let items: Vec<Item> = choices
-        .iter()
-        .map(|(id, name)| Item {
-            text: name,
-            checked: Some(*id == chosen),
-            current: *id == chosen,
+    let current = choices.get(chosen).copied().unwrap_or_default();
+    ui::shell::combo(ui, "combo", name, current, width, menu, true);
+    let items: Vec<Item> = (choices.iter().enumerate())
+        .map(|(index, text)| Item {
+            text,
+            checked: Some(index == chosen),
+            current: index == chosen,
             ..Item::default()
         })
         .collect();
     let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
-    if let Some(index) = ui::popup::menu(ui, notebook_themes(), anchor, &items, None) {
-        options.notebook_theme = choices[index].0.map(Into::into);
+    ui::popup::menu(ui, menu, anchor, &items, None)
+}
+
+fn appearance(state: &mut State, options: &mut Options, name: &str) {
+    let chosen = (SCHEMES.iter())
+        .position(|(scheme, _)| *scheme == options.color_scheme)
+        .unwrap_or_default();
+    let choices = SCHEMES.map(|(_, label)| label);
+    if let Some(index) = ui::segmented(&mut state.ui, "schemes", name, &choices, chosen) {
+        options.color_scheme = SCHEMES[index].0;
+    }
+}
+
+/// Left or Right, for a pane on the left where `left`.
+fn side(state: &mut State, name: &str, left: &mut bool) {
+    if let Some(index) = ui::segmented(&mut state.ui, "side", name, &SIDES, usize::from(!*left)) {
+        *left = index == 0;
+    }
+}
+
+fn notebook_theme(state: &mut State, options: &mut Options, name: &str) {
+    let themes = notebook::sidecar::themes::built_in();
+    let ids: Vec<Option<&str>> = std::iter::once(None)
+        .chain(themes.iter().map(|theme| Some(theme.id.as_str())))
+        .collect();
+    let labels: Vec<&str> = std::iter::once("No Theme")
+        .chain(themes.iter().map(|theme| theme.name.as_str()))
+        .collect();
+    let chosen = (ids.iter())
+        .position(|id| *id == options.notebook_theme.as_deref())
+        .unwrap_or_default();
+    if let Some(index) = dropdown(&mut state.ui, name, &labels, chosen, 160.0) {
+        options.notebook_theme = ids[index].map(Into::into);
     }
 }
 
 /// The platform's backends, the one the default starts with marked, those that didn't start
 /// this run disabled; then the backend and adapter drawing now.
-fn renderer(state: &mut State, options: &mut Options) {
+fn renderer(state: &mut State, options: &mut Options, name: &str) {
     let State {
         ui,
         unavailable,
@@ -892,7 +937,8 @@ fn renderer(state: &mut State, options: &mut Options) {
     let labels: Vec<String> = Backend::PLATFORM.iter().copied().map(label).collect();
     let current = shown.map(label).unwrap_or_default();
     let combo = ui.id("combo");
-    ui::shell::combo(ui, "combo", "Renderer", &current, 160.0, renderers(), true);
+    let menu = id().child(name);
+    ui::shell::combo(ui, "combo", name, &current, 160.0, menu, true);
     let items: Vec<Item> = (Backend::PLATFORM.iter().zip(&labels))
         .map(|(backend, text)| Item {
             text,
@@ -904,7 +950,7 @@ fn renderer(state: &mut State, options: &mut Options) {
         })
         .collect();
     let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
-    if let Some(index) = ui::popup::menu(ui, renderers(), anchor, &items, None) {
+    if let Some(index) = ui::popup::menu(ui, menu, anchor, &items, None) {
         let picked = Backend::PLATFORM[index];
         options.renderer = if Some(picked) == automatic {
             Backend::Default
@@ -928,36 +974,22 @@ fn renderer(state: &mut State, options: &mut Options) {
     ui.leaf("adapter", spec);
 }
 
-fn lock_after(state: &mut State, options: &mut Options) {
-    let ui = &mut state.ui;
-    let combo = ui.id("combo");
-    let current = crate::protection::AFTER
-        .iter()
-        .find(|(minutes, _)| *minutes == options.lock_minutes)
-        .map_or("", |(_, name)| name);
-    ui::shell::combo(
-        ui,
-        "combo",
-        "Amount of time",
-        current,
-        140.0,
-        lock_times(),
-        true,
-    );
-    let items = crate::protection::AFTER.map(|(minutes, name)| Item {
-        text: name,
-        checked: Some(minutes == options.lock_minutes),
-        current: minutes == options.lock_minutes,
-        ..Item::default()
-    });
-    let anchor = Anchor::Below(ui.rect(combo).unwrap_or_default());
-    if let Some(index) = ui::popup::menu(ui, lock_times(), anchor, &items, None) {
-        options.lock_minutes = crate::protection::AFTER[index].0;
-        options.lock_idle = true;
+/// Never, or one of OneNote's times, `protection::AFTER`.
+fn lock_after(state: &mut State, options: &mut Options, name: &str) {
+    let after = crate::protection::AFTER;
+    let labels: Vec<&str> = std::iter::once("Never")
+        .chain(after.iter().map(|(_, label)| *label))
+        .collect();
+    let chosen = options
+        .lock_after
+        .and_then(|minutes| after.iter().position(|(each, _)| *each == minutes))
+        .map_or(0, |index| index + 1);
+    if let Some(index) = dropdown(&mut state.ui, name, &labels, chosen, 160.0) {
+        options.lock_after = index.checked_sub(1).map(|index| after[index].0);
     }
 }
 
-fn user_name_field(state: &mut State, options: &mut Options) {
+fn user_name_field(state: &mut State, options: &mut Options, name: &str) {
     let ui = &mut state.ui;
     let theme = &ui.theme;
     let width = Extent {
@@ -974,53 +1006,52 @@ fn user_name_field(state: &mut State, options: &mut Options) {
     };
     ui::text_field(ui, user_name(), &mut options.user_name, "", spec);
     if let Some(node) = ui.access(user_name()) {
-        node.set_label("User name");
+        node.set_label(name);
     }
 }
 
-fn font_face(state: &mut State, options: &mut Options) {
+/// The face, from the font menu, and its size.
+fn font_face(state: &mut State, options: &mut Options, name: &str) {
     let State { ui, fonts, .. } = state;
     let font = &mut options.default_font;
     let combo = ui.id("combo");
-    ui::shell::combo(ui, "combo", "Font", &font.face, 200.0, self::fonts(), true);
+    ui::shell::combo(ui, "combo", name, &font.face, 200.0, self::fonts(), true);
     let items: Vec<_> = fonts
         .iter()
-        .map(|name| Item {
-            text: name,
-            font: Some(name),
-            current: *name == font.face,
+        .map(|face| Item {
+            text: face,
+            font: Some(face),
+            current: *face == font.face,
             ..Item::default()
         })
         .collect();
     let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
-    if let Some(index) = ui::popup::menu(ui, self::fonts(), anchor, &items, Some("Font")) {
+    if let Some(index) = ui::popup::menu(ui, self::fonts(), anchor, &items, Some(name)) {
         font.face = fonts[index].clone();
     }
-}
-
-fn font_size(state: &mut State, options: &mut Options) {
-    let ui = &mut state.ui;
-    let font = &mut options.default_font;
-    let combo = ui.id("combo");
-    let size = format!("{}", font.size);
-    ui::shell::combo(ui, "combo", "Size", &size, 60.0, sizes(), true);
     let labels = SIZES.map(|size| format!("{size}"));
-    let items: Vec<_> = labels
-        .iter()
-        .map(|label| Item {
-            text: label,
-            checked: Some(*label == size),
-            current: *label == size,
-            ..Item::default()
-        })
-        .collect();
-    let anchor = Anchor::Over(ui.rect(combo).unwrap_or_default());
-    if let Some(index) = ui::popup::menu(ui, sizes(), anchor, &items, None) {
-        font.size = SIZES[index];
+    let shown = format!("{}", font.size);
+    let mut choices: Vec<&str> = labels.iter().map(String::as_str).collect();
+    // A size typed in the toolbar's box may be none of OneNote's.
+    let chosen = SIZES.iter().position(|size| *size == font.size);
+    let chosen = chosen.unwrap_or_else(|| {
+        choices.push(&shown);
+        choices.len() - 1
+    });
+    ui.open(
+        "size",
+        Spec {
+            size: [ui::children(), ui::children()],
+            ..Spec::default()
+        },
+    );
+    if let Some(index) = dropdown(ui, "Size", &choices, chosen, 64.0) {
+        font.size = SIZES.get(index).copied().unwrap_or(font.size);
     }
+    ui.close();
 }
 
-fn font_color(state: &mut State, options: &mut Options) {
+fn font_color(state: &mut State, options: &mut Options, name: &str) {
     let ui = &mut state.ui;
     let font = &mut options.default_font;
     let combo = ui.id("combo");
@@ -1028,7 +1059,7 @@ fn font_color(state: &mut State, options: &mut Options) {
         .iter()
         .find(|(color, _)| Some(*color) == font.color)
         .map_or("Automatic", |(_, name)| name);
-    ui::shell::combo(ui, "combo", "Font color", shown, 200.0, font_colors(), true);
+    ui::shell::combo(ui, "combo", name, shown, 200.0, font_colors(), true);
     let swatches: Vec<_> = crate::FONT_COLORS
         .iter()
         .map(|&(color, name)| (canvas::gpu::colorref(color), name))
@@ -1042,31 +1073,33 @@ fn font_color(state: &mut State, options: &mut Options) {
     }
 }
 
-/// A path shown dimmed and cut to the row.
-fn path(ui: &mut Ui, path: &std::path::Path) {
+/// Text shown dimmed and cut to the row, as a path.
+#[cfg(not(target_arch = "wasm32"))]
+fn dim(ui: &mut Ui, text: &str) {
     let spec = Spec {
         flags: Flags::CLIP,
         size: [fill(), px(row_height(&ui.theme))],
-        text: Some(&path.to_string_lossy()),
+        text: Some(text),
         color: Some(ui.theme.text_dim),
         ..Spec::default()
     };
-    ui.leaf("path", spec);
+    ui.leaf("dim", spec);
 }
 
-fn cache(state: &mut State, _: &mut Options) {
-    path(&mut state.ui, &state.cache);
+#[cfg(not(target_arch = "wasm32"))]
+fn cache(state: &mut State, _: &mut Options, _: &str) {
+    dim(&mut state.ui, &state.cache.to_string_lossy());
     let label = if cfg!(target_os = "macos") {
         "Show in Finder"
     } else {
         "Open Folder"
     };
     if ui::button(&mut state.ui, "reveal", label).clicked {
-        platform::reveal(&state.cache);
+        crate::platform::reveal(&state.cache);
     }
 }
 
-fn version(state: &mut State, _: &mut Options) {
+fn version(state: &mut State, _: &mut Options, _: &str) {
     let ui = &mut state.ui;
     let spec = Spec {
         size: [fill(), px(row_height(&ui.theme))],
@@ -1078,20 +1111,25 @@ fn version(state: &mut State, _: &mut Options) {
 
 /// Where Install put Snowbound and Uninstall, or Install where it isn't in the app menu.
 #[cfg(target_os = "linux")]
-fn installed(state: &mut State, _: &mut Options) {
+fn installed(state: &mut State, _: &mut Options, _: &str) {
     let ui = &mut state.ui;
     if crate::desktop::uninstallable() {
-        path(ui, &crate::desktop::binary().unwrap_or_default());
+        dim(
+            ui,
+            &crate::desktop::binary()
+                .unwrap_or_default()
+                .to_string_lossy(),
+        );
         if ui::button(ui, "uninstall", "Uninstall").clicked {
             crate::desktop::uninstall(&state.proxy);
         }
     } else if crate::desktop::installable() {
-        path(ui, std::path::Path::new("Not in the app menu"));
+        dim(ui, "Not in the app menu");
         if ui::button(ui, "install", "Install").clicked {
             crate::desktop::install();
         }
     } else {
-        path(ui, std::path::Path::new("By your system's package manager"));
+        dim(ui, "By your system's package manager");
     }
 }
 
