@@ -504,7 +504,13 @@ impl State {
             Target::Section { library, path } | Target::Group { library, path } => {
                 let section = matches!(target, Target::Section { .. });
                 let cataloged = library.catalog().is_some();
-                let mut actions = vec![item(Action::Rename, "Rename", false, false)];
+                let new = [
+                    item(Action::NewSection, "New Section", !cataloged, false),
+                    item(Action::NewGroup, "New Section Group", !cataloged, false),
+                ];
+                // A group's menu leads with what it makes, as Windows' menus do.
+                let mut actions = if section { Vec::new() } else { new.to_vec() };
+                actions.push(item(Action::Rename, "Rename", false, !section));
                 if section {
                     actions.push(item(Action::SaveAs, "Save As", false, false));
                 }
@@ -516,10 +522,11 @@ impl State {
                     let link = self.section_link(library, path).is_none();
                     actions.push(item(Action::CopyLink, "Copy Link to Section", link, true));
                 }
-                actions.extend([
-                    item(Action::NewSection, "New Section", !cataloged, true),
-                    item(Action::NewGroup, "New Section Group", !cataloged, false),
-                ]);
+                if section {
+                    let [mut first, rest] = new;
+                    first.1.separated = true;
+                    actions.extend([first, rest]);
+                }
                 if section {
                     actions.extend([
                         item(
@@ -549,8 +556,21 @@ impl State {
                 let listed = (self.notebooks.iter()).position(|open| Arc::ptr_eq(open, library));
                 let last = self.notebooks.len().saturating_sub(1);
                 let unread = self.unread_notebook(library);
+                // It leads with what it makes, as Windows' menus do.
                 let mut actions = vec![
-                    item(Action::Rename, "Rename", false, false),
+                    item(
+                        Action::NewSection,
+                        "New Section",
+                        library.catalog().is_none(),
+                        false,
+                    ),
+                    item(
+                        Action::NewGroup,
+                        "New Section Group",
+                        library.catalog().is_none(),
+                        false,
+                    ),
+                    item(Action::Rename, "Rename", false, true),
                     item(
                         Action::SaveAs,
                         "Save As",
@@ -586,18 +606,6 @@ impl State {
                         Action::LiveShare,
                         commands::command(commands::Id::LiveShare).title,
                         library.catalog().is_none() || library.joined.is_some(),
-                        false,
-                    ),
-                    item(
-                        Action::NewSection,
-                        "New Section",
-                        library.catalog().is_none(),
-                        true,
-                    ),
-                    item(
-                        Action::NewGroup,
-                        "New Section Group",
-                        library.catalog().is_none(),
                         false,
                     ),
                     item(
