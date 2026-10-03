@@ -260,13 +260,11 @@ impl State {
         let starting = self.peers.starting.get(&location).cloned();
         let ui = &mut self.ui;
         let theme = ui.theme.clone();
-        let fields: &[Id] = if host.is_none() && dialog.protect {
-            &[password_field()]
-        } else {
-            &[]
-        };
+        // Enter takes the dialog's default, Start Sharing or else Done, wherever the focus is
+        // but on another button.
         let entered =
-            ui::popup::navigation(ui, fields, &[NamedKey::Enter]).contains(&NamedKey::Enter);
+            ui::popup::navigation(ui, &[share_id(), password_field()], &[NamedKey::Enter])
+                .contains(&NamedKey::Enter);
         frame(ui, share_id(), "Live Share");
         text(ui, "notebook", &dialog.library.name, true);
         let (mut start, mut stop, mut copy) = (false, false, None);
@@ -384,7 +382,8 @@ impl State {
                 start = ui::button(ui, "start", "Start Sharing").clicked || entered;
             }
         }
-        let done = ui::button(ui, "done", "Done").clicked;
+        let offered = host.is_none() && !matches!(starting, Some(None));
+        let done = ui::button(ui, "done", "Done").clicked || entered && !offered;
         ui.close();
         ui.close();
         if let Some(code) = copy {
@@ -443,9 +442,9 @@ impl State {
             }
         }
         let ui = &mut self.ui;
+        let owners = [join_id(), code_field(), join_password()];
         let entered =
-            ui::popup::navigation(ui, &[code_field(), join_password()], &[NamedKey::Enter])
-                .contains(&NamedKey::Enter);
+            ui::popup::navigation(ui, &owners, &[NamedKey::Enter]).contains(&NamedKey::Enter);
         frame(ui, join_id(), "Open Shared Notebook");
         text(ui, "what", "Enter the code from the person sharing.", false);
         labelled(ui, "Code:", |ui| {
