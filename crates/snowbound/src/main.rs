@@ -2227,18 +2227,19 @@ impl State {
         choice = dropdown(ui, "menu", head, &entries, status_of).or(choice);
         // Pasting keeps only the text until #25.
         let options = [
-            ("Keep Source Formatting", false),
-            ("Merge Formatting", false),
-            ("Keep Text Only", true),
-            ("Picture", false),
+            ("Keep Source Formatting", false, art::KEEP_SOURCE_FORMATTING),
+            ("Merge Formatting", false, art::MERGE_FORMATTING),
+            ("Keep Text Only", true, art::KEEP_TEXT_ONLY),
+            ("Picture", false, art::PASTE_PICTURE),
         ];
         let mut items = vec![ui::popup::Item {
             text: "Paste Options",
             heading: true,
             ..Default::default()
         }];
-        items.extend(options.map(|(text, enabled)| ui::popup::Item {
+        items.extend(options.map(|(text, enabled, icon)| ui::popup::Item {
             text,
+            icon: Some(icon),
             disabled: !enabled,
             ..Default::default()
         }));
@@ -4710,21 +4711,25 @@ fn conflict_bar(ui: &mut Ui, bar: Bar, sections: &[&str], steps: [bool; 2]) -> O
             let items = [
                 ui::popup::Item {
                     text: "Delete Conflict Page",
+                    icon: Some(art::DELETE),
                     ..Default::default()
                 },
                 ui::popup::Item {
                     text: "Copy Page To…",
+                    icon: Some(art::COPY),
                     disabled: sections.is_empty(),
                     ..Default::default()
                 },
                 ui::popup::Item {
                     text: "Select Previous Conflicting Change",
+                    icon: Some(art::MOVE_UP),
                     disabled: !steps[0],
                     separated: true,
                     ..Default::default()
                 },
                 ui::popup::Item {
                     text: "Select Next Conflicting Change",
+                    icon: Some(art::MOVE_DOWN),
                     disabled: !steps[1],
                     ..Default::default()
                 },
@@ -5545,10 +5550,12 @@ fn tag_tool(
     clicked.then_some(commands::Choice::Command(commands::Id::Tag(place)))
 }
 
-/// The artwork the toolbar and its menus show for command `id`.
+/// The artwork the toolbar, the menus and the palette show for command `id`; none for a
+/// tag, which shows its own.
 fn artwork(id: commands::Id) -> Option<&'static [&'static str]> {
     use canvas::editor::{Alignment, Toggle};
     use commands::Id as Cmd;
+    use recording::Transport;
     Some(match id {
         Cmd::Back => art::BACK,
         Cmd::Forward => art::FORWARD,
@@ -5601,7 +5608,64 @@ fn artwork(id: commands::Id) -> Option<&'static [&'static str]> {
         Cmd::ZoomIn => art::ZOOM_IN,
         Cmd::ZoomOut => art::ZOOM_OUT,
         Cmd::HideSpelling | Cmd::Spelling => art::SPELLING,
-        _ => return None,
+        Cmd::Settings => art::OPTIONS,
+        Cmd::NewNotebook => art::NEW_NOTEBOOK,
+        Cmd::OpenNotebook => art::OPEN,
+        Cmd::OpenFromServer => art::SERVER,
+        Cmd::CloseNotebook => art::CLOSE_NOTEBOOK,
+        Cmd::NewSection => art::NEW_SECTION,
+        Cmd::NewSectionGroup => art::NEW_SECTION_GROUP,
+        Cmd::NewPage => art::NEW_PAGE,
+        Cmd::NewSubpage => art::NEW_SUBPAGE,
+        Cmd::PageVersions => art::PAGE_VERSIONS,
+        Cmd::CopyPageLink => art::COPY_LINK,
+        Cmd::PasswordProtect => art::PASSWORD,
+        Cmd::LockAll => art::LOCK,
+        Cmd::ShowNotebook => art::FOLDER,
+        Cmd::SaveAs => art::SAVE,
+        Cmd::RecycleBin => art::RECYCLE_BIN,
+        Cmd::EmptyRecycleBin => art::EMPTY_RECYCLE_BIN,
+        Cmd::MarkRead => art::MARK_READ,
+        Cmd::MarkNotebookRead => art::MARK_NOTEBOOK_READ,
+        Cmd::ShowUnread => art::SHOW_UNREAD,
+        Cmd::NextUnread => art::NEXT_UNREAD,
+        Cmd::ExportPdf => art::EXPORT_PDF,
+        Cmd::Print => art::PRINT,
+        Cmd::SelectAll => art::SELECT_ALL,
+        Cmd::Find => art::FIND,
+        Cmd::Search => art::SEARCH,
+        Cmd::SearchResults => art::SEARCH_RESULTS,
+        Cmd::GoTo => art::GO_TO,
+        Cmd::CommandPalette => art::COMMAND_PALETTE,
+        Cmd::ActualSize => art::ZOOM_ACTUAL,
+        Cmd::Sidebar => art::SIDEBAR_EXPAND,
+        Cmd::PageList => art::PAGE_LIST,
+        Cmd::PagesMatchTheme => art::PAGES_MATCH_THEME,
+        Cmd::FullPageView => art::FULL_PAGE,
+        Cmd::Transport(Transport::Pause) => art::PAUSE,
+        Cmd::Transport(Transport::Stop) => art::STOP,
+        Cmd::Transport(Transport::Skip(seconds)) if seconds < 0 => art::REWIND,
+        Cmd::Transport(Transport::Skip(_)) => art::FAST_FORWARD,
+        Cmd::Transport(Transport::SeekTo) => art::SEEK,
+        Cmd::Transport(Transport::SeePlayback) => art::SEE_PLAYBACK,
+        Cmd::SnapToGrid => art::SNAP_TO_GRID,
+        Cmd::Style(level @ 0..6) => art::HEADINGS[level],
+        Cmd::Style(6) => art::PAGE_TITLE,
+        Cmd::Style(7) => art::CITATION,
+        Cmd::Style(8) => art::QUOTE,
+        Cmd::Style(9) => art::CODE,
+        Cmd::Style(_) => art::NORMAL,
+        Cmd::Themes => art::CUSTOMIZE_THEME,
+        Cmd::OpenShared => art::OPEN_SHARED,
+        Cmd::LiveShare => art::LIVE_SHARE,
+        Cmd::MarkdownShortcuts => art::MARKDOWN,
+        Cmd::CustomizeTags => art::CUSTOMIZE_TAGS,
+        Cmd::RemoveTags => art::REMOVE_TAG,
+        Cmd::ToDoList => art::TO_DO,
+        Cmd::BulletedList => art::BULLETS,
+        Cmd::Help => art::HELP,
+        Cmd::CheckForUpdates => art::UPDATE,
+        Cmd::Tag(_) => return None,
     })
 }
 

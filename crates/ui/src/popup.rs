@@ -656,19 +656,23 @@ fn menu_row(ui: &mut Ui, style: &Menu, matches: &Matches, owner: Role, row: Row)
     if matches.icons {
         let checked = item.checked == Some(true);
         let tint = match item.tint {
-            Some([red, green, blue, _]) if !checked => [red, green, blue, color[3]],
+            Some([red, green, blue, _]) if !checked => [red, green, blue, 1.0],
+            _ if item.disabled => style.text,
             _ => color,
         };
+        // Fading the whole icon dims art in its own colours too, as the toolbar does.
+        let [red, green, blue, alpha] = tint;
         ui.leaf(
             "icon",
             Spec {
                 size: [px(ICON), fill()],
                 icon: if checked { Some(CHECK) } else { item.icon },
-                color: Some(if item.disabled {
-                    mix(tint, style.fill, 0.5)
-                } else {
-                    tint
-                }),
+                color: Some([
+                    red,
+                    green,
+                    blue,
+                    alpha * if item.disabled { 0.4 } else { 1.0 },
+                ]),
                 ..Spec::default()
             },
         );

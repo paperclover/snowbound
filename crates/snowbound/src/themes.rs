@@ -604,6 +604,11 @@ impl State {
                 .enumerate()
                 .map(|(at, (scope, _))| Item {
                     text: scope.name(),
+                    icon: Some(match scope {
+                        Scope::Page => crate::art::PAGE,
+                        Scope::Section => crate::art::SECTION,
+                        Scope::Notebook => crate::art::NOTEBOOK,
+                    }),
                     current: at == 0,
                     ..Item::default()
                 })

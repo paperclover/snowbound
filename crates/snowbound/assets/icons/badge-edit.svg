@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs>
+    <linearGradient id="g0" x2="0" y2="1"><stop offset="0" stop-color="#ffe27a"/><stop offset="1" stop-color="#f5a31a"/></linearGradient>
+    <linearGradient id="g1" x2="0" y2="1"><stop offset="0" stop-color="#ffb3c1"/><stop offset="1" stop-color="#e86a85"/></linearGradient>
+    <linearGradient id="g2" x2="0" y2="1"><stop offset="0" stop-color="#f6dfb8"/><stop offset="1" stop-color="#d9b07a"/></linearGradient>
+  </defs>
+  <path d="M8.5 15L10.727 14.399L14.687 10.439L13.061 8.813L9.101 12.773Z" fill="none" stroke="#ffffff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M10.727 15.149L13.839 12.038L12.212 10.411L9.101 13.523Z" fill="#000000" fill-opacity="0.16"/>
+  <path d="M10.727 14.399L13.839 11.288L12.212 9.661L9.101 12.773Z" fill="url(#g0)" stroke="#b86e00" stroke-width="0.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M13.839 11.288L14.687 10.439L13.061 8.813L12.212 9.661Z" fill="url(#g1)" stroke="#b8455e" stroke-width="0.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M8.5 15L10.727 14.399L9.101 12.773Z" fill="url(#g2)" stroke="#94632a" stroke-width="0.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M8.5 15L9.335 14.775L8.725 14.165Z" fill="#3b4350"/>
+</svg>

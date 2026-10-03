@@ -2,7 +2,7 @@
 //! the page's context menu, and following a clicked link, to a page
 //! of the notebook or with the system's handler.
 
-use crate::{Command, State, commands, page, platform};
+use crate::{Command, State, art, commands, page, platform};
 use onestore::ExGuid;
 use onestore::page::link::{LinkTarget, internal_link};
 use std::error::Error;
@@ -292,14 +292,18 @@ impl State {
             text,
             ..Item::default()
         };
+        let drawn = |text, icon| Item {
+            icon: Some(icon),
+            ..item(text)
+        };
         // OneNote 2010 heads the menu on a marked word with its corrections.
         let mut items = match &context.spelling {
             Some(correction) if correction.repeated => vec![
-                item("Delete Repeated Word"),
+                drawn("Delete Repeated Word", art::DELETE),
                 item("Ignore"),
                 Item {
                     separated: true,
-                    ..item("Spelling…")
+                    ..drawn("Spelling…", art::SPELLING)
                 },
             ],
             Some(correction) => {
@@ -319,10 +323,10 @@ impl State {
                         separated: true,
                         ..item("Ignore")
                     },
-                    item("Add to Dictionary"),
+                    drawn("Add to Dictionary", art::ADD_TO_DICTIONARY),
                     Item {
                         separated: true,
-                        ..item("Spelling…")
+                        ..drawn("Spelling…", art::SPELLING)
                     },
                 ]);
                 items
@@ -340,45 +344,46 @@ impl State {
             .collect::<Vec<_>>();
         items.extend(if context.attachment.is_some() {
             // OneNote 2010's commands for the file itself; its clipboard holds text alone.
-            vec![item("Open"), item("Save As…")]
+            vec![drawn("Open", art::OPEN), drawn("Save As…", art::SAVE)]
         } else {
             let mut items = vec![
                 Item {
                     disabled: !context.selected,
                     separated: corrections > 0,
-                    ..item("Cut")
+                    ..drawn("Cut", art::CUT)
                 },
                 Item {
                     disabled: !context.selected,
-                    ..item("Copy")
+                    ..drawn("Copy", art::COPY)
                 },
-                item("Paste"),
+                drawn("Paste", art::PASTE),
             ];
             match &context.link {
                 Some(_) => items.extend([
                     Item {
                         separated: true,
-                        ..item("Edit Link…")
+                        ..drawn("Edit Link…", art::LINK)
                     },
-                    item("Copy Link to Paragraph"),
+                    drawn("Copy Link to Paragraph", art::COPY_LINK),
                     Item {
                         separated: true,
-                        ..item("Copy Link")
+                        ..drawn("Copy Link", art::COPY_LINK)
                     },
-                    item("Select Link"),
-                    item("Remove Link"),
+                    drawn("Select Link", art::SELECT),
+                    drawn("Remove Link", art::REMOVE_LINK),
                 ]),
                 None => items.extend([
                     Item {
                         separated: true,
-                        ..item("Link…")
+                        ..drawn("Link…", art::LINK)
                     },
-                    item("Copy Link to Paragraph"),
+                    drawn("Copy Link to Paragraph", art::COPY_LINK),
                 ]),
             }
             for (at, id) in lists.iter().enumerate() {
                 items.push(Item {
                     separated: at == 0,
+                    icon: crate::artwork(*id),
                     ..item(commands::command(*id).title)
                 });
             }
@@ -386,9 +391,9 @@ impl State {
                 items.extend([
                     Item {
                         separated: true,
-                        ..item("Professional")
+                        ..drawn("Professional", art::EQUATION)
                     },
-                    item("Linear"),
+                    drawn("Linear", art::EQUATION),
                 ]);
             }
             items

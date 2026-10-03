@@ -196,6 +196,7 @@ impl State {
                     Action::Run,
                     Item {
                         text: "Run",
+                        icon: crate::artwork(id),
                         disabled: !self.status(&Choice::Command(id), &format).enabled,
                         ..Item::default()
                     },
@@ -207,6 +208,7 @@ impl State {
                     Action::Open,
                     Item {
                         text: "Open",
+                        icon: Action::Open.art(),
                         ..Item::default()
                     },
                 ),

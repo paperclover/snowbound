@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs>
+    <linearGradient id="g0" x2="0" y2="1"><stop offset="0" stop-color="#79c2ff"/><stop offset="1" stop-color="#1f7cf0"/></linearGradient>
+  </defs>
+  <path d="M8 15.25L13.5 9.5H10.25V2.25H5.75V9.5H2.5Z" fill="#000000" fill-opacity="0.16"/>
+  <path class="accent" d="M8 14.5L13.5 8.75H10.25V1.5H5.75V8.75H2.5Z" fill="url(#g0)" stroke="#1560c4" stroke-width="0.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M6.9 2.6V9.6H5.2" fill="none" stroke="#ffffff" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" stroke-opacity="0.85"/>
+</svg>

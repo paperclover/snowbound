@@ -96,25 +96,29 @@ pub fn menu(
         text,
         ..Default::default()
     };
+    let drawn = |text, icon| ui::popup::Item {
+        icon: Some(icon),
+        ..item(text)
+    };
     let items = [
-        item("Restore Version"),
-        item("Delete Version"),
+        drawn("Restore Version", art::UNDO),
+        drawn("Delete Version", art::DELETE),
         ui::popup::Item {
             disabled: sections.is_empty(),
-            ..item("Copy Page To…")
+            ..drawn("Copy Page To…", art::COPY)
         },
         ui::popup::Item {
             separated: true,
-            ..item("Delete All Versions in Section")
+            ..drawn("Delete All Versions in Section", art::DELETE)
         },
         ui::popup::Item {
             disabled: !grouped,
-            ..item("Delete All Versions in Section Group")
+            ..drawn("Delete All Versions in Section Group", art::DELETE)
         },
-        item("Delete All Versions in Notebook"),
+        drawn("Delete All Versions in Notebook", art::DELETE),
         ui::popup::Item {
             separated: true,
-            ..item("Hide Page Versions")
+            ..drawn("Hide Page Versions", art::PAGE_VERSIONS)
         },
     ];
     let chosen = match ui::popup::menu(ui, menu, anchor, &items, None) {

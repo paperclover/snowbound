@@ -1,8 +1,9 @@
 //! Artwork for the window's chrome: tinted interface icons and the toolbar's tag buttons.
 
+/// Artwork of one or more files under `assets/`, painted in order, as a badge over its icon.
 macro_rules! art {
-    ($path:literal) => {
-        &[include_str!(concat!("../assets/", $path, ".svg"))]
+    ($($path:literal),+) => {
+        &[$(include_str!(concat!("../assets/", $path, ".svg"))),+]
     };
 }
 
@@ -97,3 +98,104 @@ pub const SHAPE_ARROW: &[&str] = art!("icons/shape-arrow");
 pub const SHAPE_LINE: &[&str] = art!("icons/shape-line");
 pub const SHAPE_OVAL: &[&str] = art!("icons/shape-oval");
 pub const SHAPE_RECTANGLE: &[&str] = art!("icons/shape-rectangle");
+
+pub const ADD_TO_DICTIONARY: &[&str] = art!("icons/spelling", "icons/badge-add");
+pub const CITATION: &[&str] = art!("icons/citation");
+pub const CLOSE_NOTEBOOK: &[&str] = art!(
+    "icons/notebook-back",
+    "icons/notebook-accent",
+    "icons/notebook",
+    "icons/badge-close"
+);
+pub const CODE: &[&str] = art!("icons/code");
+pub const COMMAND_PALETTE: &[&str] = art!("icons/palette", "icons/badge-command");
+pub const COPY_LINK: &[&str] = art!("icons/page", "icons/badge-link");
+pub const CUSTOMIZE_THEME: &[&str] = art!("icons/theme", "icons/badge-edit");
+pub const CUSTOMIZE_TAGS: &[&str] = art!("icons/tag", "icons/badge-edit");
+pub const DELETE: &[&str] = art!("icons/delete");
+pub const EMPTY_RECYCLE_BIN: &[&str] = art!("icons/recycle-bin", "icons/badge-remove");
+pub const EXPORT_PDF: &[&str] = art!("icons/pdf");
+pub const FAST_FORWARD: &[&str] = art!("icons/fast-forward");
+pub const FIND: &[&str] = art!("icons/page", "icons/badge-search");
+pub const FULL_PAGE: &[&str] = art!("icons/full-page");
+pub const GO_TO: &[&str] = art!("icons/palette", "icons/badge-go");
+/// Heading 1 to 6, in order.
+pub const HEADINGS: [&[&str]; 6] = [
+    art!("icons/heading", "icons/digit-1"),
+    art!("icons/heading", "icons/digit-2"),
+    art!("icons/heading", "icons/digit-3"),
+    art!("icons/heading", "icons/digit-4"),
+    art!("icons/heading", "icons/digit-5"),
+    art!("icons/heading", "icons/digit-6"),
+];
+pub const HELP: &[&str] = art!("icons/help");
+pub const KEEP_SOURCE_FORMATTING: &[&str] = art!("icons/paste", "icons/badge-brush");
+pub const KEEP_TEXT_ONLY: &[&str] = art!("icons/paste", "icons/badge-text");
+pub const LIVE_SHARE: &[&str] = art!(
+    "icons/notebook-back",
+    "icons/notebook-accent",
+    "icons/notebook",
+    "icons/badge-live"
+);
+pub const LOCK: &[&str] = art!("icons/lock");
+pub const MARKDOWN: &[&str] = art!("icons/markdown");
+pub const MARK_NOTEBOOK_READ: &[&str] = art!(
+    "icons/notebook-back",
+    "icons/notebook-accent",
+    "icons/notebook",
+    "icons/badge-check"
+);
+pub const MARK_READ: &[&str] = art!("icons/page", "icons/badge-check");
+pub const MERGE_FORMATTING: &[&str] = art!("icons/paste", "icons/badge-merge");
+pub const MOVE: &[&str] = art!("icons/page", "icons/badge-go");
+pub const MOVE_DOWN: &[&str] = art!("icons/move-down");
+pub const MOVE_UP: &[&str] = art!("icons/move-up");
+pub const NEW_NOTEBOOK: &[&str] = art!(
+    "icons/notebook-back",
+    "icons/notebook-accent",
+    "icons/notebook",
+    "icons/badge-add"
+);
+pub const NEW_PAGE: &[&str] = art!("icons/page", "icons/badge-add");
+pub const NEW_SECTION: &[&str] = art!("icons/tab", "icons/badge-add");
+pub const NEW_SECTION_GROUP: &[&str] = art!("icons/section-group", "icons/badge-add");
+pub const NEW_SUBPAGE: &[&str] = art!("icons/subpage", "icons/badge-add");
+pub const NEXT_UNREAD: &[&str] = art!("icons/page", "icons/badge-unread");
+pub const NORMAL: &[&str] = art!("icons/normal");
+pub const OPEN: &[&str] = art!("icons/folder-open");
+pub const OPEN_SHARED: &[&str] = art!("icons/folder-open", "icons/badge-live");
+pub const PAGE_LIST: &[&str] = art!("icons/page-list");
+pub const PAGE_TITLE: &[&str] = art!("icons/page-title");
+pub const PAGE_VERSIONS: &[&str] = art!("icons/page", "icons/badge-history");
+pub const PAGES_MATCH_THEME: &[&str] = art!("icons/pages-match-theme");
+pub const PASSWORD: &[&str] = art!("icons/tab", "icons/badge-lock");
+pub const PASTE_PICTURE: &[&str] = art!("icons/paste", "icons/badge-picture");
+pub const PAUSE: &[&str] = art!("icons/pause");
+pub const PRINT: &[&str] = art!("icons/print");
+pub const PROPERTIES: &[&str] = art!("icons/properties");
+pub const QUOTE: &[&str] = art!("icons/quote");
+pub const RECYCLE_BIN: &[&str] = art!("icons/recycle-bin");
+pub const REMOVE_LINK: &[&str] = art!("icons/link", "icons/badge-remove");
+pub const REMOVE_TAG: &[&str] = art!("icons/tag", "icons/badge-remove");
+pub const RENAME: &[&str] = art!("icons/rename");
+pub const REWIND: &[&str] = art!("icons/rewind");
+pub const SAVE: &[&str] = art!("icons/save");
+pub const SEARCH_RESULTS: &[&str] = art!("icons/page-list", "icons/badge-search");
+pub const SECTION_COLOR: &[&str] = art!("icons/tab", "icons/badge-drop");
+pub const SEE_PLAYBACK: &[&str] = art!("icons/page", "icons/badge-play");
+pub const SEEK: &[&str] = art!("icons/clock", "icons/badge-go");
+pub const SELECT_ALL: &[&str] = art!("icons/select-all");
+pub const SHOW_UNREAD: &[&str] = art!(
+    "icons/notebook-back",
+    "icons/notebook-accent",
+    "icons/notebook",
+    "icons/badge-unread"
+);
+pub const SNAP_TO_GRID: &[&str] = art!("icons/snap-to-grid");
+pub const STOP: &[&str] = art!("icons/stop");
+pub const SUBPAGE: &[&str] = art!("icons/subpage");
+pub const SYNC_NOW: &[&str] = art!("icons/sync-now");
+pub const THEME: &[&str] = art!("icons/theme");
+pub const TO_DO: &[&str] = art!("icons/to-do");
+pub const UPDATE: &[&str] = art!("icons/update");
+pub const ZOOM_ACTUAL: &[&str] = art!("icons/zoom-actual");

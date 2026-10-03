@@ -127,6 +127,49 @@ pub enum Action {
     LiveShare,
 }
 
+impl Action {
+    /// The artwork its menu item shows; none for a place or colour, which shows its own.
+    pub(crate) fn art(&self) -> Option<&'static [&'static str]> {
+        use crate::art;
+        Some(match self {
+            Action::Open => art::OPEN,
+            Action::Rename => art::RENAME,
+            Action::Delete => art::DELETE,
+            Action::Move => art::MOVE,
+            Action::Copy => art::COPY,
+            Action::SaveAs => art::SAVE,
+            Action::RecycleBin => art::RECYCLE_BIN,
+            Action::EmptyRecycleBin => art::EMPTY_RECYCLE_BIN,
+            Action::MarkNotebookRead => art::MARK_NOTEBOOK_READ,
+            Action::CopyLink => art::COPY_LINK,
+            Action::NewPage => art::NEW_PAGE,
+            Action::NewSubpage => art::NEW_SUBPAGE,
+            Action::MakeSubpage => art::SUBPAGE,
+            Action::PromoteSubpage => art::OUTDENT,
+            Action::Versions(_) => art::PAGE_VERSIONS,
+            Action::NewSection => art::NEW_SECTION,
+            Action::NewGroup => art::NEW_SECTION_GROUP,
+            Action::Reveal => art::FOLDER,
+            Action::Close => art::CLOSE_NOTEBOOK,
+            Action::Theme => art::THEME,
+            Action::Colors => art::SECTION_COLOR,
+            Action::Sync => art::SYNC_NOW,
+            Action::NewNotebook => art::NEW_NOTEBOOK,
+            Action::Raise(true) => art::MOVE_UP,
+            Action::Raise(false) => art::MOVE_DOWN,
+            Action::Properties => art::PROPERTIES,
+            Action::Password => art::PASSWORD,
+            #[cfg(feature = "live")]
+            Action::LiveShare => art::LIVE_SHARE,
+            Action::Run
+            | Action::MoveTo(_)
+            | Action::CopyTo(_)
+            | Action::SyncStatus
+            | Action::Color(_) => return None,
+        })
+    }
+}
+
 /// OneNote 2010's section and notebook colours, COLORREF, with their names in its Section
 /// Color menu's order (`corpus/section-color/native`).
 pub(crate) const SECTION_COLORS: [(u32, &str); 16] = [
@@ -281,6 +324,7 @@ impl State {
             let badge = None;
             let item = Item {
                 text,
+                icon: action.art(),
                 disabled,
                 separated,
                 submenu,
