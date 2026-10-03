@@ -65,6 +65,11 @@ impl Default for Config {
 }
 
 const HANDSHAKE: Duration = Duration::from_secs(10);
+/// How long a polled session's `GET` waits for something to bring, how long one of its
+/// connections may idle between requests, and how long a session may ask nothing.
+const WAIT: Duration = Duration::from_secs(25);
+const KEPT: Duration = Duration::from_secs(60);
+const IDLE_POLL: Duration = Duration::from_secs(60);
 const WRITE: Duration = Duration::from_secs(30);
 const MINUTE: Duration = Duration::from_secs(60);
 const HOUR: Duration = Duration::from_secs(3600);
@@ -122,6 +127,17 @@ struct Relay {
 struct State {
     rooms: HashMap<String, Room>,
     addresses: HashMap<IpAddr, Address>,
+    /// Peers that reach the relay by requests rather than a WebSocket, by session.
+    polls: HashMap<String, Poll>,
+}
+
+/// A peer in a room by requests: where its messages wait for its next `GET`.
+struct Poll {
+    tag: String,
+    slot: u32,
+    outbox: Arc<Outbox>,
+    /// When it last asked anything; one quiet past `IDLE_POLL` has gone.
+    last: Instant,
 }
 
 struct Room {
@@ -169,6 +185,8 @@ enum Refusal {
 }
 
 impl Relay {
+    /// Answers a connection's requests one after another, as a polled session sends them,
+    /// until one takes the connection over as a WebSocket or it ends.
     fn connection(&self, stream: TcpStream) {
         let _ = stream.set_nodelay(true);
         let _ = stream.set_read_timeout(Some(HANDSHAKE));
@@ -177,16 +195,27 @@ impl Relay {
             return;
         };
         let mut reader = BufReader::new(reading);
-        let Ok(head) = ws::head(&mut reader) else {
-            return;
-        };
-        let address = self.address(&stream, &head);
+        while let Ok(head) = ws::head(&mut reader) {
+            if !self.request(&stream, &mut reader, &head) {
+                return;
+            }
+            // Between a session's requests, a connection may idle as long as one waits.
+            let _ = stream.set_read_timeout(Some(KEPT));
+        }
+    }
+
+    /// Answers the request `head`: whether the connection serves another.
+    fn request(&self, stream: &TcpStream, reader: &mut BufReader<TcpStream>, head: &str) -> bool {
+        let address = self.address(stream, head);
         let target = head.split(' ').nth(1).unwrap_or_default();
         let (path, query) = target.split_once('?').unwrap_or((target, ""));
+        if let Some(id) = path.strip_prefix("/v1/poll/") {
+            return self.polled(stream, reader, head, id);
+        }
         let ask = match path {
             "/health" => {
-                respond(&stream, "200 OK", "application/json", "", &self.health());
-                return;
+                respond(stream, "200 OK", "application/json", "", &self.health());
+                return false;
             }
             "/v1/claim" => Ask::Claim(
                 query
@@ -197,53 +226,59 @@ impl Relay {
             _ => match path.strip_prefix("/v1/room/").filter(|tag| valid(tag)) {
                 Some(tag) => Ask::Room(tag.into()),
                 None => {
-                    respond(&stream, "404 Not Found", "text/plain", "", "No such page\n");
-                    return;
+                    respond(stream, "404 Not Found", "text/plain", "", "No such page\n");
+                    return false;
                 }
             },
         };
-        let upgrade = ws::header(&head, "Upgrade")
+        if query.split('&').any(|pair| pair == "poll=1") {
+            let outbox = Arc::new(Outbox::mailbox(self.config.queue));
+            return match self.join(address, ask, &outbox, Instant::now()) {
+                Ok((tag, slot)) => {
+                    let mut id = [0; 16];
+                    if getrandom::fill(&mut id).is_err() {
+                        return false;
+                    }
+                    let id: String = id.iter().map(|byte| format!("{byte:02x}")).collect();
+                    let poll = Poll {
+                        tag,
+                        slot,
+                        outbox,
+                        last: Instant::now(),
+                    };
+                    self.state.lock().unwrap().polls.insert(id.clone(), poll);
+                    reply(stream, "200 OK", format!("session {id}").as_bytes())
+                }
+                Err(refusal) => {
+                    refuse(stream, refusal);
+                    false
+                }
+            };
+        }
+        let upgrade = ws::header(head, "Upgrade")
             .is_some_and(|value| value.eq_ignore_ascii_case("websocket"));
         let (true, Some(key)) = (
             upgrade && head.starts_with("GET "),
-            ws::header(&head, "Sec-WebSocket-Key"),
+            ws::header(head, "Sec-WebSocket-Key"),
         ) else {
             respond(
-                &stream,
+                stream,
                 "400 Bad Request",
                 "text/plain",
                 "",
-                "A WebSocket only\n",
+                "A WebSocket, or ?poll=1\n",
             );
-            return;
+            return false;
         };
         let Ok(writing) = stream.try_clone() else {
-            return;
+            return false;
         };
         let outbox = Arc::new(Outbox::new(writing, self.config.queue));
         let (tag, slot) = match self.join(address, ask, &outbox, Instant::now()) {
             Ok(joined) => joined,
             Err(refusal) => {
-                let (status, headers, body) = match refusal {
-                    Refusal::NotFound => ("404 Not Found", String::new(), "No such code\n"),
-                    Refusal::Gone => ("410 Gone", String::new(), "The code has expired\n"),
-                    Refusal::Wait(wait) => (
-                        "429 Too Many Requests",
-                        // Rounded up, so that a client waiting so long finds it over.
-                        format!(
-                            "Retry-After: {}\r\n",
-                            wait.as_secs() + u64::from(wait.subsec_nanos() > 0)
-                        ),
-                        "Too many tries\n",
-                    ),
-                    Refusal::Full => (
-                        "503 Service Unavailable",
-                        "Retry-After: 30\r\n".into(),
-                        "The relay is full\n",
-                    ),
-                };
-                respond(&stream, status, "text/plain", &headers, body);
-                return;
+                refuse(stream, refusal);
+                return false;
             }
         };
         let switching = format!(
@@ -252,7 +287,7 @@ impl Relay {
             ws::accept(key)
         );
         let writer = Arc::clone(&outbox);
-        if (&stream).write_all(switching.as_bytes()).is_ok()
+        if (&*stream).write_all(switching.as_bytes()).is_ok()
             && thread::Builder::new()
                 .stack_size(STACK)
                 .spawn(move || writer.drain())
@@ -268,6 +303,75 @@ impl Relay {
         }
         let mut state = self.state.lock().unwrap();
         depart(&mut state, &self.config, &tag, slot, Instant::now());
+        false
+    }
+
+    /// A polled session's request: `GET` waits for what is to go to it, `POST` brings what
+    /// it sends, each a run of WebSocket frames. Whether the connection serves another.
+    fn polled(
+        &self,
+        stream: &TcpStream,
+        reader: &mut BufReader<TcpStream>,
+        head: &str,
+        id: &str,
+    ) -> bool {
+        let length: usize = ws::header(head, "Content-Length")
+            .and_then(|length| length.parse().ok())
+            .unwrap_or(0);
+        if length > self.config.max_message * 4 {
+            return false;
+        }
+        let mut body = vec![0; length];
+        if std::io::Read::read_exact(reader, &mut body).is_err() {
+            return false;
+        }
+        let session = {
+            let mut state = self.state.lock().unwrap();
+            state.polls.get_mut(id).map(|poll| {
+                poll.last = Instant::now();
+                (poll.tag.clone(), poll.slot, Arc::clone(&poll.outbox))
+            })
+        };
+        let Some((tag, slot, outbox)) = session else {
+            return reply(stream, "410 Gone", b"No such session\n");
+        };
+        if head.starts_with("POST ") {
+            let mut frames = ws::Reader::new(&body[..], self.config.max_message, true);
+            while let Ok(message) = frames.read() {
+                if !self.heard(&tag, slot, &outbox, message) {
+                    self.end_poll(id);
+                    return reply(stream, "410 Gone", b"Closed\n");
+                }
+            }
+            return reply(stream, "200 OK", b"");
+        }
+        let _ = stream.set_write_timeout(Some(WRITE));
+        match outbox.take(WAIT) {
+            Some(bytes) => {
+                if let Some(poll) = self.state.lock().unwrap().polls.get_mut(id) {
+                    poll.last = Instant::now();
+                }
+                reply(stream, "200 OK", &bytes)
+            }
+            None => {
+                self.end_poll(id);
+                reply(stream, "410 Gone", b"Closed\n")
+            }
+        }
+    }
+
+    /// Ends the polled session `id`: it leaves its room.
+    fn end_poll(&self, id: &str) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(poll) = state.polls.remove(id) {
+            depart(
+                &mut state,
+                &self.config,
+                &poll.tag,
+                poll.slot,
+                Instant::now(),
+            );
+        }
     }
 
     /// Where a peer counts: the address it connected from, or its proxy says it did.
@@ -313,7 +417,9 @@ impl Relay {
     ) -> Result<(String, u32), Refusal> {
         let config = &self.config;
         let mut state = self.state.lock().unwrap();
-        let State { rooms, addresses } = &mut *state;
+        let State {
+            rooms, addresses, ..
+        } = &mut *state;
         if !addresses.contains_key(&address) && addresses.len() >= ADDRESSES {
             return Err(Refusal::Full);
         }
@@ -484,7 +590,9 @@ impl Relay {
     /// Takes a code's owner's word on the peer in a slot waiting to meet it.
     fn judge(&self, tag: &str, from: u32, verdict: Verdict) {
         let mut state = self.state.lock().unwrap();
-        let State { rooms, addresses } = &mut *state;
+        let State {
+            rooms, addresses, ..
+        } = &mut *state;
         let Some(room) = rooms.get_mut(tag).filter(|room| room.owner == Some(from)) else {
             return;
         };
@@ -537,6 +645,15 @@ impl Relay {
         for (tag, slot) in late {
             depart(&mut state, config, &tag, slot, now);
         }
+        let quiet: Vec<String> = (state.polls.iter())
+            .filter(|(_, poll)| now.saturating_duration_since(poll.last) >= IDLE_POLL)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in quiet {
+            if let Some(poll) = state.polls.remove(&id) {
+                depart(&mut state, config, &poll.tag, poll.slot, now);
+            }
+        }
         state.addresses.retain(|_, address| {
             address.refresh(now);
             !address.quiet(config, now)
@@ -547,7 +664,9 @@ impl Relay {
 /// Takes `slot` out of room `tag` and hangs up on it. One still waiting to meet a code's
 /// owner tried a wrong code; the owner leaving excuses those waiting for it.
 fn depart(state: &mut State, config: &Config, tag: &str, slot: u32, now: Instant) {
-    let State { rooms, addresses } = state;
+    let State {
+        rooms, addresses, ..
+    } = state;
     let Some(room) = rooms.get_mut(tag) else {
         return;
     };
@@ -611,6 +730,38 @@ fn valid(tag: &str) -> bool {
         && tag
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// Answers a polled session's request, keeping the connection: whether that worked.
+fn reply(mut stream: &TcpStream, status: &str, body: &[u8]) -> bool {
+    let head = format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\n\
+         Cache-Control: no-store\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).is_ok() && stream.write_all(body).is_ok()
+}
+
+fn refuse(stream: &TcpStream, refusal: Refusal) {
+    let (status, headers, body) = match refusal {
+        Refusal::NotFound => ("404 Not Found", String::new(), "No such code\n"),
+        Refusal::Gone => ("410 Gone", String::new(), "The code has expired\n"),
+        Refusal::Wait(wait) => (
+            "429 Too Many Requests",
+            // Rounded up, so that a client waiting so long finds it over.
+            format!(
+                "Retry-After: {}\r\n",
+                wait.as_secs() + u64::from(wait.subsec_nanos() > 0)
+            ),
+            "Too many tries\n",
+        ),
+        Refusal::Full => (
+            "503 Service Unavailable",
+            "Retry-After: 30\r\n".into(),
+            "The relay is full\n",
+        ),
+    };
+    respond(stream, status, "text/plain", &headers, body);
 }
 
 fn respond(mut stream: &TcpStream, status: &str, kind: &str, headers: &str, body: &str) {
@@ -729,7 +880,8 @@ impl Bucket {
 
 /// What waits to be written to one peer, capped in bytes.
 struct Outbox {
-    stream: TcpStream,
+    /// Where its frames go; none for a polled session's, which its `GET`s take.
+    stream: Option<TcpStream>,
     queue: Mutex<Queue>,
     ready: Condvar,
     most: usize,
@@ -745,11 +897,33 @@ struct Queue {
 impl Outbox {
     fn new(stream: TcpStream, most: usize) -> Self {
         Self {
-            stream,
+            stream: Some(stream),
             queue: Mutex::default(),
             ready: Condvar::new(),
             most,
         }
+    }
+
+    fn mailbox(most: usize) -> Self {
+        Self {
+            stream: None,
+            queue: Mutex::default(),
+            ready: Condvar::new(),
+            most,
+        }
+    }
+
+    /// Everything queued, waiting up to `wait` for something; none once closed.
+    fn take(&self, wait: Duration) -> Option<Vec<u8>> {
+        let mut queue = self.queue.lock().unwrap();
+        if queue.frames.is_empty() && !queue.closed {
+            queue = self.ready.wait_timeout(queue, wait).unwrap().0;
+        }
+        if queue.closed {
+            return None;
+        }
+        queue.bytes = 0;
+        Some(queue.frames.drain(..).flatten().collect())
     }
 
     /// Queues `frame`, or hangs up on a peer that reads too slowly to take it.
@@ -776,7 +950,9 @@ impl Outbox {
         };
         self.ready.notify_one();
         drop(queue);
-        let _ = self.stream.shutdown(Shutdown::Both);
+        if let Some(stream) = &self.stream {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
     }
 
     /// Writes what is queued until closed.
@@ -795,7 +971,10 @@ impl Outbox {
                     queue = self.ready.wait(queue).unwrap();
                 }
             };
-            if (&self.stream).write_all(&frame).is_err() {
+            let Some(mut stream) = self.stream.as_ref() else {
+                return;
+            };
+            if stream.write_all(&frame).is_err() {
                 self.close();
                 return;
             }

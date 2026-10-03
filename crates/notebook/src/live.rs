@@ -8,8 +8,11 @@
 //! from scratch.
 
 pub use ::relay::code;
+pub mod proxy;
 mod relay;
 pub mod share;
+mod transport;
+pub use transport::Trouble;
 pub mod wire;
 pub use wire::{Caret, Guid, Hello, Presence, Spot};
 
@@ -156,8 +159,8 @@ pub enum Relayed {
     Joined,
     /// Answered with this HTTP status, and how long it asked to wait.
     Refused(u16, Option<Duration>),
-    /// Not reached.
-    Unreachable,
+    /// Not reached, and why.
+    Unreachable(Trouble),
 }
 
 /// Presence on the network while it lives; dropping it leaves.
@@ -753,6 +756,30 @@ fn discover(
         })
         .map_err(|error| mdns_sd::Error::Msg(error.to_string()))?;
     Ok(daemon)
+}
+
+/// `text` with `%XX` escapes decoded, as a URL's name and password.
+fn decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        match text
+            .get(at + 1..at + 3)
+            .filter(|_| bytes[at] == b'%')
+            .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+        {
+            Some(byte) => {
+                decoded.push(byte);
+                at += 3;
+            }
+            None => {
+                decoded.push(bytes[at]);
+                at += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 fn hex(bytes: &[u8]) -> String {

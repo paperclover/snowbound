@@ -236,7 +236,7 @@ pub(crate) fn join(
     code: &str,
     password: &str,
 ) -> Result<live::wire::Welcome, live::share::Refusal> {
-    let me = hello().map_err(|_| live::share::Refusal::Unreachable)?;
+    let me = hello().map_err(|_| live::share::Refusal::Unreachable(live::Trouble::Other))?;
     live::share::join(me, code, password, reach(), relay().as_deref())
 }
 

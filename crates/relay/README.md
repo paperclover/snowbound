@@ -68,6 +68,15 @@ Share names another relay.
 could otherwise claim any address. Listening on a public address without TLS works but lets
 anyone on the path see room tags and nameplates.
 
+## Where WebSockets don't get through
+
+Some networks' proxies refuse WebSockets. A peer then joins with `?poll=1` on the same path,
+and the relay answers `session <id>`; `GET /v1/poll/<id>` then waits up to 25 seconds for what
+is to go to it, and `POST /v1/poll/<id>` brings what it sends, each body a run of WebSocket
+frames as the socket would carry them, so the room sees no difference. A session that asks
+nothing for a minute leaves. Through Caddy or nginx this needs nothing more than the
+WebSocket's own proxying; keep nginx's `proxy_read_timeout` above 25 seconds.
+
 ## The site: snowbound.paperclover.net
 
 `snowbound-site` serves the hosted web build's folder, and for a path that is a Live Share

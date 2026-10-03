@@ -563,7 +563,23 @@ fn download(path: &str, limit: u64) -> Result<Vec<u8>, String> {
     let roots = (system.iter().chain(bundled))
         .map(|der| Certificate::from_der(der).to_owned())
         .collect();
+    // The proxy Live Share's relay goes through, the system's included; ureq reads only the
+    // environment's.
+    #[cfg(feature = "live")]
+    let proxy = {
+        let host = BASE.trim_start_matches("https://").split('/').next();
+        notebook::live::proxy::for_host(host.unwrap_or_default(), true).and_then(|proxy| {
+            let credentials = (proxy.credentials.as_ref())
+                .map_or_else(String::new, |(name, password)| {
+                    format!("{name}:{password}@")
+                });
+            ureq::Proxy::new(&format!("http://{credentials}{proxy}")).ok()
+        })
+    };
+    #[cfg(not(feature = "live"))]
+    let proxy = ureq::Proxy::try_from_env();
     let agent: ureq::Agent = ureq::Agent::config_builder()
+        .proxy(proxy)
         .tls_config(
             TlsConfig::builder()
                 .root_certs(RootCerts::Specific(Arc::new(roots)))

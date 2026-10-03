@@ -114,8 +114,8 @@ pub enum Refusal {
     TooMany(Option<Duration>),
     /// The relay is full.
     Busy,
-    /// The relay couldn't be reached, and no one answered on this network.
-    Unreachable,
+    /// The relay couldn't be reached, and why, and no one answered on this network.
+    Unreachable(super::Trouble),
     /// The relay let this end in, but no one answered.
     TimedOut,
 }
@@ -152,7 +152,7 @@ pub fn join(
             }
         },
     )
-    .map_err(|_| Refusal::Unreachable)?;
+    .map_err(|_| Refusal::Unreachable(super::Trouble::Other))?;
     let start = Instant::now();
     loop {
         if let Ok(welcome) = welcome.try_recv() {
@@ -174,8 +174,8 @@ pub fn join(
             Relayed::Refused(410, _) => return Err(Refusal::Expired),
             Relayed::Refused(429, wait) => return Err(Refusal::TooMany(wait)),
             Relayed::Refused(503, _) if settled => return Err(Refusal::Busy),
-            Relayed::Unreachable if waited > Duration::from_secs(10) => {
-                return Err(Refusal::Unreachable);
+            Relayed::Unreachable(trouble) if waited > Duration::from_secs(10) => {
+                return Err(Refusal::Unreachable(trouble));
             }
             Relayed::Unknown if relay.is_none() && waited > Duration::from_secs(10) => {
                 return Err(Refusal::NoOne);

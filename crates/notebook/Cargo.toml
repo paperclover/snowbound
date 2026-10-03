@@ -52,7 +52,7 @@ rsqlite-vfs = "0.1.1"
 nix = { version = "0.31", default-features = false, features = ["fs"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_Registry"] }
 
 [dev-dependencies]
 libc = "0.2"

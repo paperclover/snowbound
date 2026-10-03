@@ -3,23 +3,21 @@
 //! the relay sees only who talks to whom, when, and how much. A stream that breaks makes this
 //! end join the room again, which ends every stream it had there; peers then meet afresh.
 
-use super::{Event, OPENING, PATIENCE, Pipe, Relayed as Answer, Shared, Side, code_parts};
+use super::{
+    Event, OPENING, PATIENCE, Pipe, Relayed as Answer, Shared, Side, code_parts,
+    transport::{self, Address, Failure, parse},
+};
 use ::relay::{Notice, SLOT, Verdict, ws};
-use base64::Engine;
-use rustls::{ClientConfig, ClientConnection, RootCertStore, pki_types::ServerName};
 use std::{
     collections::{HashMap, HashSet},
     io::{self, BufReader, Read, Write},
-    net::{Shutdown, TcpStream, ToSocketAddrs},
-    sync::{Arc, Mutex, OnceLock, atomic::Ordering, mpsc},
+    sync::{Arc, Mutex, atomic::Ordering, mpsc},
     thread,
     time::{Duration, Instant},
 };
 
-const CONNECT: Duration = Duration::from_secs(10);
-/// How often a quiet connection pings the relay, and how long it waits to hear anything.
+/// How often a quiet connection pings the relay.
 const KEEPALIVE: Duration = Duration::from_secs(30);
-const QUIET: Duration = Duration::from_secs(75);
 /// A connection that lasted this long was no failure, so the next waits only a second.
 const STEADY: Duration = Duration::from_secs(60);
 /// The most sent in one message, well under any relay's cap.
@@ -38,54 +36,6 @@ pub(super) fn join(shared: &Arc<Shared>, url: &str, port: u16) -> io::Result<()>
         .name("live relay".into())
         .spawn(move || keep(&shared, &address, port))?;
     Ok(())
-}
-
-/// A relay's address: `ws://` or `wss://`, a host, and the path the relay's `/v1/` follows.
-#[derive(Debug, PartialEq)]
-struct Address {
-    tls: bool,
-    /// The host and port as the URL gave them, for the `Host` header.
-    authority: String,
-    host: String,
-    port: u16,
-    path: String,
-}
-
-fn parse(url: &str) -> io::Result<Address> {
-    let bad = || io::Error::new(io::ErrorKind::InvalidInput, format!("Not a relay: {url}"));
-    let (tls, rest) = match url.split_once("://") {
-        Some(("wss", rest)) => (true, rest),
-        Some(("ws", rest)) => (false, rest),
-        _ => return Err(bad()),
-    };
-    let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
-    let (host, port) = match authority.rsplit_once(':') {
-        Some((host, port)) if !port.contains(']') => (host, port.parse().map_err(|_| bad())?),
-        _ => (authority, if tls { 443 } else { 80 }),
-    };
-    let host = host.trim_start_matches('[').trim_end_matches(']');
-    if host.is_empty() {
-        return Err(bad());
-    }
-    Ok(Address {
-        tls,
-        authority: authority.into(),
-        host: host.into(),
-        port,
-        path: path.trim_end_matches('/').into(),
-    })
-}
-
-enum Failure {
-    Network(io::Error),
-    /// The relay answered, but with this HTTP status and how long to wait.
-    Refused(u16, Option<Duration>),
-}
-
-impl From<io::Error> for Failure {
-    fn from(error: io::Error) -> Self {
-        Failure::Network(error)
-    }
 }
 
 /// Records how the relay answered, telling `shared`'s events where it changed.
@@ -135,9 +85,9 @@ fn keep(shared: &Arc<Shared>, address: &Address, port: u16) {
                 }
                 wait = wait.max(retry.unwrap_or_default());
             }
-            Err(Failure::Network(error)) => {
+            Err(Failure::Trouble(trouble, error)) => {
                 eprintln!("Live: no relay at {}: {error}", address.authority);
-                answered(shared, Answer::Unreachable);
+                answered(shared, Answer::Unreachable(trouble));
             }
         }
         if began.elapsed() >= STEADY {
@@ -148,170 +98,23 @@ fn keep(shared: &Arc<Shared>, address: &Address, port: u16) {
     }
 }
 
-/// Opens a WebSocket to `path` at `address`: the connection, and its reading half.
+/// Opens the relay's `path` at `address`: the connection, and what reads its messages.
 fn connect(address: &Address, path: &str, owner: bool) -> Result<(Arc<Socket>, Reader), Failure> {
-    let target = (address.host.as_str(), address.port)
-        .to_socket_addrs()?
-        .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No address for the relay"))?;
-    let tcp = TcpStream::connect_timeout(&target, CONNECT)?;
-    tcp.set_nodelay(true)?;
-    tcp.set_read_timeout(Some(QUIET))?;
-    tcp.set_write_timeout(Some(QUIET))?;
-    let (reading, mut writing): (Box<dyn Read + Send>, Box<dyn Write + Send>) = if address.tls {
-        let name = ServerName::try_from(address.host.clone())
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-        let mut connection = ClientConnection::new(tls(), name).map_err(io::Error::other)?;
-        while connection.is_handshaking() {
-            connection.complete_io(&mut &tcp)?;
-        }
-        let connection = Arc::new(Mutex::new(connection));
-        (
-            Box::new(TlsReader {
-                tcp: tcp.try_clone()?,
-                tls: Arc::clone(&connection),
-                plain: Vec::new(),
-                at: 0,
-            }),
-            Box::new(TlsWriter {
-                tcp: tcp.try_clone()?,
-                tls: connection,
-            }),
-        )
-    } else {
-        (Box::new(tcp.try_clone()?), Box::new(tcp.try_clone()?))
-    };
-    let mut key = [0; 16];
-    getrandom::fill(&mut key).map_err(|_| io::Error::other("System random source failed"))?;
-    let key = base64::engine::general_purpose::STANDARD.encode(key);
-    write!(
-        writing,
-        "GET {path} HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
-         Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\nUser-Agent: Snowbound/{}\r\n\r\n",
-        address.authority,
-        env!("CARGO_PKG_VERSION"),
-    )?;
-    let mut reader = BufReader::new(reading);
-    let head = ws::head(&mut reader)?;
-    let status = head
-        .split(' ')
-        .nth(1)
-        .and_then(|status| status.parse().ok())
-        .unwrap_or(0);
-    if status != 101 {
-        let retry = ws::header(&head, "Retry-After")
-            .and_then(|seconds| seconds.parse().ok())
-            .map(Duration::from_secs);
-        return Err(Failure::Refused(status, retry));
-    }
-    if ws::header(&head, "Sec-WebSocket-Accept") != Some(ws::accept(&key).as_str()) {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Not a relay").into());
-    }
+    let connection = transport::connect(address, path)?;
+    let reader = ws::Reader::new(BufReader::new(connection.reader), MOST, false);
     let socket = Arc::new(Socket {
-        send: Mutex::new(writing),
-        tcp,
+        send: Mutex::new(connection.writer),
+        close: connection.close,
         owner,
         links: Mutex::default(),
     });
-    Ok((socket, ws::Reader::new(reader, MOST, false)))
-}
-
-/// The certificate authorities the system trusts, then Mozilla's for a system whose store is
-/// missing or stale, as updates trust them.
-fn tls() -> Arc<ClientConfig> {
-    static CONFIG: OnceLock<Arc<ClientConfig>> = OnceLock::new();
-    Arc::clone(CONFIG.get_or_init(|| {
-        let mut roots = RootCertStore::empty();
-        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
-        roots.add_parsable_certificates(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().cloned());
-        let provider = Arc::new(rustls::crypto::ring::default_provider());
-        Arc::new(
-            ClientConfig::builder_with_provider(provider)
-                .with_safe_default_protocol_versions()
-                .expect("ring speaks TLS 1.2 and 1.3")
-                .with_root_certificates(roots)
-                .with_no_client_auth(),
-        )
-    }))
-}
-
-/// TLS read on one thread while another writes: the socket is read without the lock, and
-/// what arrives is decrypted under it.
-struct TlsReader {
-    tcp: TcpStream,
-    tls: Arc<Mutex<ClientConnection>>,
-    plain: Vec<u8>,
-    at: usize,
-}
-
-impl Read for TlsReader {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        while self.at == self.plain.len() {
-            self.plain.clear();
-            self.at = 0;
-            let mut raw = vec![0; 16 << 10];
-            let length = self.tcp.read(&mut raw)?;
-            if length == 0 {
-                return Ok(0);
-            }
-            let mut tls = self.tls.lock().unwrap();
-            let mut arrived = &raw[..length];
-            let mut closed = false;
-            while !arrived.is_empty() {
-                tls.read_tls(&mut arrived)?;
-                tls.process_new_packets()
-                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-                let mut chunk = [0; 4096];
-                loop {
-                    match tls.reader().read(&mut chunk) {
-                        Ok(0) => {
-                            closed = true;
-                            break;
-                        }
-                        Ok(length) => self.plain.extend_from_slice(&chunk[..length]),
-                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                        Err(error) => return Err(error),
-                    }
-                }
-            }
-            while tls.wants_write() {
-                tls.write_tls(&mut &self.tcp)?;
-            }
-            if closed && self.plain.is_empty() {
-                return Ok(0);
-            }
-        }
-        let length = buffer.len().min(self.plain.len() - self.at);
-        buffer[..length].copy_from_slice(&self.plain[self.at..self.at + length]);
-        self.at += length;
-        Ok(length)
-    }
-}
-
-struct TlsWriter {
-    tcp: TcpStream,
-    tls: Arc<Mutex<ClientConnection>>,
-}
-
-impl Write for TlsWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let mut tls = self.tls.lock().unwrap();
-        let length = tls.writer().write(bytes)?;
-        while tls.wants_write() {
-            tls.write_tls(&mut &self.tcp)?;
-        }
-        Ok(length)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
+    Ok((socket, reader))
 }
 
 /// One connection to a relay's room.
 pub(super) struct Socket {
     send: Mutex<Box<dyn Write + Send>>,
-    tcp: TcpStream,
+    close: Box<dyn Fn() + Send + Sync>,
     /// Whether this end claimed the room for its code, and so tells the relay who knew it.
     owner: bool,
     links: Mutex<Links>,
@@ -336,7 +139,7 @@ impl Socket {
     }
 
     pub(super) fn hang_up(&self) {
-        let _ = self.tcp.shutdown(Shutdown::Both);
+        (self.close)();
     }
 
     fn forget(&self, slot: u32) {

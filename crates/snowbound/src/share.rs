@@ -4,7 +4,7 @@
 use crate::{Library, State};
 use accesskit::Role;
 use notebook::live::{
-    Relayed,
+    Relayed, Trouble,
     share::{self, Refusal, Sharing},
     wire::Welcome,
 };
@@ -90,10 +90,40 @@ fn refusal(refusal: &Refusal) -> String {
             None => "Too many wrong codes from this network. Try again later.".into(),
         },
         Refusal::Busy => "The Live Share relay is busy. Try again in a minute.".into(),
-        Refusal::Unreachable => {
-            "Can’t reach the Live Share relay. Check your internet connection.".into()
-        }
+        Refusal::Unreachable(trouble) => unreachable(*trouble),
         Refusal::TimedOut => "The computer sharing didn’t answer. Try again.".into(),
+    }
+}
+
+/// What to tell someone whose computer can't reach the relay, and what to try.
+fn unreachable(trouble: Trouble) -> String {
+    match trouble {
+        Trouble::Dns => "Can’t find the Live Share relay. Check your internet connection, or \
+                         try another network."
+            .into(),
+        Trouble::Unreachable => "Can’t connect to the Live Share relay. A firewall may block \
+                                 it. Try another network."
+            .into(),
+        Trouble::TimedOut => "The Live Share relay didn’t answer. A firewall may block it. Try \
+                              another network."
+            .into(),
+        Trouble::ProxyUnreachable => "Can’t reach your proxy server. Check its address in your \
+                                      network settings."
+            .into(),
+        Trouble::ProxyAuthentication => "Your proxy server asks for a name and password. Set \
+                                         HTTPS_PROXY to http://name:password@proxy:port, then \
+                                         try again."
+            .into(),
+        Trouble::ProxyRefused(status) => format!(
+            "Your proxy server won’t connect to the Live Share relay ({status}). Ask whoever \
+             runs your network to allow relay.snowbound.paperclover.net."
+        ),
+        Trouble::Certificate => "Something on your network replaced the relay’s security \
+                                 certificate. If your network inspects secure connections, add \
+                                 its certificate to this computer’s trusted certificates."
+            .into(),
+        Trouble::Blocked => "Your network blocks the Live Share relay. Try another network.".into(),
+        Trouble::Other => "Can’t reach the Live Share relay. Try again in a moment.".into(),
     }
 }
 
@@ -346,9 +376,17 @@ impl State {
                     true,
                 );
                 match host.relayed() {
-                    Relayed::Unreachable | Relayed::Refused(..) => status(
+                    Relayed::Unreachable(trouble) => status(
                         ui,
-                        "Can’t reach the Live Share relay. Only people on this network can join.",
+                        &format!(
+                            "{} Until then, only people on this network can join.",
+                            unreachable(trouble)
+                        ),
+                    ),
+                    Relayed::Refused(..) => status(
+                        ui,
+                        "The Live Share relay turned this computer away. Only people on this \
+                         network can join.",
                     ),
                     _ => {}
                 }
