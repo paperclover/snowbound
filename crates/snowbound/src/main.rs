@@ -5312,15 +5312,30 @@ fn page_tab(
             None
         }
     };
-    for (index, color) in tab.peers.iter().enumerate() {
+    // A dot for each of the first few people on the page, then how many more.
+    const DOTS: usize = 4;
+    for (index, dot) in tab.peers.iter().take(DOTS).enumerate() {
         let inset = (ROW - ROW_GAP - 8.0) / 2.0;
         ui.leaf(
             ("peer", index),
             Spec {
                 size: [px(10.0), px(ROW - ROW_GAP)],
-                fill: Some(*color),
+                fill: Some(*dot),
                 radius: 4.0,
                 inset: [1.0, inset, 1.0, inset],
+                ..Spec::default()
+            },
+        );
+    }
+    if tab.peers.len() > DOTS {
+        ui.leaf(
+            "more peers",
+            Spec {
+                size: [fit(), px(ROW - ROW_GAP)],
+                text: Some(&format!("+{}", tab.peers.len() - DOTS)),
+                font_size: Some(10.0),
+                color: Some(color),
+                pad: [2.0, 0.0],
                 ..Spec::default()
             },
         );

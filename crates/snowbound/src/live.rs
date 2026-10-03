@@ -31,6 +31,10 @@ const STACKED: usize = 3;
 const FLAG: f32 = 15.0;
 const FLAG_PAD: f32 = 4.0;
 const NAMED: std::time::Duration = std::time::Duration::from_secs(3);
+/// The carets drawn on a page at once: those who moved last; and the names a chip of those
+/// out of view lists.
+const CARETS: usize = 5;
+const NAMES: usize = 5;
 /// The relay used where Options names none.
 pub(crate) const DEFAULT_RELAY: &str = "wss://relay.snowbound.paperclover.net";
 /// How long opening a notebook joined for the first time waits for the computer sharing it.
@@ -863,8 +867,9 @@ impl State {
         Some(format!("In {}", tab.name))
     }
 
-    /// Each peer's caret on the open page with a flag naming them, and what they have
-    /// selected, as boxes floating in the page's box.
+    /// The carets of the peers on the open page who moved last, each with a flag naming
+    /// them, and what they have selected, as boxes floating in the page's box; those above
+    /// or below the view bundle into a chip at its edge.
     pub(crate) fn peer_carets(&mut self) {
         let Some(session) = &self.session else {
             return;
@@ -882,9 +887,10 @@ impl State {
                 (y * viewport.scale + viewport.origin[1]) / scale,
             ]
         };
+        let now = std::time::Instant::now();
+        let (mut placed, mut above, mut below) = (Vec::new(), Vec::new(), Vec::new());
         for peer in self.connected() {
-            let Some(caret) = peer
-                .presence
+            let Some(caret) = (peer.presence.as_ref())
                 .filter(|presence| (presence.section, presence.page) == here)
                 .and_then(|presence| presence.caret)
             else {
@@ -893,39 +899,13 @@ impl State {
             let Some((outline, focus)) = find(&self.view.editor, caret.focus) else {
                 continue;
             };
-            let color = color(&peer.hello.peer);
-            let [x, y] = outline.origin();
-            if let Some((_, anchor)) =
-                find(&self.view.editor, caret.anchor).filter(|(other, _)| other.id == outline.id)
-            {
-                let rects = outline
-                    .range_rects([anchor, focus].into())
-                    .unwrap_or_default();
-                for (index, rect) in rects.into_iter().enumerate() {
-                    let [x0, y0] = shown([rect.x0 as f32 + x, rect.y0 as f32 + y]);
-                    let [x1, y1] = shown([rect.x1 as f32 + x, rect.y1 as f32 + y]);
-                    self.ui.leaf(
-                        (peer.hello.peer, "selection", index),
-                        Spec {
-                            flags: Flags::FLOAT,
-                            position: [x0, y0],
-                            size: [px(x1 - x0), px(y1 - y0)],
-                            fill: Some([color[0], color[1], color[2], 0.25]),
-                            ..Spec::default()
-                        },
-                    );
-                }
-            }
             let Ok(rect) = outline.caret_at(focus, parley::Affinity::Downstream, 0.0) else {
                 continue;
             };
+            let [x, y] = outline.origin();
             let [x0, y0] = shown([rect.x0 as f32 + x, rect.y0 as f32 + y]);
             let [_, y1] = shown([rect.x0 as f32 + x, rect.y1 as f32 + y]);
-            if !(0.0..right - left).contains(&x0) || y1 < 0.0 || y0 > bottom - top {
-                continue;
-            }
             let id = peer.hello.peer;
-            let now = std::time::Instant::now();
             let moved = match self.peers.moved.get(&id) {
                 Some((at, when)) if *at == caret => *when,
                 _ => {
@@ -933,79 +913,178 @@ impl State {
                     now
                 }
             };
-            let quiet = now.saturating_duration_since(moved);
-            if quiet < NAMED {
-                self.ui.wake_after(NAMED - quiet);
+            if y1 < 0.0 {
+                above.push((moved, peer));
+                continue;
             }
-            let name = (peer.hello.name.split_whitespace().next()).unwrap_or("Someone");
-            // Below the caret where the page's top would cut the flag off.
-            let below = y0 < FLAG;
-            let flag_top = if below { y1 } else { y0 - FLAG };
-            // About the flag's width, for hovering it.
-            let width = FLAG_PAD * 2.0 + self.ui.measure(name)[0] * 10.0 / self.ui.theme.font_size;
-            let hovered = self.ui.pointer().is_some_and(|[px, py]| {
-                let [px, py] = [px - left, py - top];
-                (x0 - 4.0..=x0 + 4.0).contains(&px) && (y0..=y1).contains(&py)
-                    || (x0 - 1.0..=x0 - 1.0 + width).contains(&px)
-                        && (flag_top..=flag_top + FLAG).contains(&py)
-            });
-            let shown_flag = self.ui.animate(
-                Id::ROOT.child((id, "flag-shown")),
-                if quiet < NAMED || hovered { 1.0 } else { 0.0 },
-            );
-            let faded =
-                |[red, green, blue, alpha]: [f32; 4], by: f32| [red, green, blue, alpha * by];
-            self.ui.leaf(
-                (id, "caret"),
+            if y0 > bottom - top {
+                below.push((moved, peer));
+                continue;
+            }
+            if !(0.0..right - left).contains(&x0) {
+                continue;
+            }
+            let selection = find(&self.view.editor, caret.anchor)
+                .filter(|(other, _)| other.id == outline.id)
+                .and_then(|(_, anchor)| outline.range_rects([anchor, focus].into()).ok())
+                .unwrap_or_default()
+                .into_iter()
+                .map(|rect| {
+                    let [x0, y0] = shown([rect.x0 as f32 + x, rect.y0 as f32 + y]);
+                    let [x1, y1] = shown([rect.x1 as f32 + x, rect.y1 as f32 + y]);
+                    [x0, y0, x1, y1]
+                })
+                .collect::<Vec<_>>();
+            placed.push((moved, peer, [x0, y0, y1], selection));
+        }
+        placed.sort_by_key(|(moved, ..)| std::cmp::Reverse(*moved));
+        for (moved, peer, at, selection) in placed.into_iter().take(CARETS) {
+            self.peer_caret(&peer, now.saturating_duration_since(moved), at, &selection);
+        }
+        let mut chosen = None;
+        for (edge, mut bundle) in [("above", above), ("below", below)] {
+            if bundle.is_empty() {
+                continue;
+            }
+            bundle.sort_by_key(|(moved, _)| std::cmp::Reverse(*moved));
+            let label = format!("{} {edge}", bundle.len());
+            let width = 16.0 + self.ui.measure(&label)[0] * 10.0 / self.ui.theme.font_size;
+            let y = if edge == "above" {
+                6.0
+            } else {
+                bottom - top - FLAG - 6.0
+            };
+            let chip = self.ui.leaf(
+                ("peers", edge),
                 Spec {
-                    flags: Flags::FLOAT,
-                    position: [x0 - 1.0, y0],
-                    size: [px(2.0), px(y1 - y0)],
-                    fill: Some(color),
+                    flags: Flags::FLOAT | Flags::CLICKABLE,
+                    position: [(right - left - width) / 2.0, y],
+                    size: [fit(), px(FLAG + 2.0)],
+                    text: Some(&label),
+                    font_size: Some(10.0),
+                    bold: true,
+                    center: true,
+                    color: Some([1.0; 4]),
+                    fill: Some(color(&bundle[0].1.hello.peer)),
+                    radius: (FLAG + 2.0) / 2.0,
+                    pad: [8.0, 0.0],
+                    role: Some(accesskit::Role::Button),
                     ..Spec::default()
                 },
             );
-            // The caret's cap, where its name is not shown.
+            let mut names: Vec<&str> = (bundle.iter().take(NAMES))
+                .map(|(_, peer)| peer.hello.name.as_str())
+                .collect();
+            let more = format!("and {} more", bundle.len().saturating_sub(NAMES));
+            if bundle.len() > NAMES {
+                names.push(&more);
+            }
+            ui::popup::tooltip(&mut self.ui, &names.join(", "), "", None);
+            if chip.clicked {
+                chosen = Some(bundle[0].1.hello.peer);
+            }
+        }
+        if let Some(peer) = chosen {
+            self.peers.going = Some((peer, now, None));
+        }
+    }
+
+    /// `peer`'s caret at `[x, top, bottom]` in the page's box, quiet for `quiet`, with what
+    /// they have selected.
+    fn peer_caret(
+        &mut self,
+        peer: &Peer,
+        quiet: std::time::Duration,
+        [x0, y0, y1]: [f32; 3],
+        selection: &[[f32; 4]],
+    ) {
+        let Some([left, top, ..]) = self.ui.rect(page()) else {
+            return;
+        };
+        let id = peer.hello.peer;
+        let color = color(&id);
+        for (index, [x0, y0, x1, y1]) in selection.iter().enumerate() {
             self.ui.leaf(
-                (id, "cap"),
+                (id, "selection", index),
                 Spec {
                     flags: Flags::FLOAT,
-                    position: [x0 - 3.0, if below { y1 - 3.0 } else { y0 - 3.0 }],
-                    size: [px(6.0), px(6.0)],
-                    fill: Some(faded(color, 1.0 - shown_flag)),
+                    position: [*x0, *y0],
+                    size: [px(x1 - x0), px(y1 - y0)],
+                    fill: Some([color[0], color[1], color[2], 0.25]),
+                    ..Spec::default()
+                },
+            );
+        }
+        if quiet < NAMED {
+            self.ui.wake_after(NAMED - quiet);
+        }
+        let name = (peer.hello.name.split_whitespace().next()).unwrap_or("Someone");
+        // Below the caret where the page's top would cut the flag off.
+        let below = y0 < FLAG;
+        let flag_top = if below { y1 } else { y0 - FLAG };
+        // About the flag's width, for hovering it.
+        let width = FLAG_PAD * 2.0 + self.ui.measure(name)[0] * 10.0 / self.ui.theme.font_size;
+        let hovered = self.ui.pointer().is_some_and(|[px, py]| {
+            let [px, py] = [px - left, py - top];
+            (x0 - 4.0..=x0 + 4.0).contains(&px) && (y0..=y1).contains(&py)
+                || (x0 - 1.0..=x0 - 1.0 + width).contains(&px)
+                    && (flag_top..=flag_top + FLAG).contains(&py)
+        });
+        let shown_flag = self.ui.animate(
+            Id::ROOT.child((id, "flag-shown")),
+            if quiet < NAMED || hovered { 1.0 } else { 0.0 },
+        );
+        let faded = |[red, green, blue, alpha]: [f32; 4], by: f32| [red, green, blue, alpha * by];
+        self.ui.leaf(
+            (id, "caret"),
+            Spec {
+                flags: Flags::FLOAT,
+                position: [x0 - 1.0, y0],
+                size: [px(2.0), px(y1 - y0)],
+                fill: Some(color),
+                ..Spec::default()
+            },
+        );
+        // The caret's cap, where its name is not shown.
+        self.ui.leaf(
+            (id, "cap"),
+            Spec {
+                flags: Flags::FLOAT,
+                position: [x0 - 3.0, if below { y1 - 3.0 } else { y0 - 3.0 }],
+                size: [px(6.0), px(6.0)],
+                fill: Some(faded(color, 1.0 - shown_flag)),
+                radius: 3.0,
+                ..Spec::default()
+            },
+        );
+        if shown_flag > 0.0 {
+            self.ui.leaf(
+                (id, "flag"),
+                Spec {
+                    flags: Flags::FLOAT,
+                    position: [x0 - 1.0, flag_top],
+                    size: [fit(), px(FLAG)],
+                    text: Some(name),
+                    font_size: Some(10.0),
+                    bold: true,
+                    color: Some(faded([1.0; 4], shown_flag)),
+                    fill: Some(faded(color, shown_flag)),
                     radius: 3.0,
+                    pad: [FLAG_PAD, 0.0],
                     ..Spec::default()
                 },
             );
-            if shown_flag > 0.0 {
-                self.ui.leaf(
-                    (id, "flag"),
-                    Spec {
-                        flags: Flags::FLOAT,
-                        position: [x0 - 1.0, flag_top],
-                        size: [fit(), px(FLAG)],
-                        text: Some(name),
-                        font_size: Some(10.0),
-                        bold: true,
-                        color: Some(faded([1.0; 4], shown_flag)),
-                        fill: Some(faded(color, shown_flag)),
-                        radius: 3.0,
-                        pad: [FLAG_PAD, 0.0],
-                        ..Spec::default()
-                    },
-                );
-                // The corner on the caret square, so flag and caret are one shape.
-                self.ui.leaf(
-                    (id, "joint"),
-                    Spec {
-                        flags: Flags::FLOAT,
-                        position: [x0 - 1.0, if below { y1 } else { y0 - 3.0 }],
-                        size: [px(3.0), px(3.0)],
-                        fill: Some(faded(color, shown_flag)),
-                        ..Spec::default()
-                    },
-                );
-            }
+            // The corner on the caret square, so flag and caret are one shape.
+            self.ui.leaf(
+                (id, "joint"),
+                Spec {
+                    flags: Flags::FLOAT,
+                    position: [x0 - 1.0, if below { y1 } else { y0 - 3.0 }],
+                    size: [px(3.0), px(3.0)],
+                    fill: Some(faded(color, shown_flag)),
+                    ..Spec::default()
+                },
+            );
         }
     }
 }
