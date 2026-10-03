@@ -157,11 +157,12 @@ impl State {
             dim(ui, "hint", "Doesn’t change the notebook’s folder name");
         }
         label(ui, "Color:");
+        // A notebook without a colour of its own wears the app's.
         let shown = dialog.color.or(dialog.library.color());
         let named = SECTION_COLORS
             .iter()
             .find(|(color, _)| Some(*color) == shown)
-            .map_or("", |(_, name)| name);
+            .map_or("Default", |(_, name)| name);
         let combo = ui.id("combo");
         ui::shell::combo(ui, "combo", "Color", named, 160.0, colors(), true);
         let items: Vec<Item> = SECTION_COLORS
