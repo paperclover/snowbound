@@ -38,6 +38,17 @@ impl State {
         (self.session.as_ref()).is_some_and(|session| binned(&session.tabs[session.tab].path))
     }
 
+    /// Whether Notebook Recycle Bin can do anything on `library`: leave its bin, shown, or
+    /// show one holding sections.
+    pub(crate) fn recycle_bin_available(&self, library: &Arc<Library>) -> bool {
+        let shown = self
+            .session
+            .as_ref()
+            .is_some_and(|session| Arc::ptr_eq(&session.library, library));
+        library.catalog().is_some()
+            && (shown && self.in_recycle_bin() || !library.tabs(BIN).is_empty())
+    }
+
     /// Notebook Recycle Bin: shows `library`'s bin at its first section holding pages, or
     /// while it shows, goes back to the notebook.
     pub(crate) fn toggle_recycle_bin(&mut self, library: Arc<Library>) {

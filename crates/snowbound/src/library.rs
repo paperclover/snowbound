@@ -1105,6 +1105,11 @@ impl Library {
         keys.get(&identity).map(|(key, _)| key.clone())
     }
 
+    /// Whether any of its password-protected sections is unlocked, which Lock All would lock.
+    pub fn any_unlocked(&self) -> bool {
+        self.keys.0.lock().is_ok_and(|keys| !keys.is_empty())
+    }
+
     /// Marks the unlocked section at catalog `path` worked in now.
     pub fn touch(&self, path: &str) {
         if let (Some(identity), Ok(mut keys)) = (self.section_identity(path), self.keys.0.lock())

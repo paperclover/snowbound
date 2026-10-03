@@ -1152,7 +1152,13 @@ impl State {
             | Id::CustomizeTags
             | Id::Help
             | Id::CheckForUpdates => enabled(!modal),
-            Id::CloseNotebook => enabled(!modal && self.notebook().is_some()),
+            // The app's iCloud Drive folder lists every notebook in it.
+            Id::CloseNotebook => enabled(
+                !modal
+                    && self
+                        .notebook()
+                        .is_some_and(|library| !crate::manage::in_icloud_folder(&library.location)),
+            ),
             Id::OpenShared => enabled(!modal && cfg!(feature = "live")),
             #[cfg(feature = "live")]
             Id::LiveShare => enabled(
@@ -1169,7 +1175,7 @@ impl State {
                 enabled: !modal
                     && self
                         .notebook()
-                        .is_some_and(|library| library.catalog().is_some()),
+                        .is_some_and(|library| self.recycle_bin_available(library)),
                 checked: Some(self.in_recycle_bin()),
             },
             Id::EmptyRecycleBin => enabled(
@@ -1195,7 +1201,9 @@ impl State {
                         .is_some_and(|library| self.reads.shown(&library.location)),
                 ),
             },
-            Id::LockAll => enabled(!modal),
+            Id::LockAll => {
+                enabled(!modal && self.notebooks.iter().any(|library| library.any_unlocked()))
+            }
             Id::ShowNotebook => enabled(
                 !modal
                     && self

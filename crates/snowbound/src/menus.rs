@@ -587,7 +587,7 @@ impl State {
                     item(
                         Action::RecycleBin,
                         "Notebook Recycle Bin",
-                        library.catalog().is_none(),
+                        !self.recycle_bin_available(library),
                         false,
                     ),
                     item(
