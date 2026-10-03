@@ -278,7 +278,7 @@ fn sidebar(
         #[cfg(feature = "live")]
         (
             "shared",
-            Leading::Icon(art::LINK),
+            Leading::Icon(art::OPEN_SHARED),
             "Open Shared",
             Action::OpenShared,
         ),
@@ -1266,7 +1266,7 @@ impl crate::State {
                 #[cfg(feature = "live")]
                 (
                     "shared",
-                    Leading::Icon(art::LINK),
+                    Leading::Icon(art::OPEN_SHARED),
                     "Open Shared Notebook",
                     crate::Command::OpenShared,
                 ),
