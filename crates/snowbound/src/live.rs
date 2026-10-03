@@ -25,6 +25,8 @@ use ui::{Flags, Id, Spec, children, fill, fit, px};
 /// The side of the picture sent, in pixels.
 const PICTURE: u32 = 96;
 const AVATAR: f32 = 22.0;
+/// The avatars shown before the rest bundle into a chip.
+const STACKED: usize = 3;
 /// The name flag above a caret, and how long it shows after the caret last moved.
 const FLAG: f32 = 15.0;
 const FLAG_PAD: f32 = 4.0;
@@ -259,6 +261,13 @@ pub(crate) fn joined(cache: &Path, welcome: live::wire::Welcome) -> io::Result<S
     Ok(location)
 }
 
+/// A peer to go to, since when, and the section and page already asked to open.
+type Going = (
+    [u8; 16],
+    std::time::Instant,
+    Option<(Option<[u8; 16]>, Option<live::Guid>)>,
+);
+
 /// What a thread of its own sends the frame, and where the frame takes it.
 pub(crate) type Channel<T> = (mpsc::Sender<T>, mpsc::Receiver<T>);
 
@@ -286,6 +295,10 @@ pub(crate) struct Peers {
     pictures: HashMap<[u8; 16], Option<draw::RasterImage>>,
     /// Where each peer's caret was last seen, and when it got there.
     moved: HashMap<[u8; 16], (Caret, std::time::Instant)>,
+    /// Where each peer was last seen, and when they last moved, for ordering the avatars.
+    active: HashMap<[u8; 16], (Option<live::Presence>, std::time::Instant)>,
+    /// The peer an avatar's click goes to, since when, and the place already asked to open.
+    going: Option<Going>,
     pub(crate) share: Option<crate::share::ShareDialog>,
     pub(crate) join: Option<crate::share::JoinDialog>,
 }
@@ -295,6 +308,7 @@ impl State {
     /// window is: in the shown notebook's room, and in each Live Share's.
     pub(crate) fn follow_peers(&mut self) {
         self.follow_shares();
+        self.go_to_peer();
         let shown = self
             .session
             .as_ref()
@@ -587,23 +601,86 @@ impl State {
         pages
     }
 
-    /// The others with the notebook open, as avatars leftward from the search box: a click
-    /// opens the page someone has open in this section.
+    /// The others with the notebook open, as avatars leftward from the search box, the most
+    /// lately active nearest it: past `STACKED` the rest are a chip that lists everyone. A
+    /// click goes to where someone is.
     pub(crate) fn avatars(&mut self) {
-        let peers = self.connected();
+        let mut peers = self.connected();
         if peers.is_empty() {
             return;
         }
+        let now = std::time::Instant::now();
+        for peer in &peers {
+            let id = peer.hello.peer;
+            let seen = self
+                .peers
+                .active
+                .entry(id)
+                .or_insert((peer.presence.clone(), now));
+            if seen.0 != peer.presence {
+                *seen = (peer.presence.clone(), now);
+            }
+        }
+        let active = |peer: &Peer| self.peers.active.get(&peer.hello.peer).map(|(_, at)| *at);
+        peers.sort_by_key(|peer| std::cmp::Reverse(active(peer)));
+        let shown = if peers.len() > STACKED + 1 {
+            STACKED
+        } else {
+            peers.len()
+        };
         self.ui.open(
             "peers",
             Spec {
                 size: [children(), px(TAB_ROW)],
                 pad: [6.0, (TAB_ROW - AVATAR) / 2.0],
-                gap: 4.0,
+                gap: -6.0,
                 ..Spec::default()
             },
         );
-        for peer in peers.iter().rev() {
+        let mut chosen = None;
+        if peers.len() > shown {
+            let more = format!("+{}", peers.len() - shown);
+            let chip = self.ui.leaf(
+                "more",
+                Spec {
+                    flags: Flags::CLICKABLE,
+                    size: [fit(), px(AVATAR)],
+                    text: Some(&more),
+                    font_size: Some(10.0),
+                    bold: true,
+                    center: true,
+                    fill: Some(self.ui.theme.chip),
+                    radius: AVATAR / 2.0,
+                    pad: [6.0, 0.0],
+                    role: Some(accesskit::Role::Button),
+                    ..Spec::default()
+                },
+            );
+            let label = format!("{} people here", peers.len());
+            ui::popup::tooltip(&mut self.ui, &label, "", None);
+            let menu = Id::ROOT.child("peers-menu");
+            if chip.clicked {
+                self.ui.open_popup(menu);
+            }
+            let places: Vec<String> = (peers.iter())
+                .map(|peer| self.place_of(peer).unwrap_or_default())
+                .collect();
+            let items: Vec<ui::popup::Item> = (peers.iter().zip(&places))
+                .map(|(peer, place)| ui::popup::Item {
+                    text: &peer.hello.name,
+                    shortcut: place,
+                    ..ui::popup::Item::default()
+                })
+                .collect();
+            let rect = self.ui.rect(self.ui.id("more"));
+            if let Some(rect) = rect
+                && let Some(index) =
+                    ui::popup::menu(&mut self.ui, menu, ui::Anchor::Below(rect), &items, None)
+            {
+                chosen = Some(peers[index].hello.peer);
+            }
+        }
+        for peer in peers[..shown].iter().rev() {
             let hello = &peer.hello;
             let picture = (self.peers.pictures)
                 .entry(hello.peer)
@@ -615,6 +692,8 @@ impl State {
                     flags: Flags::CLICKABLE,
                     size: [px(AVATAR); 2],
                     fill: Some(color(&hello.peer)),
+                    // Parted from the avatar it overlaps by the bar's own colour.
+                    border: Some(self.ui.theme.strip),
                     radius: AVATAR / 2.0,
                     pad: [2.0, 2.0],
                     role: Some(accesskit::Role::Button),
@@ -649,19 +728,70 @@ impl State {
             }
             let place = self.place_of(peer);
             ui::popup::tooltip(&mut self.ui, &hello.name, "", place.as_deref());
-            if self.ui.signal(avatar).clicked
-                && let Some(session) = &self.session
-                && let Some(presence) = peer.presence.as_ref()
-                && presence.section == section(session)
-                && let Some(page) = presence.page
-            {
-                self.commands.push(Command::OpenPage(page.into()));
+            if self.ui.signal(avatar).clicked {
+                chosen = Some(hello.peer);
             }
         }
         if self.live_options.presence {
             self.seen();
         }
         self.ui.close();
+        if let Some(peer) = chosen {
+            self.peers.going = Some((peer, now, None));
+        }
+    }
+
+    /// Goes to where the peer an avatar's click chose is: their section, their page, then
+    /// their caret or selection in the middle of the view; given up after a few seconds.
+    fn go_to_peer(&mut self) -> Option<()> {
+        let (id, since, asked) = self.peers.going?;
+        if since.elapsed() > std::time::Duration::from_secs(10) {
+            self.peers.going = None;
+            return None;
+        }
+        let peer = self
+            .connected()
+            .into_iter()
+            .find(|peer| peer.hello.peer == id)?;
+        let presence = peer.presence?;
+        let session = self.session.as_ref()?;
+        let place = (presence.section, presence.page);
+        if presence.section != section(session) {
+            let tab = (session.tabs.iter())
+                .find(|tab| session.library.section_identity(&tab.path) == presence.section)?;
+            if asked != Some(place) {
+                let library = Arc::clone(&session.library);
+                self.commands
+                    .push(Command::OpenSection(library, tab.path.clone()));
+            }
+        } else if presence.page != Some(session.space.into()) {
+            if asked != Some(place) {
+                self.commands.push(Command::OpenPage(presence.page?.into()));
+            }
+        } else {
+            self.peers.going = None;
+            let caret = presence.caret?;
+            let (outline, focus) = find(&self.view.editor, caret.focus)?;
+            let rect = outline
+                .caret_at(focus, parley::Affinity::Downstream, 0.0)
+                .ok()?;
+            let [x, y] = outline.origin();
+            let viewport = self.view.viewport;
+            let [width, height] = viewport.size.map(|side| side as f32);
+            let middle = ((rect.y0 + rect.y1) as f32 / 2.0 + y) * viewport.scale;
+            let mut responses = vec![self.view.scroll_to(1, middle - height / 2.0).ok()?];
+            let across = (rect.x0 as f32 + x) * viewport.scale + viewport.origin[0];
+            if !(0.0..width).contains(&across) {
+                let left = (rect.x0 as f32 + x) * viewport.scale - width / 2.0;
+                responses.push(self.view.scroll_to(0, left).ok()?);
+            }
+            for response in responses {
+                self.respond(response);
+            }
+            return Some(());
+        }
+        self.peers.going = Some((id, since, Some(place)));
+        Some(())
     }
 
     /// The mark beside the avatars that says the others see this window too, which opens
