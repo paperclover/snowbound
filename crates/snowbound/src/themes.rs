@@ -29,6 +29,16 @@ impl Scope {
             Self::Notebook => "This Notebook",
         }
     }
+
+    /// What taking away the scope's own theme leaves it wearing.
+    fn without(self) -> &'static str {
+        match self {
+            Self::Page => "Use Section's Theme",
+            Self::Section => "Use Notebook's Theme",
+            // Pages keep the styles the theme gave them.
+            Self::Notebook => "Remove Notebook Theme",
+        }
+    }
 }
 
 /// The Themes dialog while it is open.
@@ -226,7 +236,7 @@ impl State {
     }
 
     /// Builds the Themes dialog while it is open. Save keeps the edits and gives the theme to
-    /// the scope it then asks for, This Page first; No Theme takes that scope's own away;
+    /// the scope it then asks for, This Page first; Remove Theme takes that scope's own away;
     /// Cancel, Escape or a press outside leave everything as it was.
     pub(crate) fn themes_dialog(&mut self) {
         let Some(dialog) = &mut self.themes else {
@@ -601,7 +611,7 @@ impl State {
         );
         // Each button gives its choice to the one place there is, else asks where.
         let targets = &dialog.targets;
-        let place = |ui: &mut Ui, part: &str, label: &str| -> Option<usize> {
+        let place = |ui: &mut Ui, part: &str, label: &str, item: fn(Scope) -> &'static str| {
             let clicked = ui::button(ui, part, label).clicked;
             if targets.len() == 1 {
                 return clicked.then_some(0);
@@ -614,7 +624,7 @@ impl State {
                 .iter()
                 .enumerate()
                 .map(|(at, (scope, _))| Item {
-                    text: scope.name(),
+                    text: item(*scope),
                     icon: Some(match scope {
                         Scope::Page => crate::art::PAGE,
                         Scope::Section => crate::art::SECTION,
@@ -627,7 +637,11 @@ impl State {
             let anchor = Anchor::Below(ui.rect(ui.id(part)).unwrap_or_default());
             ui::popup::menu(ui, menu, anchor, &items, None)
         };
-        let none = place(ui, "none", "No Theme");
+        let remove = match targets[..] {
+            [(scope, _)] => scope.without(),
+            _ => "Remove Theme",
+        };
+        let none = place(ui, "none", remove, Scope::without);
         ui.leaf(
             "space",
             Spec {
@@ -636,7 +650,7 @@ impl State {
             },
         );
         let cancel = ui::button(ui, "cancel", "Cancel").clicked;
-        let save = place(ui, "save", "Save");
+        let save = place(ui, "save", "Save", Scope::name);
         ui.close();
         ui.close();
 
