@@ -329,6 +329,10 @@ export function setCursor(name) {
   if (canvas.style.cursor !== name) canvas.style.cursor = name;
 }
 
+export function keepLook(look) {
+  localStorage.setItem("snowbound-look", look);
+}
+
 export function setTitle(title) {
   document.title = title;
 }

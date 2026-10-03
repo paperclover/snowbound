@@ -4,9 +4,33 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
 <title>Snowbound</title>
+<script>
+  // The open section's hue and the page's colour as the app last showed them (`keepLook`).
+  try {
+    const look = JSON.parse(localStorage.getItem("snowbound-look"));
+    const root = document.documentElement.style;
+    root.setProperty("--hue", look.hue);
+    if (look.dark === matchMedia("(prefers-color-scheme: dark)").matches) root.setProperty("--paper", look.paper);
+  } catch {}
+</script>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #f3f3f3; }
-  @media (prefers-color-scheme: dark) { html, body { background: #202022; } }
+  /* The colours are ui::Theme's; a section's are Theme::section's for its hue, the first
+     new section's by default. */
+  :root {
+    --hue: 220; --strip: #ebedf0; --base: #fcfcfd; --text: #1f2328; --dim: #7b828c;
+    --chip: #cfd3d9; --accent: #0079a6; --paper: #fff;
+    --frame: hsl(var(--hue) 55% 82%), hsl(calc(var(--hue) + 10) 55% 76%);
+    --edge: hsl(var(--hue) 30% 52%);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --strip: #272a2b; --base: #191b1c; --text: #dddee0; --dim: #6b7078; --chip: #383c3d;
+      --paper: #1f2022;
+      --frame: hsl(var(--hue) 30% 36%), hsl(calc(var(--hue) + 10) 30% 30%);
+      --edge: hsl(var(--hue) 30% 16%);
+    }
+  }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--strip); }
   #page { display: block; width: 100vw; height: 100vh; height: 100dvh; touch-action: none; outline: none; }
   /* The text area takes keys and input methods at the caret, unseen. */
   #input {
@@ -33,10 +57,50 @@
   dialog.ask p { margin: 0; white-space: pre-line; }
   dialog.ask input { box-sizing: border-box; width: 100%; font: inherit; }
   dialog.ask div { display: flex; flex-direction: row-reverse; gap: 8px; margin-top: 16px; }
-  #status {
-    position: fixed; inset: 0; display: grid; place-items: center;
-    font: 15px system-ui, sans-serif; color: #666; pointer-events: none;
+
+  /* The loading shell: the app's first frame, Full Page View's toolbar over the page (the
+     sizes are main.rs's and ui::shell's), every tool faded as one that doesn't apply. */
+  #shell {
+    position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--strip);
+    transition: opacity 120ms; user-select: none; cursor: default;
   }
+  #shell.gone { opacity: 0; }
+  #tools { display: flex; gap: 6px; height: 34px; padding: 8px 6px 0; box-sizing: border-box; overflow: hidden; }
+  #tools span { display: flex; flex-shrink: 0; height: 22px; }
+  #tools .full, #tools .font { gap: 1px; }
+  #tools .folded, #tools .fold > .full { display: none; }
+  #tools .fold > .folded { display: flex; }
+  #tools .space { flex: 1 1 0; min-width: 0; }
+  #tools i { display: grid; place-items: center; width: 22px; height: 22px; color: var(--text); }
+  /* Centred however narrow the box, as the kit centres icons. */
+  #tools i > svg { width: 16px; height: 16px; margin: 0 -8px; opacity: 0.35; }
+  #tools i.arrow { width: 10px; color: var(--dim); }
+  #tools i.more { width: 14px; color: var(--dim); }
+  #tools i.d { width: 6px; justify-items: start; }
+  #tools i.d::before { content: ""; width: 1px; height: 22px; background: var(--chip); }
+  #tools i.combo {
+    box-sizing: border-box; justify-items: end; padding-right: 13px; border-radius: 4px;
+    border: 1px solid color-mix(in srgb, var(--chip) 35%, transparent); background: var(--base);
+  }
+  #frame {
+    position: relative; flex: 1; background: linear-gradient(var(--frame));
+    box-shadow: inset 1px 1px var(--edge), inset -1px 0 var(--edge);
+  }
+  /* The page's outline straddles its edge, a shade of the section's edge. */
+  #paper {
+    position: absolute; inset: 6px; display: grid; place-content: center; justify-items: center;
+    gap: 10px; background: var(--paper); font: 13px system-ui, sans-serif; color: var(--dim);
+    --outline: color-mix(in srgb, color-mix(in srgb, var(--edge) 45%, black) 30%, transparent);
+    box-shadow: inset 0 0 0 1px var(--outline), 0 0 0 1px var(--outline);
+  }
+  #status { max-width: 360px; margin: 0; text-align: center; white-space: pre-line; }
+  #bar { width: 200px; height: 4px; border-radius: 2px; background: var(--chip); overflow: hidden; }
+  #bar::before {
+    content: ""; display: block; height: 100%; border-radius: inherit; background: var(--accent);
+    transform-origin: left; transform: scaleX(var(--done, 0)); transition: transform 100ms;
+  }
+  #shell.failed #bar { display: none; }
+  #shell.failed #status { color: var(--text); }
 </style>
 </head>
 <body>
@@ -45,9 +109,46 @@
 <div id="a11y" class="hidden"></div>
 <textarea id="input" autocapitalize="off" autocomplete="off" spellcheck="false" aria-label="Page"></textarea>
 <input id="files" type="file" hidden>
-<div id="status">Loading Snowbound…</div>
+<!-- release_web.py inlines each <i>'s icon; data-fold is a group's fold priority (main.rs). -->
+<div id="shell">
+  <div id="tools" aria-hidden="true">
+    <span data-fold="6"><span class="full"><i icon="undo"></i><i icon="redo"></i></span><span class="folded"><span><i icon="undo"></i><i class="arrow" icon="chevron-down"></i></span></span></span>
+    <span><i class="d"></i><span><i icon="paste"></i><i class="arrow" icon="chevron-down"></i></span></span>
+    <span class="font"><i class="d"></i><span><i icon="styles"></i><i class="arrow" icon="chevron-down"></i></span><i class="combo" style="width: 120px" icon="chevron-down"></i><i class="combo" style="width: 44px" icon="chevron-down"></i><i icon="bold"></i><i icon="italic"></i><i icon="underline"></i>
+      <span data-fold="8"><span class="full"><span><i icon="strikethrough"></i><i class="arrow" icon="chevron-down"></i></span><span><i icon="highlighter"></i><i class="arrow" icon="chevron-down"></i></span><span><i icon="font-color"></i><i class="arrow" icon="chevron-down"></i></span><i icon="format-painter"></i></span><span class="folded"><span><i icon="highlighter"></i><i class="arrow" icon="chevron-down"></i></span></span></span></span>
+    <span data-fold="7"><span class="full"><i class="d"></i><span><i icon="bullets"></i><i class="arrow" icon="chevron-down"></i></span><span><i icon="numbering"></i><i class="arrow" icon="chevron-down"></i></span><span><i icon="align-left"></i><i class="arrow" icon="chevron-down"></i></span></span><span class="folded"><span><i icon="bullets"></i><i class="arrow" icon="chevron-down"></i></span></span></span>
+    <span data-fold="9"><span class="full"><i class="d"></i><i icon="checkbox"></i><i icon="star"></i><i icon="question"></i><i class="more" icon="chevron-down"></i></span><span class="folded"><span><i icon="checkbox"></i><i class="arrow" icon="chevron-down"></i></span></span></span>
+    <span data-fold="4"><span class="full"><i class="d"></i><span><i icon="table"></i><i class="arrow" icon="chevron-down"></i></span><i icon="picture"></i><i icon="link"></i><i icon="calendar"></i><i icon="equation"></i><span><i icon="symbol"></i><i class="arrow" icon="chevron-down"></i></span><i class="more" icon="chevron-down"></i></span><span class="folded"><span><i icon="plus"></i><i class="arrow" icon="chevron-down"></i></span></span></span>
+    <span data-fold="0"><span class="full"><i class="d"></i><i icon="attachment"></i></span><span class="folded"></span></span>
+    <span data-fold="3"><span class="full"><i class="d"></i><i icon="record-audio"></i><i icon="record-video"></i></span><span class="folded"></span></span>
+    <span data-fold="2"><span class="full"><i class="d"></i><i icon="select"></i><span><i icon="pen"></i><i class="arrow" icon="chevron-down"></i></span><i icon="eraser"></i><i icon="lasso"></i><span><i icon="shapes"></i><i class="arrow" icon="chevron-down"></i></span></span><span class="folded"></span></span>
+    <span data-fold="1"><span class="full"><i class="d"></i><span><i icon="page-color"></i><i class="arrow" icon="chevron-down"></i></span></span><span class="folded"></span></span>
+    <span class="space"></span>
+    <span><i icon="sync-done"></i></span>
+    <span><i class="more" icon="chevron-down"></i></span>
+  </div>
+  <div id="frame"><div id="paper"><p id="status" role="status">Loading Snowbound</p><div id="bar"></div></div></div>
+</div>
 <script type="module">
   import init, * as snowbound from "./snowbound_web.js";
+
+  const shell = document.getElementById("shell");
+  const status = document.getElementById("status");
+  const bar = document.getElementById("bar");
+  const tools = document.getElementById("tools");
+  // The toolbar's groups fold as the app's do, the lowest priority first, while the row
+  // overflows.
+  const groups = [...tools.querySelectorAll("[data-fold]")].sort((a, b) => a.dataset.fold - b.dataset.fold);
+  const fold = () => {
+    for (const group of groups) group.classList.remove("fold");
+    for (const group of groups) if (tools.scrollWidth > tools.clientWidth) group.classList.add("fold");
+  };
+  fold();
+  addEventListener("resize", fold);
+  const fail = (message) => {
+    shell.classList.add("failed");
+    status.textContent = message;
+  };
 
   // Open, metric-compatible faces for the fonts OneNote pages use, fetched beside the module.
   const FONTS = [
@@ -57,18 +158,27 @@
     "Tinos-Regular", "Tinos-Bold", "Tinos-Italic", "Tinos-BoldItalic",
     "Cousine-Regular", "Cousine-Bold", "Cousine-Italic", "Cousine-BoldItalic",
   ];
-  const bytes = (url) =>
-    fetch(url).then((response) => {
-      if (!response.ok) throw new Error(`${url}: ${response.status}`);
-      return response.arrayBuffer();
+  const MODULE = "snowbound_web_bg.wasm";
+  // Bytes by file, which release_web.py writes in; else the server's Content-Length.
+  const SIZES = {};
+  const sizes = new Map([MODULE, ...FONTS.map((name) => `fonts/${name}.ttf`)].map((url) => [url, SIZES[url]]));
+  let received = 0;
+  /** `url`'s response, its body counted into the bar as it arrives. */
+  const counted = async (url, headers) => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`${url}: ${response.status}`);
+    if (!sizes.get(url)) sizes.set(url, Number(response.headers.get("Content-Length")));
+    const counter = new TransformStream({
+      transform(chunk, controller) {
+        received += chunk.byteLength;
+        const total = [...sizes.values()].reduce((sum, size) => sum + (size || 0), 0);
+        bar.style.setProperty("--done", Math.min(received / total, 1));
+        controller.enqueue(chunk);
+      },
     });
-  // Servers that don't type .wasm as application/wasm can't stream it.
-  const module = fetch("snowbound_web_bg.wasm").then((response) =>
-    response.headers.get("Content-Type")?.startsWith("application/wasm")
-      ? response
-      : response.arrayBuffer(),
-  );
-  const status = document.getElementById("status");
+    return new Response(response.body.pipeThrough(counter), { headers: headers ?? response.headers });
+  };
+
   // One tab at a time writes the notebooks this browser keeps; the lock lasts as long as the tab.
   const owned = await new Promise((resolve) => {
     if (!navigator.locks) return resolve(true);
@@ -78,25 +188,41 @@
     });
   });
   if (!owned) {
-    status.textContent = "Snowbound is open in another tab. Close it, then reload this one.";
+    fail("Snowbound is open in another tab. Close it, then reload this one.");
     throw new Error("Snowbound is open in another tab");
   }
+  if (!navigator.gpu && !document.createElement("canvas").getContext("webgl2")) {
+    fail("This browser can’t draw Snowbound: it has neither WebGPU nor WebGL 2.\nOpen it in a current Chrome, Edge, Safari or Firefox.");
+    throw new Error("No WebGPU or WebGL 2");
+  }
   try {
-    const fetched = (url) => bytes(url).then((data) => new Uint8Array(data));
     const [, fonts, dictionaries] = await Promise.all([
-      init({ module_or_path: module }),
-      Promise.all(FONTS.map((name) => fetched(`fonts/${name}.ttf`))),
+      // Typed here, so the module compiles as it streams in from any server.
+      counted(MODULE, { "Content-Type": "application/wasm" }).then((module) => init({ module_or_path: module })),
+      Promise.all(FONTS.map((name) =>
+        counted(`fonts/${name}.ttf`).then((response) => response.arrayBuffer()).then((data) => new Uint8Array(data)))),
       // The spelling dictionaries the site has, fetched as pages need them; without the
       // list, words go unmarked.
       fetch("dictionaries/index.json").then((response) => response.json()).catch(() => []),
     ]);
+    status.textContent = "Starting Snowbound";
     await snowbound.start(snowbound, fonts, dictionaries);
-    status.remove();
-    console.info(`Snowbound loaded in ${Math.round(performance.now())} ms`);
   } catch (error) {
-    status.textContent = `Snowbound could not start: ${error.message ?? error}`;
+    // A download that failed rejects with a TypeError, or a status `counted` names.
+    fail(error instanceof TypeError || /: \d{3}$/.test(error.message)
+      ? "Snowbound couldn’t download. Check your connection, then reload."
+      : `Snowbound couldn’t start: ${error.message ?? error}`);
     throw error;
   }
+  // The first frame draws the canvas, under the shell by the second.
+  for (const _ of [0, 1]) await new Promise(requestAnimationFrame);
+  shell.classList.add("gone");
+  removeEventListener("resize", fold);
+  setTimeout(() => {
+    shell.remove();
+    snowbound.loaded();
+  }, 120);
+  console.info(`Snowbound loaded in ${Math.round(performance.now())} ms`);
 </script>
 </body>
 </html>

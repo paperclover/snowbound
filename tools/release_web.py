@@ -8,8 +8,10 @@ static folder and publishes it to the share's web/ folder.
 import argparse
 import gzip
 import hashlib
+import itertools
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -22,6 +24,8 @@ ROOT = Path(__file__).resolve().parents[1]
 TARGET = ROOT / 'target/wasm'
 WEB = ROOT / 'crates/snowbound/web'
 FONTS = ROOT / 'crates/canvas/assets/fonts'
+# Where the loading shell's icons are looked up by name, in order.
+ICONS = [ROOT / 'crates/snowbound/assets/icons', ROOT / 'crates/canvas/assets/tags', ROOT / 'crates/ui/assets']
 PUBLISHED = Path('/Volumes/clover/Documents/Public/Snowbound/web')
 # copyparty lists the folder itself, so the app is at its index.html.
 URL = 'https://file.paperclover.net/shr/snowbound/web/index.html'
@@ -91,16 +95,38 @@ def build(out):
          '--out-dir', out, module])
     bound = out / 'snowbound_web_bg.wasm'
     run([tool('wasm-opt', 'binaryen'), '-Oz', '--strip-debug', '--strip-producers', bound, '-o', bound])
-    shutil.copy(WEB / 'index.html', out)
     dictionaries(out / 'dictionaries')
     (out / 'fonts').mkdir()
     for font in sorted(FONTS.glob('*')):
         if font.suffix in ('.ttf', '.txt'):
             shutil.copy(font, out / 'fonts')
     fallbacks(out / 'fonts')
+    page(out)
     for path in sorted(out.rglob('*')):
         if path.is_file():
             print(f'{path.stat().st_size:>12,}  {path.relative_to(out)}')
+
+
+def page(out):
+    """Writes index.html with its loading shell's icons inlined, and the sizes of the files
+    it fetches before the app starts, for its progress bar."""
+    count = itertools.count()
+
+    def inline(match):
+        name = match[2]
+        svg = next(folder / f'{name}.svg' for folder in ICONS if (folder / f'{name}.svg').exists()).read_text()
+        # Each copy's gradients keep ids of their own in the one document.
+        prefix = f'i{next(count)}-'
+        svg = re.sub(r'id="([^"]+)"', rf'id="{prefix}\1"', svg)
+        svg = re.sub(r'url\(#([^)]+)\)', rf'url(#{prefix}\1)', svg)
+        return f'<i{match[1]}>{svg.strip()}</i>'
+    html = re.sub(r'<i([^>]*) icon="([^"]+)"></i>', inline, (WEB / 'index.html').read_text())
+    sizes = {str(path.relative_to(out)): path.stat().st_size
+             for path in [out / 'snowbound_web_bg.wasm', *sorted((out / 'fonts').glob('*.ttf'))]}
+    marker = 'const SIZES = {};'
+    if marker not in html:
+        sys.exit(f'index.html lacks `{marker}`')
+    (out / 'index.html').write_text(html.replace(marker, f'const SIZES = {json.dumps(sizes)};'))
 
 
 def dictionaries(folder):

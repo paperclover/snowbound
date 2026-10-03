@@ -85,6 +85,9 @@ extern "C" {
     pub fn fetch_dictionary(name: &str);
     #[wasm_bindgen(js_name = storeFiles)]
     fn store_files(changes: js_sys::Array);
+    /// Keeps what `index.html`'s loading shell paints on the next visit.
+    #[wasm_bindgen(js_name = keepLook)]
+    fn keep_look(look: &str);
 }
 
 /// Where the browser keeps its notebooks, which a first visit makes one in.
@@ -201,6 +204,8 @@ thread_local! {
     /// When changed files are next written out.
     static STORE_DUE: Cell<Option<Instant>> = const { Cell::new(None) };
     static LANGUAGE: RefCell<String> = const { RefCell::new(String::new()) };
+    /// The look last handed to `keepLook`.
+    static LOOK: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
 /// Whether the browser runs on a Mac, where Command takes the editing chords.
@@ -916,9 +921,12 @@ pub async fn start(
         notebook::fs::mount(&root);
         restore(folder.get(1).into());
     }
-    let state = open(fonts)
+    let mut state = open(fonts)
         .await
         .map_err(|error| JsValue::from_str(&error.to_string()))?;
+    // The first frame is the loading shell's layout, a toolbar over the page; `loaded` eases
+    // the rest in.
+    state.full_page = true;
     // Text no run tags is in the browser's language, as typed in it.
     if let Some(spelling) = &state.spelling {
         spelling.untagged(canvas::language::lcid(&input_language()));
@@ -931,6 +939,16 @@ pub async fn start(
     }
     request_frame();
     Ok(())
+}
+
+/// The loading shell is gone: the tab row, page list and sidebar ease in as Full Page View
+/// leaves.
+#[wasm_bindgen]
+pub fn loaded() {
+    send(UserEvent::Then(Box::new(|state| {
+        state.full_page = false;
+        Ok(())
+    })));
 }
 
 /// Puts back the files IndexedDB kept: `[path, bytes or null for a folder, modified]`.
@@ -1356,6 +1374,7 @@ fn turn(state: &mut State) -> Result<(), Box<dyn Error>> {
     }
     if host(|host| std::mem::take(&mut host.redraw)) {
         state.frame()?;
+        remember_look(state);
     }
     let space = state.session.as_ref().map(|session| session.space);
     if TYPED.take() || LOOKED.replace(space) != space {
@@ -1382,6 +1401,20 @@ fn turn(state: &mut State) -> Result<(), Box<dyn Error>> {
         wake_in(next.saturating_duration_since(now).as_secs_f64() * 1e3);
     }
     Ok(())
+}
+
+/// Keeps the open section's hue and the page's colour, in the appearance they show in, for
+/// the loading shell to frame its page in.
+fn remember_look(state: &State) {
+    let hue = draw::hue(crate::section_color(state.section_color()));
+    let [red, green, blue] = draw::srgb_bytes(state.paper().color);
+    let dark = matches!(host(|host| host.theme), Theme::Dark);
+    let look =
+        format!(r##"{{"hue":{hue:.0},"paper":"#{red:02x}{green:02x}{blue:02x}","dark":{dark}}}"##);
+    if LOOK.with_borrow(|kept| *kept != look) {
+        keep_look(&look);
+        LOOK.set(look);
+    }
 }
 
 /// Fetches the fallback faces `text` calls for that are not yet asked for.
