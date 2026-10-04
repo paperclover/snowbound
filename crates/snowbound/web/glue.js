@@ -551,7 +551,10 @@ export function mirrorTree({ tree, focus, root, nodes }) {
     if (!held.nodes.has(id)) {
       const made = document.createElement("div");
       made.id = `a11y-${tree}-${id}`;
-      made.onclick = () => wasm.access(tree, id, 0);
+      made.onclick = (event) => {
+        event.stopPropagation();
+        wasm.access(tree, id, 0);
+      };
       held.nodes.set(id, made);
     }
     return held.nodes.get(id);
