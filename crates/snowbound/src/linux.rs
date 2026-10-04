@@ -752,9 +752,14 @@ fn log_crashes() {
         None
     };
     let _ = LOG.set((path, copy));
-    crate::crash::hook(described, |report| {
-        crashed(|fd| write_all(fd, report.as_bytes()));
-    });
+    crate::crash::hook(
+        option_env!("SNOWBOUND_BUILD").unwrap_or("development"),
+        crate::update::platform(),
+        described,
+        |report| {
+            crashed(|fd| write_all(fd, report.as_bytes()));
+        },
+    );
     if let Ok(path) = crate::loader::executable()
         && let Ok(path) = CString::new(path.into_os_string().into_vec())
     {
@@ -781,6 +786,7 @@ const FATAL: [(i32, &str); 5] = [
 /// Logs the signal ending the process with the stack it arrived on, then lets it end the
 /// process as it would have. Calls only what a signal handler may.
 extern "C" fn fatal(signal: i32, info: *mut libc::siginfo_t, _: *mut libc::c_void) {
+    unsafe { crash_report::record_signal(signal, info) };
     let name = FATAL
         .iter()
         .find(|(fatal, _)| *fatal == signal)

@@ -1367,19 +1367,28 @@ fn tabs(catalog: &Folder) -> Vec<Tab> {
     catalog
         .sections
         .iter()
-        .filter_map(|section| match &section.state {
-            SectionState::Readable { name, color, .. } => Some(Tab {
-                name: section_name(&section.path, name),
-                path: section.path.clone(),
-                color: *color,
-            }),
-            // Its name and colour are inside the encryption, but its file is named for it.
-            SectionState::Locked => Some(Tab {
-                name: section_name(&section.path, &None),
-                path: section.path.clone(),
-                color: None,
-            }),
-            _ => None,
+        .filter_map(|section| {
+            crate::crash::conceal(&section.path);
+            if let SectionState::Readable {
+                name: Some(name), ..
+            } = &section.state
+            {
+                crate::crash::conceal(name);
+            }
+            match &section.state {
+                SectionState::Readable { name, color, .. } => Some(Tab {
+                    name: section_name(&section.path, name),
+                    path: section.path.clone(),
+                    color: *color,
+                }),
+                // Its name and colour are inside the encryption, but its file is named for it.
+                SectionState::Locked => Some(Tab {
+                    name: section_name(&section.path, &None),
+                    path: section.path.clone(),
+                    color: None,
+                }),
+                _ => None,
+            }
         })
         .collect()
 }

@@ -13,6 +13,7 @@ wgpu = ["draw/wgpu", "dep:wgpu"]
 live = ["notebook/live"]
 
 [dependencies]
+crash-report = { path = "../crash-report" }
 canvas = { path = "../canvas", features = ["interaction", "pdf"] }
 draw = { path = "../draw", default-features = false, features = ["render"] }
 ui = { path = "../ui" }

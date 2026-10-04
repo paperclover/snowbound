@@ -9,6 +9,7 @@ publish = false
 crate-type = ["staticlib"]
 
 [dependencies]
+crash-report = { path = "../crash-report" }
 canvas = { path = "../canvas", features = ["interaction", "pdf"] }
 draw = { path = "../draw" }
 notebook = { path = "../notebook", features = ["smb"] }

@@ -81,10 +81,16 @@ pub(crate) fn stamp(connection: &Connection, image: Image) -> Result<Option<Stam
         [last],
         |row| row.get(0),
     )?;
+    if !(1..=CHUNK as i64).contains(&tail) {
+        return Err(damaged());
+    }
     Ok(Some(Stamp {
         header: header.try_into().map_err(|_| damaged())?,
-        length: u64::try_from(last).map_err(|_| damaged())? * CHUNK as u64
-            + u64::try_from(tail).map_err(|_| damaged())?,
+        length: u64::try_from(last)
+            .map_err(|_| damaged())?
+            .checked_mul(CHUNK as u64)
+            .and_then(|length| length.checked_add(tail as u64))
+            .ok_or_else(damaged)?,
     }))
 }
 
@@ -168,6 +174,22 @@ pub(crate) fn publish(connection: &Connection, transaction: &Transaction) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn damaged_chunk_lengths_do_not_wrap_the_stamp() {
+        for image in [Image::Base, Image::Remote] {
+            for (last, size) in [(i64::MAX, 1), (1, 0), (1, CHUNK + 1)] {
+                let connection = connection();
+                connection
+                    .execute(
+                        &format!("INSERT INTO {} VALUES (0, ?1), (?2, ?3)", image.table()),
+                        params![vec![0u8; CHUNK], last, vec![0u8; size]],
+                    )
+                    .unwrap();
+                assert!(stamp(&connection, image).is_err());
+            }
+        }
+    }
 
     fn connection() -> Connection {
         let connection = Connection::open_in_memory().unwrap();

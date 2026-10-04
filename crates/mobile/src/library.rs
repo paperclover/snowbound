@@ -326,12 +326,17 @@ fn stem(path: &str) -> String {
 /// A folder's sections, its groups' after them, leaving out the recycle bin OneNote keeps
 /// deleted sections and pages in.
 fn tabs(folder: &Folder, unlocked: &HashMap<String, Key>, tabs: &mut Vec<Tab>) {
+    crash_report::conceal(&folder.path);
     for section in &folder.sections {
+        crash_report::conceal(&section.path);
         let (name, color, readable) = match &section.state {
             SectionState::Readable { name, color, .. } => (name.clone(), *color, true),
             SectionState::Locked => (None, None, unlocked.contains_key(&section.path)),
             SectionState::Unreadable(_) => (None, None, false),
         };
+        if let Some(name) = &name {
+            crash_report::conceal(name);
+        }
         let locked = matches!(section.state, SectionState::Locked) && !readable;
         tabs.push(Tab {
             name: name.unwrap_or_else(|| stem(&section.path)),
@@ -372,6 +377,7 @@ impl Library {
     /// reports every change to `touched`; any other, as a file provider keeps it, gets offline
     /// copies of its sections and is checked every few seconds.
     pub(crate) fn open(path: &Path, cache: &Path, local: bool) -> Result<Self> {
+        crash_report::conceal(&path.to_string_lossy());
         let (notebook, place, background) = if path.is_file() {
             (None, Place::File(path.to_owned()), None)
         } else {

@@ -1593,6 +1593,141 @@ fn picture_view() -> (PageView, onestore::ExGuid) {
     (view, id)
 }
 
+fn pasted_picture_view() -> PageView {
+    let (mut view, _) = picture_view();
+    let (scene, editor) =
+        PageScene::from_page(view.editor.page().unwrap(), &mut view.engine).unwrap();
+    view.editor = editor;
+    view.scene = Some((scene, [0.0; 2]));
+    let bytes = include_bytes!("../../../../corpus/object-tags/native/notebook/photo.png");
+    let _ = view.insert_picture(bytes.to_vec(), [40.0, 30.0]).unwrap();
+    let (scene, _) = view.scene.as_mut().unwrap();
+    scene.settle(Some(&view.editor), 1.0, COLORS.paper);
+    view
+}
+
+#[test]
+fn a_picture_pasted_into_an_open_outline_reaches_the_scene() {
+    let view = pasted_picture_view();
+    assert!(view.primitives(COLORS).unwrap().iter().any(|primitive| {
+        matches!(primitive, Primitive::Image { rect, .. }
+            if (rect[2] - rect[0] - 40.0).abs() < 0.01
+                && (rect[3] - rect[1] - 30.0).abs() < 0.01)
+    }));
+}
+
+#[test]
+#[ignore = "requires a native GPU adapter"]
+fn a_pasted_inline_picture_is_drawn_on_the_gpu() {
+    let view = pasted_picture_view();
+    let primitives = view.primitives(COLORS).unwrap();
+    let rect = primitives
+        .iter()
+        .find_map(|primitive| match primitive {
+            Primitive::Image { rect, .. } => Some(*rect),
+            _ => None,
+        })
+        .unwrap();
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+    let (device, queue) = pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+    let size = [512, 256];
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Pasted picture"),
+        size: wgpu::Extent3d {
+            width: size[0],
+            height: size[1],
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let mut renderer = draw::Renderer::new(
+        device.clone(),
+        queue.clone(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+    );
+    renderer
+        .draw(
+            &texture.create_view(&Default::default()).into(),
+            size,
+            [1.0; 4],
+            &[draw::Layer {
+                scale: 1.0,
+                origin: [0.0; 2],
+                clip: None,
+                backdrop: None,
+                round: None,
+                motion: None,
+                primitives: &primitives,
+            }],
+        )
+        .unwrap();
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Pasted picture pixels"),
+        size: u64::from(size[0] * size[1] * 4),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size[0] * 4),
+                rows_per_image: Some(size[1]),
+            },
+        },
+        texture.size(),
+    );
+    queue.submit([encoder.finish()]);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    readback.map_async(wgpu::MapMode::Read, .., move |result| {
+        sender.send(result).unwrap();
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(Duration::from_secs(5)),
+        })
+        .unwrap();
+    receiver
+        .recv_timeout(Duration::from_secs(5))
+        .unwrap()
+        .unwrap();
+    let pixels = readback.get_mapped_range(..).unwrap();
+    let colored = (rect[1].ceil() as usize..rect[3].floor() as usize)
+        .flat_map(|y| {
+            (rect[0].ceil() as usize..rect[2].floor() as usize)
+                .map(move |x| (y * size[0] as usize + x) * 4)
+        })
+        .filter(|&at| {
+            let rgb = &pixels[at..at + 3];
+            rgb.iter().max().unwrap() - rgb.iter().min().unwrap() > 30
+        })
+        .count();
+    assert!(
+        colored > 100,
+        "picture rectangle contained only {colored} colored pixels"
+    );
+    if let Some(path) = std::env::var_os("SNOWBOUND_PICTURE_CAPTURE") {
+        let mut encoder = png::Encoder::new(std::fs::File::create(path).unwrap(), size[0], size[1]);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&pixels)
+            .unwrap();
+    }
+}
+
 #[test]
 fn a_picture_context_copies_and_cuts_the_picture_instead_of_hidden_text() {
     use onestore::page::{PageObject, ParagraphContent};

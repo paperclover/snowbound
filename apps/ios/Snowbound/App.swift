@@ -18,6 +18,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(
         _ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
+        Crash.start()
         sb_set_coordinator(coordinate)
         Editing.apply()
         ICloud.start()
@@ -202,6 +203,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate, UISplitViewContro
             self?.notebooks.rescan { self?.restore($0) }
         }
         self.scene(scene, openURLContexts: options.urlContexts)
+        DispatchQueue.main.async { Crash.offer(from: self.split) }
     }
 
     /// A section file Files opens in Snowbound, in place.

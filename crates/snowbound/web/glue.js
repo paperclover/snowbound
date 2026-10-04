@@ -521,6 +521,10 @@ export function tell(message, detail) {
 
 export function sendCrash(report) {
   fetch("/crash", { method: "POST", headers: { "Content-Type": "text/plain; charset=utf-8" }, body: report })
+    .then((response) => {
+      if (!response.ok) throw new Error(`Crash report returned ${response.status}`);
+      if (localStorage.getItem("snowbound-crash") === report) localStorage.removeItem("snowbound-crash");
+    })
     .catch((error) => console.error("Cannot send the crash report", error));
 }
 

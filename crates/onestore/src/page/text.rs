@@ -8,11 +8,36 @@ pub struct Span {
     pub format: Format,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 /// Editable text styles are coalesced independently of serialized run boundaries.
 pub struct Paragraph {
     text: String,
     spans: Vec<Span>,
+}
+
+impl<'de> serde::Deserialize<'de> for Paragraph {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        struct Stored {
+            text: String,
+            spans: Vec<Span>,
+        }
+        let Stored { text, spans } = Stored::deserialize(deserializer)?;
+        let mut previous = 0;
+        if spans.is_empty()
+            || spans.iter().any(|span| {
+                let broken = span.end < previous || !text.is_char_boundary(span.end);
+                previous = span.end;
+                broken
+            })
+            || previous != text.len()
+        {
+            return Err(serde::de::Error::custom(
+                "Text formatting splits a character or extends outside the paragraph",
+            ));
+        }
+        Ok(Self { text, spans })
+    }
 }
 
 /// Which side of a hidden field a visible boundary maps to.
@@ -385,6 +410,34 @@ impl Paragraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serialized_text_rejects_broken_span_boundaries() {
+        for (text, ends) in [
+            ("", vec![]),
+            ("a", vec![0]),
+            ("a", vec![2]),
+            ("é", vec![1, 2]),
+            ("abc", vec![2, 1, 3]),
+            ("a", vec![usize::MAX]),
+        ] {
+            let json = serde_json::json!({
+                "text": text,
+                "spans": ends.into_iter().map(|end| Span {
+                    end,
+                    format: Format::default(),
+                }).collect::<Vec<_>>(),
+            });
+            assert!(serde_json::from_value::<Paragraph>(json).is_err());
+        }
+        for text in ["", "é🌳", "a\u{000b}b"] {
+            let original = Paragraph::new(text.into(), Format::default());
+            let restored: Paragraph =
+                serde_json::from_str(&serde_json::to_string(&original).unwrap()).unwrap();
+            assert_eq!(restored, original);
+            restored.project().unwrap();
+        }
+    }
 
     fn regular() -> Format {
         Format {

@@ -828,6 +828,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "crash-report"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "libc",
+ "tempfile",
+ "web-sys",
+ "web-time",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2048,6 +2060,7 @@ name = "mobile"
 version = "0.1.0"
 dependencies = [
  "canvas",
+ "crash-report",
  "draw",
  "notebook",
  "objc2 0.5.2",
@@ -3617,6 +3630,7 @@ dependencies = [
  "base64",
  "block2 0.5.1",
  "canvas",
+ "crash-report",
  "draw",
  "fontique",
  "getrandom 0.4.3",

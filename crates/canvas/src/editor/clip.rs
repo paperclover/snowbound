@@ -110,6 +110,10 @@ impl CanvasEditor {
     /// formatting, style, list, tags and indentation below that paragraph's. A title takes
     /// one paragraph's text alone; more go into the body.
     pub fn paste_clip(&mut self, engine: &mut TextEngine, clip: Clip) -> Result<(), EditorError> {
+        if clip.paragraphs.is_empty() {
+            return Ok(());
+        }
+        crate::document::validate_nodes(&clip.paragraphs, &mut BTreeSet::new())?;
         if self.page_selected() {
             return self.grouped(|editor| {
                 editor.remove_page(engine, true)?;
@@ -161,7 +165,10 @@ impl CanvasEditor {
             if node.parent.is_none() {
                 node.parent = parent;
             }
-            node.level += level - 1;
+            node.level = node
+                .level
+                .checked_add(level - 1)
+                .ok_or(EditError::InvalidStructure)?;
         }
         let ends_in_text = nodes.last().is_some_and(|node| node.text().is_some());
         let last = nodes
@@ -411,6 +418,31 @@ mod tests {
     use super::*;
     use crate::editor::format::{NoteTag, Toggle};
     use crate::editor::{Formatting, html_pieces};
+
+    #[test]
+    fn broken_clip_structure_is_rejected_before_editing() {
+        let mut engine = TextEngine::default();
+        let mut editor = editor(&mut engine, &["original"]);
+        let original = editor.active_outline().document.clone();
+        let mut clip = Clip::new(original.nodes().to_vec(), &BTreeMap::new());
+        clip.paragraphs[0].level = 0;
+        assert!(editor.paste_clip(&mut engine, clip).is_err());
+        assert_eq!(editor.active_outline().document, original);
+    }
+
+    #[test]
+    fn pasted_levels_cannot_overflow_the_target_outline() {
+        let mut engine = TextEngine::default();
+        let mut editor = editor(&mut engine, &["original", "second"]);
+        let mut nodes = editor.active_outline().document.nodes().to_vec();
+        nodes[0].level = 2;
+        editor.active_outline_mut().document = TextDocument::from_nodes(nodes).unwrap();
+        let original = editor.active_outline().document.clone();
+        let mut clip = Clip::new(original.nodes().to_vec(), &BTreeMap::new());
+        clip.paragraphs[0].level = u32::MAX;
+        assert!(editor.paste_clip(&mut engine, clip).is_err());
+        assert_eq!(editor.active_outline().document, original);
+    }
 
     fn at(paragraph: usize, offset: u32) -> TextPosition {
         TextPosition { paragraph, offset }

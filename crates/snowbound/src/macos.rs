@@ -37,7 +37,12 @@ pub fn with_pool<R>(run: impl FnOnce() -> R) -> R {
             let info: Retained<AnyObject> = msg_send_id![class!(NSProcessInfo), processInfo];
             msg_send_id![&info, operatingSystemVersionString]
         };
-        crate::crash::hook(format!("macOS {version}"), |report| eprint!("{report}"));
+        crate::crash::hook(
+            option_env!("SNOWBOUND_BUILD").unwrap_or("development"),
+            crate::update::platform(),
+            format!("macOS {version}"),
+            |report| eprint!("{report}"),
+        );
         run()
     })
 }

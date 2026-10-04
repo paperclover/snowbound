@@ -943,9 +943,12 @@ pub async fn start(
 ) -> Result<(), JsValue> {
     let window = web_sys::window().ok_or("No window")?;
     let navigator = window.navigator();
-    crate::crash::hook(navigator.user_agent().unwrap_or_default(), |text| {
-        report(text)
-    });
+    crate::crash::hook(
+        option_env!("SNOWBOUND_BUILD").unwrap_or("development"),
+        crate::update::platform(),
+        navigator.user_agent().unwrap_or_default(),
+        |text| report(text),
+    );
     MAC.set(navigator.platform().is_ok_and(|platform| {
         ["Mac", "iPhone", "iPad"]
             .iter()

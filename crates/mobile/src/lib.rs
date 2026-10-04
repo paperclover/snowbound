@@ -7,6 +7,7 @@
 //! scale. Calls returning `bool` report whether the page or selection changed, after which
 //! the host redraws and rereads `sb_view_content`.
 
+mod crash;
 mod library;
 mod recording;
 #[cfg(target_os = "ios")]
@@ -723,6 +724,9 @@ impl View {
                 .get_default_config(&adapter, pixels[0], pixels[1])
                 .ok_or("No supported surface configuration")?
                 .format;
+            if let Ok(mut renderer) = crash_report::RENDERER.lock() {
+                *renderer = format!("Metal ({})", adapter.get_info().name);
+            }
             *gpu = Some(Gpu {
                 instance,
                 renderer: draw::Renderer::new(device, queue, format),

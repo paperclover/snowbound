@@ -10,12 +10,34 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 onestore = { path = "../crates/onestore" }
-notebook = { path = "../crates/notebook" }
+notebook = { path = "../crates/notebook", features = ["live"] }
 canvas = { path = "../crates/canvas" }
 draw = { path = "../crates/draw", default-features = false }
 tempfile = "3"
 md5 = "0.8.1"
 serde_json = "1"
+minicbor = { version = "2.3.0", features = ["alloc"] }
+
+[[bin]]
+name = "clipboard"
+path = "fuzz_targets/clipboard.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "live_wire"
+path = "fuzz_targets/live_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "smb_directory"
+path = "fuzz_targets/smb_directory.rs"
+test = false
+doc = false
+bench = false
 
 [[bin]]
 name = "protected"

@@ -942,22 +942,27 @@ pub fn with_pool(
         option_env!("SNOWBOUND_BUILD").unwrap_or("development")
     );
     let shown = details.clone();
-    crate::crash::hook(format!("Windows {major}.{minor}.{build}"), move |report| {
-        eprint!("{report}");
-        // The panic aborts the process once this returns, taking an alert's thread with it.
-        if cfg!(panic = "abort")
-            && let Some(details) = &shown
-        {
-            let text = wide(format!(
-                "Snowbound stopped because of a problem.\n\n{details}"
-            ));
-            let caption = wide("Snowbound");
-            let style = wm::MB_OK | wm::MB_ICONWARNING;
-            unsafe {
-                wm::MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), style)
-            };
-        }
-    });
+    crate::crash::hook(
+        option_env!("SNOWBOUND_BUILD").unwrap_or("development"),
+        crate::update::platform(),
+        format!("Windows {major}.{minor}.{build}"),
+        move |report| {
+            eprint!("{report}");
+            // The panic aborts the process once this returns, taking an alert's thread with it.
+            if cfg!(panic = "abort")
+                && let Some(details) = &shown
+            {
+                let text = wide(format!(
+                    "Snowbound stopped because of a problem.\n\n{details}"
+                ));
+                let caption = wide("Snowbound");
+                let style = wm::MB_OK | wm::MB_ICONWARNING;
+                unsafe {
+                    wm::MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), style)
+                };
+            }
+        },
+    );
     unsafe {
         windows_sys::Win32::System::Diagnostics::Debug::AddVectoredExceptionHandler(0, Some(fault))
     };
@@ -1039,7 +1044,19 @@ unsafe extern "system" fn fault(
     // names the caller.
     let context = unsafe { &*(*pointers).ContextRecord };
     #[cfg(target_arch = "x86_64")]
-    let caller = unsafe { *(context.Rsp as *const usize) };
+    let caller = {
+        let mut address = 0usize;
+        let found = unsafe {
+            windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory(
+                windows_sys::Win32::System::Threading::GetCurrentProcess(),
+                context.Rsp as *const std::ffi::c_void,
+                (&raw mut address).cast(),
+                std::mem::size_of::<usize>(),
+                std::ptr::null_mut(),
+            ) != 0
+        };
+        if found { address } else { 0 }
+    };
     #[cfg(target_arch = "aarch64")]
     let caller = unsafe { context.Anonymous.Anonymous.Lr } as usize;
     eprintln!(

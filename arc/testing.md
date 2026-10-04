@@ -109,6 +109,9 @@ streams, revisions, documents), the commit protocol with interruptions, edits
 of many kinds, the page model, protected sections, the offline queue, and the
 canvas editor's state machine. The parsers see arbitrary bytes, and the
 writers see arbitrary sequences of edits whose results must still validate.
+Clipboard text and clips, Live Share messages and SMB directory records have
+targets too. The SMB target compiles the directory decoder's source directly,
+without a connection or a separate parser.
 
 ## Two tiers of tests
 

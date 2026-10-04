@@ -12,6 +12,11 @@ typedef struct View View;
 
 void sb_string_free(char *text);
 
+bool sb_crash_start(const char *path, const char *build, const char *system);
+const char *sb_crash_address(void);
+char *sb_crash_report(void);
+void sb_crash_forget(void);
+
 typedef void (*sb_coordinator)(const char *path, bool write, void (*body)(void *), void *context);
 void sb_set_coordinator(sb_coordinator coordinator);
 void sb_set_sync_wake(void (*wake)(void));

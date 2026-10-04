@@ -7021,8 +7021,10 @@ fn launch() -> Result<(), Box<dyn Error>> {
     }
     // A screenshot leaves the settings as it found them.
     let settings_file = settings_file.filter(|_| screenshot.is_none());
-    if let Some(file) = &settings_file {
-        let _ = crash::REPORT.set(file.with_file_name("crash.txt"));
+    if let Some(file) = &settings_file
+        && let Err(error) = crash::set_path(file.with_file_name("crash.txt"))
+    {
+        eprintln!("Cannot keep crash reports: {error}");
     }
     let mut app = App {
         proxy: event_loop.create_proxy(),
