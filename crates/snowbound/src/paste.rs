@@ -53,12 +53,10 @@ pub(crate) fn pixels(encoded: &[u8]) -> Result<([u32; 2], Vec<u8>), Box<dyn Erro
             .map_err(|error| format!("{error:?}"))?;
         let mut rgba = image.pixels().to_vec();
         for pixel in rgba.chunks_exact_mut(4) {
-            let alpha = u32::from(pixel[3]);
-            for channel in &mut pixel[..3] {
-                *channel = (u32::from(*channel) * 255 + alpha / 2)
-                    .checked_div(alpha)
-                    .unwrap_or(0)
-                    .min(255) as u8;
+            if pixel[3] != 255 {
+                let scale = 255.0 / f32::from(pixel[3].max(1));
+                let linear = draw::srgb(pixel[0], pixel[1], pixel[2]).map(|v| v * scale);
+                pixel[..3].copy_from_slice(&draw::srgb_bytes(linear));
             }
         }
         return Ok((image.size(), rgba));
@@ -485,6 +483,22 @@ mod tests {
         let rgba = [239, 17, 123, 37, 8, 49, 203, 0];
         let encoded = png([2, 1], &rgba).unwrap();
         assert_eq!(pixels(&encoded).unwrap(), ([2, 1], rgba.to_vec()));
+    }
+
+    #[test]
+    fn clipboard_pixels_keep_translucent_tiff_colors() {
+        use image::ImageEncoder;
+        let rgba = [220, 120, 80, 128];
+        let mut encoded = Vec::new();
+        image::codecs::tiff::TiffEncoder::new(std::io::Cursor::new(&mut encoded))
+            .write_image(&rgba, 1, 1, image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let (size, decoded) = pixels(&encoded).unwrap();
+        assert_eq!(size, [1, 1]);
+        assert_eq!(decoded[3], rgba[3]);
+        for (actual, expected) in decoded[..3].iter().zip(&rgba[..3]) {
+            assert!(actual.abs_diff(*expected) <= 2, "{decoded:?}");
+        }
     }
 
     fn png_at(pixels_per_metre: Option<u32>) -> Vec<u8> {
