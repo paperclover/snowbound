@@ -8,7 +8,11 @@ use notebook::live::{
     share::{self, Refusal, Sharing},
     wire::Welcome,
 };
-use std::sync::{Arc, mpsc};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use ui::{Anchor, Axis, Id, Spec, Ui, children, fill, fit, px};
 use winit::keyboard::NamedKey;
 
@@ -41,6 +45,9 @@ pub(crate) struct ShareDialog {
     library: Arc<Library>,
     protect: bool,
     password: String,
+    approve: bool,
+    replies: crate::live::Channel<Result<(), String>>,
+    error: Option<String>,
     /// What was copied last: the code, or the link.
     copied: Option<&'static str>,
 }
@@ -53,6 +60,14 @@ pub(crate) struct JoinDialog {
     password: String,
     status: Status,
     replies: crate::live::Channel<Result<Welcome, Refusal>>,
+    alive: Arc<AtomicBool>,
+    approval: Arc<AtomicBool>,
+}
+
+impl Drop for JoinDialog {
+    fn drop(&mut self) {
+        self.alive.store(false, Ordering::Release);
+    }
 }
 
 enum Status {
@@ -92,6 +107,9 @@ fn refusal(refusal: &Refusal) -> String {
         Refusal::Busy => "The Live Share relay is busy. Try again in a minute.".into(),
         Refusal::Unreachable(trouble) => unreachable(*trouble),
         Refusal::TimedOut => "The computer sharing didn’t answer. Try again.".into(),
+        Refusal::Declined => "The person sharing declined this request.".into(),
+        Refusal::Cancelled => "Joining cancelled.".into(),
+        Refusal::NotAdmitted => "The computer sharing couldn’t add this device. Ask the person sharing to check Live Share.".into(),
     }
 }
 
@@ -267,6 +285,9 @@ impl State {
             library,
             protect: false,
             password: String::new(),
+            approve: true,
+            replies: mpsc::channel(),
+            error: None,
             copied: None,
         });
         self.ui.open_popup(share_id());
@@ -289,6 +310,8 @@ impl State {
             password: String::new(),
             status: Status::Idle,
             replies: mpsc::channel(),
+            alive: Arc::new(AtomicBool::new(true)),
+            approval: Arc::new(AtomicBool::new(false)),
         });
         self.ui.open_popup(join_id());
         self.ui.focus_all(code_field());
@@ -307,6 +330,9 @@ impl State {
             return;
         }
         let location = dialog.library.location.clone();
+        for result in dialog.replies.1.try_iter() {
+            dialog.error = result.err();
+        }
         let host = self.peers.hosts.get(&location).cloned();
         let starting = self.peers.starting.get(&location).cloned();
         let ui = &mut self.ui;
@@ -319,6 +345,7 @@ impl State {
         frame(ui, share_id(), "Live Share");
         text(ui, "notebook", &dialog.library.name, true);
         let (mut start, mut stop, mut copy) = (false, false, None);
+        let (mut approval, mut allow, mut decline, mut remove) = (None, None, None, None);
         match (&host, &starting) {
             (Some(host), _) => {
                 let code = host.code();
@@ -390,30 +417,85 @@ impl State {
                     ),
                     _ => {}
                 }
+                if ui::check_box(ui, "approve", "Ask before joining", host.sharing().approve)
+                    .clicked
+                {
+                    approval = Some(!host.sharing().approve);
+                }
+                for request in host.requests() {
+                    ui.open(
+                        ("request", request.peer),
+                        Spec {
+                            size: [fill(), children()],
+                            gap: 8.0,
+                            ..Spec::default()
+                        },
+                    );
+                    ui.leaf(
+                        "name",
+                        Spec {
+                            size: [fill(), fit()],
+                            text: Some(&format!("{} wants to join", request.name)),
+                            overflow: ui::Overflow::Wrap,
+                            ..Spec::default()
+                        },
+                    );
+                    if ui::button(ui, "allow", "Allow").clicked {
+                        allow = Some(request.peer);
+                    }
+                    if ui::button(ui, "decline", "Decline").clicked {
+                        decline = Some(request.peer);
+                    }
+                    ui.close();
+                }
                 ui.leaf(
                     "people",
                     Spec {
                         size: [fill(), px(theme.font_size * 2.0)],
-                        text: Some("Connected"),
+                        text: Some("Devices"),
                         bold: true,
                         role: Some(Role::Heading),
                         ..Spec::default()
                     },
                 );
-                let guests = host.guests();
-                if guests.is_empty() {
+                let devices = host.devices();
+                if devices.is_empty() {
                     text(ui, "nobody", "No one has joined yet.", true);
                 }
-                for guest in &guests {
+                for (device, connected) in &devices {
+                    ui.open(
+                        ("device", device.secret),
+                        Spec {
+                            size: [fill(), children()],
+                            gap: 8.0,
+                            ..Spec::default()
+                        },
+                    );
                     ui.leaf(
-                        ("guest", guest.hello.peer),
+                        "name",
                         Spec {
                             size: [fill(), px(theme.font_size * 1.6)],
-                            text: Some(&guest.hello.name),
+                            text: Some(&match &device.device {
+                                Some(name) => format!("{} · {name}", device.name),
+                                None => device.name.clone(),
+                            }),
                             role: Some(Role::ListItem),
                             ..Spec::default()
                         },
                     );
+                    ui.leaf(
+                        "connection",
+                        Spec {
+                            size: [fit(), px(theme.font_size * 1.6)],
+                            text: Some(if *connected { "Connected" } else { "Offline" }),
+                            color: Some(theme.text_dim),
+                            ..Spec::default()
+                        },
+                    );
+                    if ui::button(ui, "remove", "Remove").clicked {
+                        remove = Some(device.secret);
+                    }
+                    ui.close();
                 }
                 buttons(ui);
                 stop = ui::button(ui, "stop", "Stop Sharing").clicked;
@@ -436,6 +518,9 @@ impl State {
                         ui.focus_all(password_field());
                     }
                 }
+                if ui::check_box(ui, "approve", "Ask before joining", dialog.approve).clicked {
+                    dialog.approve = !dialog.approve;
+                }
                 if dialog.protect {
                     labelled(ui, "Password:", |ui| {
                         let spec = field_spec(ui);
@@ -455,12 +540,36 @@ impl State {
         let offered = host.is_none() && !matches!(starting, Some(None));
         let done = ui::button(ui, "done", "Done").clicked || entered && !offered;
         ui.close();
+        if let Some(error) = &dialog.error {
+            status(ui, error);
+        }
         ui.close();
         if let Some((what, text)) = copy {
             dialog.copied = self.clipboard.set_text(text).is_ok().then_some(what);
         }
         if stop {
             self.stop_sharing(&location);
+        }
+        if let Some(host) = host {
+            if let Some(peer) = decline {
+                host.decline(&peer);
+            }
+            if approval.is_some() || allow.is_some() || remove.is_some() {
+                let replies = dialog.replies.0.clone();
+                let redraw = self.redraw.clone();
+                crate::spawn(move || {
+                    let result = if let Some(approve) = approval {
+                        host.approve(approve)
+                    } else if let Some(peer) = allow {
+                        host.allow(&peer)
+                    } else {
+                        host.remove(&remove.unwrap())
+                    };
+                    let _ = replies
+                        .send(result.map_err(|error| format!("Couldn’t change access: {error}")));
+                    redraw.wake();
+                });
+            }
         }
         if start && !(dialog.protect && dialog.password.is_empty()) {
             let password = if dialog.protect {
@@ -469,7 +578,10 @@ impl State {
                 String::new()
             };
             match Sharing::new(&password) {
-                Ok(sharing) => self.start_sharing(&dialog.library, sharing),
+                Ok(mut sharing) => {
+                    sharing.approve = dialog.approve;
+                    self.start_sharing(&dialog.library, sharing);
+                }
                 Err(error) => {
                     self.peers
                         .starting
@@ -539,7 +651,14 @@ impl State {
         });
         match &dialog.status {
             Status::Idle => {}
-            Status::Waiting => status(ui, "Connecting…"),
+            Status::Waiting => status(
+                ui,
+                if dialog.approval.load(Ordering::Acquire) {
+                    "Needs approval"
+                } else {
+                    "Connecting…"
+                },
+            ),
             Status::Failed(message) => status(ui, message),
         }
         buttons(ui);
@@ -560,8 +679,15 @@ impl State {
                     dialog.status = Status::Waiting;
                     let (replies, redraw) = (dialog.replies.0.clone(), self.redraw.clone());
                     let password = dialog.password.clone();
+                    let (alive, approval) =
+                        (Arc::clone(&dialog.alive), Arc::clone(&dialog.approval));
                     crate::spawn(move || {
-                        let reply = crate::live::join(&code, &password);
+                        let reply = crate::live::join(&code, &password, |waiting| {
+                            if approval.swap(waiting, Ordering::AcqRel) != waiting {
+                                redraw.wake_by_ref();
+                            }
+                            alive.load(Ordering::Acquire)
+                        });
                         let _ = replies.send(reply);
                         redraw.wake();
                     });

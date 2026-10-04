@@ -83,6 +83,7 @@ pub fn host(folder: &Path, cache: &Path, sharing: &Sharing, url: &str) -> Host {
         None,
         Some(url),
         || {},
+        |_| Ok(()),
     )
     .unwrap()
 }

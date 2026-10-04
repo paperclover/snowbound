@@ -90,7 +90,17 @@ fn hello() -> io::Result<Hello> {
     let picture = (picture && name == platform::user_name())
         .then(|| account_picture().clone())
         .flatten();
-    Hello::new(name, picture)
+    let mut hello = Hello::new(name, picture)?;
+    hello.device = std::env::var("COMPUTERNAME").ok().or_else(|| {
+        std::process::Command::new("hostname")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|name| name.trim().to_owned())
+            .filter(|name| !name.is_empty())
+    });
+    Ok(hello)
 }
 
 /// The relay peers off this network meet through: `SNOWBOUND_LIVE_RELAY` (`off` for none),
@@ -141,11 +151,13 @@ fn keep(file: &Path, value: &impl serde::Serialize) -> io::Result<()> {
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    io::Write::write_all(
-        &mut options.open(&partial)?,
-        &serde_json::to_vec_pretty(value)?,
-    )?;
-    notebook::fs::rename(partial, file)
+    let mut output = options.open(&partial)?;
+    io::Write::write_all(&mut output, &serde_json::to_vec_pretty(value)?)?;
+    output.sync_all()?;
+    notebook::fs::rename(partial, file)?;
+    #[cfg(unix)]
+    std::fs::File::open(folder)?.sync_all()?;
+    Ok(())
 }
 
 /// A notebook another computer shares, as this one joined it.
@@ -157,6 +169,8 @@ struct Share {
     host: String,
     /// It has been listed here, so it opens without waiting for the host.
     listed: bool,
+    #[serde(default)]
+    protocol: u16,
 }
 
 const JOINED: &str = "joined.json";
@@ -186,6 +200,11 @@ impl Joined {
             ));
         };
         let refused = |error: &dyn std::fmt::Display| (share.notebook.clone(), error.to_string());
+        if share.protocol != live::wire::VERSION {
+            return Err(refused(
+                &"Open this notebook again with the person sharing’s current link or code.",
+            ));
+        }
         let guest = hello()
             .and_then(|me| {
                 Guest::start(
@@ -241,9 +260,10 @@ impl Joined {
 pub(crate) fn join(
     code: &str,
     password: &str,
+    waiting: impl Fn(bool) -> bool,
 ) -> Result<live::wire::Welcome, live::share::Refusal> {
     let me = hello().map_err(|_| live::share::Refusal::Unreachable(live::Trouble::Other))?;
-    live::share::join(me, code, password, reach(), relay().as_deref())
+    live::share::join_while(me, code, password, reach(), relay().as_deref(), waiting)
 }
 
 /// Keeps `welcome` as the notebook this computer joined: its location.
@@ -259,6 +279,7 @@ pub(crate) fn joined(cache: &Path, welcome: live::wire::Welcome) -> io::Result<S
             notebook: welcome.notebook,
             host: welcome.host,
             listed: false,
+            protocol: live::wire::VERSION,
         },
     );
     keep(&file, &shares)?;
@@ -289,7 +310,7 @@ pub(crate) struct Peers {
     /// The notebooks this computer shares, by location.
     pub(crate) hosts: BTreeMap<String, Arc<Host>>,
     /// Shares as kept for the next launch.
-    sharing: Option<BTreeMap<String, Sharing>>,
+    sharing: Option<Arc<Mutex<BTreeMap<String, Sharing>>>>,
     /// Shares starting on threads of their own, by location.
     pub(crate) starting: HashMap<String, Option<String>>,
     started: Option<Channel<(String, Result<Host, String>)>>,
@@ -410,7 +431,9 @@ impl State {
         let sharing = self
             .peers
             .sharing
-            .get_or_insert_with(|| read_kept(&kept(&cache, HOSTING)))
+            .get_or_insert_with(|| Arc::new(Mutex::new(read_kept(&kept(&cache, HOSTING)))))
+            .lock()
+            .unwrap()
             .clone();
         let open: Vec<Arc<Library>> = self.notebooks.clone();
         for library in &open {
@@ -443,25 +466,29 @@ impl State {
         for location in closed {
             self.stop_sharing(&location);
         }
-        let now: BTreeMap<String, Sharing> = (self.peers.hosts.iter())
-            .map(|(location, host)| (location.clone(), host.sharing()))
-            .collect();
-        let before: BTreeMap<String, Sharing> = (sharing.into_iter())
-            .filter(|(location, _)| {
-                !self.peers.starting.contains_key(location)
-                    && open.iter().any(|library| library.location == *location)
+        for host in self.peers.hosts.values() {
+            host.code();
+        }
+        if self.peers.share.is_none()
+            && let Some(library) = open.iter().find(|library| {
+                self.peers
+                    .hosts
+                    .get(&library.location)
+                    .is_some_and(|host| !host.requests().is_empty())
             })
-            .collect();
-        if now != before {
-            if let Err(error) = keep(&kept(&cache, HOSTING), &now) {
-                eprintln!("Keeping what this computer shares: {error}");
-            }
-            self.peers.sharing = Some(now);
+        {
+            self.open_live_share(Arc::clone(library));
         }
     }
 
     /// Shares `library` as `sharing` says, on a thread of its own.
     pub(crate) fn start_sharing(&mut self, library: &Arc<Library>, sharing: Sharing) {
+        let file = kept(&self.cache, HOSTING);
+        let kept = Arc::clone(
+            self.peers
+                .sharing
+                .get_or_insert_with(|| Arc::new(Mutex::new(read_kept(&file)))),
+        );
         self.peers.starting.insert(library.location.clone(), None);
         let (started, _) = self.peers.started.get_or_insert_with(mpsc::channel);
         let (started, library, redraw) =
@@ -470,6 +497,7 @@ impl State {
             let host = (|| -> Result<Host, Box<dyn std::error::Error>> {
                 let storage = library.reopen()?.into_storage();
                 let told = redraw.clone();
+                let location = library.location.clone();
                 Ok(Host::start(
                     storage,
                     hello()?,
@@ -478,6 +506,14 @@ impl State {
                     reach(),
                     relay().as_deref(),
                     move || told.wake_by_ref(),
+                    move |sharing| {
+                        let mut shares = kept.lock().unwrap();
+                        let mut next = shares.clone();
+                        next.insert(location.clone(), sharing.clone());
+                        keep(&file, &next)?;
+                        *shares = next;
+                        Ok(())
+                    },
                 )?)
             })();
             let _ = started.send((
@@ -521,11 +557,12 @@ impl State {
             crate::spawn(move || host.stop());
         }
         // Kept, the share would start again on the next frame, as after a relaunch.
-        if let Some(sharing) = &mut self.peers.sharing
-            && sharing.remove(location).is_some()
-            && let Err(error) = keep(&kept(&self.cache, HOSTING), sharing)
-        {
-            eprintln!("Keeping what this computer shares: {error}");
+        if let Some(sharing) = &self.peers.sharing {
+            let mut sharing = sharing.lock().unwrap();
+            sharing.remove(location);
+            if let Err(error) = keep(&kept(&self.cache, HOSTING), &*sharing) {
+                eprintln!("Keeping what this computer shares: {error}");
+            }
         }
     }
 

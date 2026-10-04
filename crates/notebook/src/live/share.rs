@@ -1,9 +1,9 @@
 //! Live Share: a notebook one Snowbound holds, opened on others through a short code. The
 //! host serves its notebook's storage verbs (`session::Storage`) and batches guests' ops into
 //! guarded publications. A guest runs the same replica and durable queue as on an SMB share;
-//! protected sections and older peers use transactions. A guest first meets the host in the code's room, where
-//! the host welcomes it with the share's room and secret; a new share has a new secret, so
-//! stopping retires every guest. Large bodies travel a chunk at a time, each answered before
+//! protected sections use transactions. A guest first meets the host in the code's room,
+//! where approval grants a device's own access credential. Presence has a separate room
+//! whose key changes when a device is removed. Large bodies travel a chunk at a time, each answered before
 //! the next, so a relay never holds much for a slow peer.
 
 use super::{
@@ -20,7 +20,7 @@ use std::{
     io,
     path::PathBuf,
     sync::{
-        Arc, Condvar, Mutex, OnceLock,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -29,6 +29,8 @@ use std::{
 };
 
 mod batch;
+mod membership;
+pub use membership::Host;
 
 /// The most bytes one message of a read or an upload carries.
 const CHUNK: usize = 128 << 10;
@@ -77,11 +79,22 @@ pub fn code(typed: &str) -> Option<String> {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Sharing {
     pub share: [u8; 16],
-    /// The share room's secret, which every guest welcomed holds.
+    /// The presence key, rotated when a device is removed.
     pub secret: [u8; 16],
     /// The code, or its secret alone until it has a number (`super::code`).
     pub code: String,
     pub password: String,
+    #[serde(default)]
+    pub approve: bool,
+    #[serde(default)]
+    pub members: Vec<Device>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Device {
+    pub secret: [u8; 16],
+    pub name: String,
+    pub device: Option<String>,
 }
 
 impl Sharing {
@@ -95,6 +108,8 @@ impl Sharing {
             secret: random[16..].try_into().expect("16 bytes"),
             code: super::code::secret()?,
             password: password.to_owned(),
+            approve: false,
+            members: Vec::new(),
         })
     }
 }
@@ -111,7 +126,9 @@ pub enum Refusal {
     Malformed,
     /// The person sharing runs a Snowbound of another Live Share version: the newer one's
     /// `true` where it is theirs, so this one should update.
-    Version { theirs_newer: bool },
+    Version {
+        theirs_newer: bool,
+    },
     /// The code's secret or password is wrong.
     Wrong,
     /// No one shares with the code's number now.
@@ -126,6 +143,9 @@ pub enum Refusal {
     Unreachable(super::Trouble),
     /// The relay let this end in, but no one answered.
     TimedOut,
+    Declined,
+    Cancelled,
+    NotAdmitted,
 }
 
 /// Meets the host sharing `code` (and `password`) as `me`, on the networks `reach` names and
@@ -137,8 +157,22 @@ pub fn join(
     reach: Option<Reach>,
     relay: Option<&str>,
 ) -> std::result::Result<Welcome, Refusal> {
+    join_while(me, code, password, reach, relay, |_| true)
+}
+
+/// Joins while `waiting` returns true, reporting whether the host is deciding approval.
+pub fn join_while(
+    me: Hello,
+    code: &str,
+    password: &str,
+    reach: Option<Reach>,
+    relay: Option<&str>,
+    continue_joining: impl Fn(bool) -> bool,
+) -> std::result::Result<Welcome, Refusal> {
     let code = self::code(code).ok_or(Refusal::Malformed)?;
     let (welcomed, welcome) = mpsc::channel();
+    let approving = Arc::new(AtomicBool::new(false));
+    let approval = Arc::clone(&approving);
     let (changed, waiting) = mpsc::channel();
     let live = Live::start(
         me,
@@ -152,7 +186,24 @@ pub fn join(
                 ..
             } => {
                 if let Ok(body) = minicbor::decode::<Welcome>(body) {
-                    let _ = welcomed.send(body);
+                    let _ = welcomed.send(Ok(body));
+                }
+            }
+            Event::Frame {
+                kind: kind::APPROVAL,
+                body,
+                ..
+            } => {
+                if let Ok(body) = minicbor::decode::<wire::Approval>(body) {
+                    match body {
+                        wire::Approval::Pending => approval.store(true, Ordering::Release),
+                        wire::Approval::Declined => {
+                            let _ = welcomed.send(Err(Refusal::Declined));
+                        }
+                        wire::Approval::Failed => {
+                            let _ = welcomed.send(Err(Refusal::NotAdmitted));
+                        }
+                    }
                 }
             }
             _ => {
@@ -163,8 +214,11 @@ pub fn join(
     .map_err(|_| Refusal::Unreachable(super::Trouble::Other))?;
     let start = Instant::now();
     loop {
+        if !continue_joining(approving.load(Ordering::Acquire)) {
+            return Err(Refusal::Cancelled);
+        }
         if let Ok(welcome) = welcome.try_recv() {
-            return Ok(welcome);
+            return welcome;
         }
         if let Some(version) = live.other_version() {
             return Err(Refusal::Version {
@@ -192,197 +246,19 @@ pub fn join(
             Relayed::Unknown if relay.is_none() && waited > Duration::from_secs(10) => {
                 return Err(Refusal::NoOne);
             }
-            _ if waited > Duration::from_secs(20) => return Err(Refusal::TimedOut),
+            _ if waited
+                > Duration::from_secs(if approving.load(Ordering::Acquire) {
+                    300
+                } else {
+                    20
+                }) =>
+            {
+                return Err(Refusal::TimedOut);
+            }
             _ => {}
         }
         let _ = waiting.recv_timeout(Duration::from_millis(100));
     }
-}
-
-/// A notebook shared while it lives: the share's room, serving the notebook's storage to the
-/// guests in it, and the code's room, welcoming whoever knows the code.
-pub struct Host {
-    me: Hello,
-    notebook: String,
-    reach: Option<Reach>,
-    relay: Option<String>,
-    sharing: Mutex<Sharing>,
-    /// The share's room and the code's, until it stops.
-    room: Mutex<Option<Live>>,
-    pairing: Mutex<Option<Live>>,
-    served: Arc<Served>,
-    events: Arc<dyn Fn() + Send + Sync>,
-}
-
-impl Host {
-    /// Shares `storage`, the notebook named `notebook`, as `sharing` says, as `me`, where
-    /// `reach` and `relay` say. `events` runs on a network thread whenever the guests or the
-    /// code change. What guests change reaches the host as its own watch on the notebook's
-    /// folder reports it, and reaches the other guests at once.
-    pub fn start(
-        storage: Box<dyn Storage>,
-        me: Hello,
-        sharing: Sharing,
-        notebook: &str,
-        reach: Option<Reach>,
-        relay: Option<&str>,
-        events: impl Fn() + Send + Sync + 'static,
-    ) -> io::Result<Self> {
-        let events: Arc<dyn Fn() + Send + Sync> = Arc::new(events);
-        let served = Arc::new(Served {
-            storage,
-            images: Mutex::default(),
-            snapshots: Mutex::default(),
-            puts: Mutex::default(),
-            guests: Mutex::default(),
-            writers: Mutex::default(),
-            host: Mutex::default(),
-            room: OnceLock::new(),
-        });
-        let serving = Hello {
-            serves: Some(sharing.share),
-            ..me.clone()
-        };
-        let (heard, told) = (Arc::clone(&served), Arc::clone(&events));
-        let room = Live::start(
-            serving,
-            &Room::Notebook(sharing.secret),
-            reach,
-            relay,
-            move |event| match event {
-                Event::Met(hello, line) => heard.admit(hello.peer, line),
-                Event::Left(hello) => heard.forget(&hello.peer),
-                Event::Frame {
-                    from, kind, body, ..
-                } if wire::KNOWN.contains(&kind) && kind > 256 && kind != kind::REPLY => {
-                    heard.queue(&from.peer, kind, body);
-                }
-                Event::Changed => told(),
-                _ => {}
-            },
-        )?;
-        let _ = served.room.set(room.sender());
-        let host = Self {
-            notebook: notebook.to_owned(),
-            reach,
-            relay: relay.map(str::to_owned),
-            pairing: Mutex::new(Some(pair(&me, &sharing, notebook, reach, relay, &events)?)),
-            me,
-            sharing: Mutex::new(sharing),
-            room: Mutex::new(Some(room)),
-            served,
-            events,
-        };
-        Ok(host)
-    }
-
-    /// The code guests type, once it has its number, and none once stopped. A code with too
-    /// many wrong tries is replaced by one with a new secret.
-    pub fn code(&self) -> Option<String> {
-        let mut pairing = self.pairing.lock().unwrap();
-        let pairing = pairing.as_mut()?;
-        if pairing.burned() {
-            let mut sharing = self.sharing.lock().unwrap();
-            sharing.code = super::code::secret().ok()?;
-            let relay = self.relay.as_deref();
-            *pairing = pair(
-                &self.me,
-                &sharing,
-                &self.notebook,
-                self.reach,
-                relay,
-                &self.events,
-            )
-            .ok()?;
-        }
-        let code = pairing.code();
-        if let Some(code) = &code {
-            self.sharing.lock().unwrap().code = code.clone();
-        }
-        code
-    }
-
-    /// The share as it stands, to take up again after a relaunch.
-    pub fn sharing(&self) -> Sharing {
-        self.code();
-        self.sharing.lock().unwrap().clone()
-    }
-
-    /// How the relay last answered the code's room.
-    pub fn relayed(&self) -> Relayed {
-        let pairing = self.pairing.lock().unwrap();
-        pairing.as_ref().map_or(Relayed::Unknown, Live::relayed)
-    }
-
-    /// The peers in the share's room.
-    pub fn guests(&self) -> Vec<Peer> {
-        let room = self.room.lock().unwrap();
-        room.as_ref().map(Live::peers).unwrap_or_default()
-    }
-
-    pub fn set_presence(&self, presence: Presence) {
-        if let Some(room) = &*self.room.lock().unwrap() {
-            room.set_presence(presence);
-        }
-    }
-
-    /// Has `listener` hear the catalog paths guests change from now on, sooner than a watch
-    /// on the notebook's folder would.
-    pub fn on_changed(&self, listener: crate::session::Listener) {
-        *self.served.host.lock().unwrap() = Some(listener);
-    }
-
-    /// Tells every guest the files at these catalog paths changed, with what changed in the
-    /// sections a guest read lately.
-    pub fn touched(&self, paths: &[String]) {
-        for path in paths {
-            self.served.changed_here(path);
-        }
-        self.served.tell(paths);
-    }
-
-    /// Stops sharing: no one new is welcomed, and every guest hears so and is let go.
-    pub fn stop(&self) {
-        drop(self.pairing.lock().unwrap().take());
-        let room = self.room.lock().unwrap().take();
-        if let Some(room) = room {
-            room.leave(STOPPED);
-        }
-    }
-}
-
-/// The code's room, welcoming whoever knows the code to the share.
-fn pair(
-    me: &Hello,
-    sharing: &Sharing,
-    notebook: &str,
-    reach: Option<Reach>,
-    relay: Option<&str>,
-    events: &Arc<dyn Fn() + Send + Sync>,
-) -> io::Result<Live> {
-    let welcome = Welcome {
-        share: sharing.share,
-        secret: sharing.secret,
-        notebook: notebook.to_owned(),
-        host: me.name.clone(),
-    };
-    let told = Arc::clone(events);
-    Live::start(
-        Hello {
-            serves: None,
-            ..me.clone()
-        },
-        &Room::share(&sharing.code, &sharing.password),
-        reach,
-        relay,
-        move |event| match event {
-            Event::Met(_, line) => {
-                let _ = line.send(kind::WELCOME, &welcome);
-            }
-            Event::Changed => told(),
-            _ => {}
-        },
-    )
 }
 
 /// A host's side of its guests' storage requests.
@@ -399,7 +275,7 @@ struct Served {
     /// Hears the paths guests changed, as the host's own notebook should.
     host: Mutex<Option<crate::session::Listener>>,
     /// The share's room, to tell guests what changed.
-    room: OnceLock<Sender>,
+    room: Mutex<Option<Sender>>,
 }
 
 /// A guest as its host serves it: the line to it, its requests waiting for its workers, how
@@ -515,7 +391,7 @@ impl Served {
                 .map(|path| self.storage.stamp(path).ok().map(|stamp| digest(&stamp)))
                 .collect(),
         };
-        if let Some(room) = self.room.get() {
+        if let Some(room) = self.room.lock().unwrap().as_ref() {
             room.send(kind::TOUCHED, &touched, None);
         }
     }
@@ -538,6 +414,15 @@ impl Served {
             }
         };
         let id = request.id;
+        if !self.guests.lock().unwrap().contains_key(peer) {
+            return failed(
+                id,
+                refused(
+                    io::ErrorKind::PermissionDenied,
+                    "The device is no longer connected",
+                ),
+            );
+        }
         match self.answer(peer, kind, request) {
             Ok(reply) => Reply { id, ..reply },
             Err(error) => failed(id, error),
@@ -864,7 +749,7 @@ impl Served {
             })
             .collect();
         drop(guests);
-        if let (Some(room), false) = (self.room.get(), holding.is_empty()) {
+        if let (Some(room), false) = (self.room.lock().unwrap().as_ref(), holding.is_empty()) {
             room.send(kind::DELTA, &delta, Some(&holding));
         }
     }
@@ -1070,6 +955,12 @@ pub struct Guest {
 
 struct Inner {
     share: [u8; 16],
+    me: Hello,
+    reach: Option<Reach>,
+    relay: Option<String>,
+    events: Arc<dyn Fn() + Send + Sync>,
+    presence: Mutex<Option<([u8; 16], Live)>>,
+    here: Mutex<Presence>,
     /// The host and the line to it, while connected.
     host: Mutex<Option<(Arc<Hello>, Line)>>,
     pending: Mutex<HashMap<u64, mpsc::Sender<Reply>>>,
@@ -1077,7 +968,7 @@ struct Inner {
     /// Where the host's reports of changed files go, while a background watches.
     watch: Mutex<Option<Reports>>,
     /// The host stopped sharing.
-    stopped: AtomicBool,
+    ended: Mutex<Option<Ended>>,
     /// Bytes of chunks asked for and not yet given.
     asked: (Mutex<usize>, Condvar),
     /// The sections read lately, kept as the host's deltas change them, newest first.
@@ -1085,6 +976,11 @@ struct Inner {
     /// The stamps of sections whose image held is the host's now, as its last report of
     /// them said.
     current: Mutex<HashMap<String, Stamp>>,
+}
+
+enum Ended {
+    Stopped,
+    Removed,
 }
 
 impl Guest {
@@ -1100,11 +996,17 @@ impl Guest {
     ) -> io::Result<Arc<Self>> {
         let inner = Arc::new(Inner {
             share,
+            me: me.clone(),
+            reach,
+            relay: relay.map(str::to_owned),
+            events: Arc::new(events),
+            presence: Mutex::default(),
+            here: Mutex::default(),
             host: Mutex::default(),
             pending: Mutex::default(),
             next: AtomicU64::new(1),
             watch: Mutex::default(),
-            stopped: AtomicBool::new(false),
+            ended: Mutex::default(),
             asked: Default::default(),
             images: Mutex::default(),
             current: Mutex::default(),
@@ -1112,7 +1014,7 @@ impl Guest {
         let heard = Arc::clone(&inner);
         let live = Live::start(me, &Room::Notebook(secret), reach, relay, move |event| {
             heard.heard(event);
-            events();
+            (heard.events)();
         })?;
         Ok(Arc::new(Self { live, inner }))
     }
@@ -1130,16 +1032,25 @@ impl Guest {
 
     /// Whether the host said it stopped sharing.
     pub fn stopped(&self) -> bool {
-        self.inner.stopped.load(Ordering::Acquire)
+        self.inner.ended.lock().unwrap().is_some()
     }
 
     /// Everyone in the share's room: the host and the other guests.
     pub fn peers(&self) -> Vec<Peer> {
-        self.live.peers()
+        self.inner
+            .presence
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|(_, live)| live.peers())
+            .unwrap_or_default()
     }
 
     pub fn set_presence(&self, presence: Presence) {
-        self.live.set_presence(presence);
+        *self.inner.here.lock().unwrap() = presence.clone();
+        if let Some((_, live)) = &*self.inner.presence.lock().unwrap() {
+            live.set_presence(presence);
+        }
     }
 
     /// Sends the host's reports of changed files to `reports` while it stays connected.
@@ -1152,10 +1063,15 @@ impl Guest {
     }
 
     fn offline(&self) -> io::Error {
-        let message = if self.stopped() {
-            "The host stopped sharing this notebook"
-        } else {
-            "The computer sharing this notebook can’t be reached"
+        if let Some(version) = self.live.other_version() {
+            return io::Error::new(io::ErrorKind::NotConnected, wire::Version(version));
+        }
+        let message = match &*self.inner.ended.lock().unwrap() {
+            Some(Ended::Stopped) => "The host stopped sharing this notebook",
+            Some(Ended::Removed) => {
+                "This device was removed. Ask the person sharing for a new link or code."
+            }
+            None => "The computer sharing this notebook can’t be reached",
         };
         io::Error::new(io::ErrorKind::NotConnected, message)
     }
@@ -1420,14 +1336,23 @@ impl Inner {
         }
     }
 
-    fn heard(&self, event: Event) {
-        let serves = |hello: &Hello| hello.serves == Some(self.share);
+    fn heard(self: &Arc<Self>, event: Event) {
+        let serves = |hello: &Hello| {
+            hello.serves == Some(self.share)
+                || self
+                    .host
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|(host, _)| host.peer == hello.peer)
+        };
         match event {
             Event::Met(hello, line) if serves(hello) => {
                 *self.host.lock().unwrap() = Some((Arc::clone(hello), line.clone()));
             }
             Event::Left(hello) if serves(hello) => {
                 *self.host.lock().unwrap() = None;
+                drop(self.presence.lock().unwrap().take());
                 self.current.lock().unwrap().clear();
                 // Each request waiting hears its answer was lost.
                 self.pending.lock().unwrap().clear();
@@ -1438,6 +1363,11 @@ impl Inner {
             Event::Frame {
                 from, kind, body, ..
             } => match kind {
+                kind::WELCOME if serves(from) => {
+                    if let Ok(welcome) = minicbor::decode::<Welcome>(body) {
+                        self.join_presence(welcome.room);
+                    }
+                }
                 kind::REPLY if serves(from) => {
                     if let Ok(reply) = minicbor::decode::<Reply>(body)
                         && let Some(waiting) = self.pending.lock().unwrap().remove(&reply.id)
@@ -1458,16 +1388,57 @@ impl Inner {
                         }
                     }
                 }
-                kind::BYE
-                    if serves(from)
-                        && minicbor::decode::<wire::Bye>(body)
-                            .is_ok_and(|bye| bye.reason == STOPPED) =>
-                {
-                    self.stopped.store(true, Ordering::Release);
+                kind::BYE if serves(from) => {
+                    if let Ok(bye) = minicbor::decode::<wire::Bye>(body) {
+                        let ended = match bye.reason.as_str() {
+                            STOPPED => Some(Ended::Stopped),
+                            "removed" => Some(Ended::Removed),
+                            _ => None,
+                        };
+                        if ended.is_some() {
+                            *self.ended.lock().unwrap() = ended;
+                        }
+                    }
                 }
                 _ => {}
             },
             _ => {}
+        }
+    }
+
+    fn join_presence(self: &Arc<Self>, secret: [u8; 16]) {
+        let mut presence = self.presence.lock().unwrap();
+        if presence.as_ref().is_some_and(|(held, _)| *held == secret) {
+            return;
+        }
+        let inner = Arc::downgrade(self);
+        let live = Live::start(
+            self.me.clone(),
+            &Room::Notebook(secret),
+            self.reach,
+            self.relay.as_deref(),
+            move |event| {
+                if let Some(inner) = inner.upgrade() {
+                    if matches!(event, Event::Frame { .. }) {
+                        inner.heard(event);
+                    }
+                    (inner.events)();
+                }
+            },
+        );
+        match live {
+            Ok(live) => {
+                live.set_presence(self.here.lock().unwrap().clone());
+                *presence = Some((secret, live));
+                let mut current = self.current.lock().unwrap();
+                let paths: Vec<String> = current.keys().cloned().collect();
+                current.clear();
+                drop(current);
+                if let Some(reports) = &*self.watch.lock().unwrap() {
+                    reports.touched(&paths);
+                }
+            }
+            Err(error) => eprintln!("Live Share: could not join presence: {error}"),
         }
     }
 }

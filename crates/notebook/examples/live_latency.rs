@@ -160,6 +160,7 @@ fn main() {
         reach,
         relay,
         || {},
+        |_| Ok(()),
     )
     .unwrap();
     until("no code", || {

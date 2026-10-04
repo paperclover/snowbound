@@ -70,6 +70,7 @@ fn a_guest_queues_while_the_host_is_away() {
     let image = std::fs::read(&file).unwrap();
 
     // Ada's computer goes to sleep.
+    let sharing = host.sharing();
     drop(host);
     until("the host never left", || guest.host().is_none());
     let id = replace(&section, &image, 0..8, "Offline");
@@ -110,6 +111,7 @@ fn two_guests_on_one_page_conflict_as_on_a_share() {
     let file = folder.join("Garden.one");
     let image = std::fs::read(&file).unwrap();
 
+    let sharing = host.sharing();
     drop(host);
     until("the host never left", || {
         grace.host().is_none() && alan.host().is_none()

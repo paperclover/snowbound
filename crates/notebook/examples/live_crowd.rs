@@ -133,6 +133,7 @@ fn host(url: &str, paragraphs: usize) {
         None,
         Some(url),
         || {},
+        |_| Ok(()),
     )
     .unwrap();
     until("no code", Duration::from_secs(30), || {

@@ -148,6 +148,12 @@ impl Served {
         image: &[u8],
         batch: &Waiting,
     ) -> Result<Option<Transaction>> {
+        if !self.guests.lock().unwrap().contains_key(&batch.peer) {
+            return Err(refused(
+                io::ErrorKind::PermissionDenied,
+                "The device is no longer connected",
+            ));
+        }
         let stamp: Stamp = batch
             .request
             .stamp

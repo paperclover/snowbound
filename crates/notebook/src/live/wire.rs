@@ -1,7 +1,6 @@
 //! What peers say to each other: an opening in the clear that meets through the secret both
 //! hold (SPAKE2), then frames sealed under the keys it agreed, each a message kind and a CBOR
-//! map. A later version adds kinds and fields; a reader skips the kinds and fields it doesn't
-//! know, so every version speaks to every other.
+//! map. Readers skip unknown kinds and fields within the same opening version.
 
 use aes_gcm::{Aes256Gcm, KeyInit, aead::Aead};
 use hmac::{Hmac, Mac};
@@ -10,8 +9,8 @@ use sha2::Sha256;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use std::io::{self, Read, Write};
 
-/// The opening's version. Frames after it never change shape; they grow by kinds and fields.
-pub const VERSION: u16 = 2;
+/// The opening's version; peers must agree on its authentication and access rules.
+pub const VERSION: u16 = 3;
 
 /// The version of the opening a peer of another version sent, as `open` fails with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +44,7 @@ pub mod kind {
     /// A section's bytes as a commit changed them: `Delta`.
     pub const DELTA: u16 = 19;
     pub const WELCOME: u16 = 32;
+    pub const APPROVAL: u16 = 33;
     /// Storage requests to a host, each a `Request` answered by a `Reply`.
     pub const LIST: u16 = 257;
     pub const STAMP: u16 = 258;
@@ -79,6 +79,7 @@ pub const KNOWN: &[u16] = &[
     kind::TOUCHED,
     kind::DELTA,
     kind::WELCOME,
+    kind::APPROVAL,
     kind::LIST,
     kind::STAMP,
     kind::READ,
@@ -122,6 +123,8 @@ pub struct Hello {
     pub serves: Option<[u8; 16]>,
     #[n(6)]
     pub ops: Option<u16>,
+    #[n(7)]
+    pub device: Option<String>,
 }
 
 impl Hello {
@@ -137,6 +140,7 @@ impl Hello {
             kinds: KNOWN.to_vec(),
             serves: None,
             ops: Some(1),
+            device: None,
         })
     }
 }
@@ -211,8 +215,7 @@ pub struct Bye {
     pub reason: String,
 }
 
-/// What the host of a share gives a peer that knew its code: the share's room, and names to
-/// show it by.
+/// A device's access credential, the current presence room, and the notebook's names.
 #[derive(Clone, Debug, PartialEq, Encode, Decode)]
 #[cbor(map)]
 pub struct Welcome {
@@ -225,6 +228,19 @@ pub struct Welcome {
     /// The host's name for itself, as `Hello::name`.
     #[n(3)]
     pub host: String,
+    #[cbor(n(4), with = "minicbor::bytes")]
+    pub room: [u8; 16],
+}
+
+#[derive(Clone, Debug, Encode, Decode)]
+#[cbor(index_only)]
+pub enum Approval {
+    #[n(0)]
+    Pending,
+    #[n(1)]
+    Declined,
+    #[n(2)]
+    Failed,
 }
 
 /// Paths a host's files changed at, by catalog path; `""` is the notebook's folder.
