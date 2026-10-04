@@ -4855,9 +4855,10 @@ impl CanvasEditor {
             };
             let outline = self.outlines.remove(index);
             self.record(Ok(vec![PageOp::Delete { object: outline.id }]));
-            debug_assert_eq!(change.edit.range, 0..1);
             let mut source = outline.snapshot();
-            source.paragraphs = change.edit.replacement;
+            source
+                .paragraphs
+                .splice(change.edit.range, change.edit.replacement);
             self.undo.push(History::Restore {
                 index,
                 source: Box::new(source),
@@ -6494,6 +6495,33 @@ mod tests {
                 Err(EditorError::Edit(EditError::InvalidStructure))
             ));
         }
+    }
+
+    #[test]
+    fn cutting_the_only_picture_restores_its_empty_text_paragraph_on_undo() {
+        let mut engine = TextEngine::default();
+        let document =
+            TextDocument::new(vec![Paragraph::new(String::new(), Format::default())]).unwrap();
+        let mut editor = CanvasEditor::new(&mut engine, document, 240.0).unwrap();
+        editor
+            .create_outline(&mut engine, [36.0, 36.0], 240.0)
+            .unwrap();
+        let image = picture(
+            include_bytes!("../../../corpus/object-tags/native/notebook/photo.png").to_vec(),
+            [40.0, 30.0],
+        )
+        .unwrap();
+        let id = image.id;
+        editor.insert_picture(&mut engine, image).unwrap();
+        editor.remove_image(&mut engine, id).unwrap();
+        assert!(editor.active_outline().is_empty());
+        assert!(editor.undo(&mut engine).unwrap());
+        assert!(editor.image_placement(id).is_some());
+        assert_eq!(editor.active_outline().document.nodes().len(), 2);
+        assert!(editor.redo(&mut engine).unwrap());
+        assert!(editor.active_outline().is_empty());
+        assert!(editor.undo(&mut engine).unwrap());
+        assert!(editor.image_placement(id).is_some());
     }
 
     #[test]
