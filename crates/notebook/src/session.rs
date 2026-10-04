@@ -2390,9 +2390,8 @@ impl Section {
         &self.replica
     }
 
-    /// Waits for the in-flight operation and callback before releasing the replica.
-    /// Dropping instead requests cancellation without waiting; the worker retains
-    /// cache ownership until that operation finishes. Remote calls must be bounded.
+    /// Stops future sync steps; native threads finish the current operation before returning.
+    /// The worker retains cache ownership until its in-flight operation finishes.
     pub fn close(mut self) -> Result<()> {
         match self.worker.take() {
             Some(worker) => worker.stop(),

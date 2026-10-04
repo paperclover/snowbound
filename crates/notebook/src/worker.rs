@@ -79,7 +79,7 @@ impl Signal {
 }
 
 /// Owns automatic reconciliation. Dropping requests cancellation without blocking.
-/// The in-flight sync step finishes before ownership is released; `stop` waits for it.
+/// The in-flight sync step retains cache ownership until it finishes.
 pub struct SyncWorker {
     signal: Arc<Signal>,
     thread: Option<JoinHandle<Result<()>>>,
@@ -116,14 +116,13 @@ impl SyncWorker {
         self.signal.wake();
     }
 
-    /// Cancels future steps and waits for the current step and callback to finish.
+    /// Cancels future steps; native threads finish the current step and callback before returning.
     /// A stopped worker leaves pending edits and uncertain attempts in the cache.
     /// Call outside the worker's own callback, which cannot join its calling thread.
     pub fn stop(mut self) -> Result<()> {
         self.signal.stopped.store(true, Ordering::Release);
         self.signal.wake();
         let thread = self.thread.take().expect("Worker owns its thread");
-        // In the browser no step is in flight outside the worker's own callback.
         #[cfg(target_arch = "wasm32")]
         return thread.finished().unwrap_or(Ok(()));
         #[cfg(not(target_arch = "wasm32"))]

@@ -508,13 +508,11 @@ impl Background {
         self.0.signal.wake();
     }
 
-    /// Stops for good, waiting for the step in flight, so that no replica stays open and no
-    /// watch holds the notebook's folder.
+    /// Stops future checks; native threads finish the current step before returning.
     pub fn stop(&self) {
         self.0.signal.stopped.store(true, Ordering::Release);
         self.0.signal.wake();
         let thread = self.1.lock().ok().and_then(|mut thread| thread.take());
-        // In the browser no step is in flight while another task runs.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(thread) = thread {
             let _ = thread.join();
