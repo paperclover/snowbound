@@ -28,27 +28,7 @@ const MOST: usize = 4 << 20;
 /// Set once WebSockets were refused, so later connections go straight to polling.
 static POLLING: AtomicBool = AtomicBool::new(false);
 
-/// Why a relay could not be reached, as a person can act on it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Trouble {
-    /// The relay's name, or the proxy's, didn't resolve.
-    Dns,
-    /// Nothing answered at the relay's address: a firewall, or the relay is down.
-    Unreachable,
-    TimedOut,
-    /// The proxy itself couldn't be reached.
-    ProxyUnreachable,
-    /// The proxy asks for a name and password (407).
-    ProxyAuthentication,
-    /// The proxy refused to connect to the relay, with this status.
-    ProxyRefused(u16),
-    /// The relay's certificate wasn't one the system trusts: something on the way presents its
-    /// own.
-    Certificate,
-    /// Something on the way refused both WebSockets and plain requests to the relay.
-    Blocked,
-    Other,
-}
+pub use super::model::Trouble;
 
 pub(super) enum Failure {
     Trouble(Trouble, io::Error),

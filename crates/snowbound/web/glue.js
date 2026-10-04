@@ -23,6 +23,7 @@ function storageWorker() {
   const handles = new Map();
   let root;
   let queue = Promise.resolve();
+  const pending = [];
 
   const names = (path) => path.split("/").filter(Boolean);
   const folder = async (parts) => {
@@ -47,7 +48,14 @@ function storageWorker() {
   };
   const write = async (path, length, ranges) => {
     const open = await handle(path);
-    for (const [offset, bytes] of ranges) open.write(bytes, { at: offset });
+    for (const [offset, bytes] of ranges) {
+      let written = 0;
+      while (written < bytes.length) {
+        const count = open.write(bytes.subarray(written), { at: offset + written });
+        if (!count) throw new Error("Browser storage could not finish writing");
+        written += count;
+      }
+    }
     open.truncate(length);
     open.flush();
   };
@@ -103,25 +111,34 @@ function storageWorker() {
     });
   };
 
+  const flush = async () => {
+    while (pending.length) {
+      for (const [path, length, ranges] of pending[0])
+        if (length === undefined) await remove(path);
+        else if (length === null) await folder(names(path));
+        else await write(path, length, ranges);
+      pending.shift();
+    }
+  };
+
   onmessage = ({ data }) => {
-    queue = queue
-      .then(async () => {
+    queue = queue.then(async () => {
+      try {
         if (data.kind === "load") {
           root = await navigator.storage.getDirectory();
           let files = await list(root, "", []);
-          if (!files.length) {
-            await migrate();
-            files = await list(root, "", []);
-          }
-          postMessage(files, files.flatMap(([, bytes]) => (bytes ? [bytes.buffer] : [])));
-        } else if (data.kind === "settle") postMessage(null);
-        else
-          for (const [path, length, ranges] of data.changes)
-            if (length === undefined) await remove(path);
-            else if (length === null) await folder(names(path));
-            else await write(path, length, ranges);
-      })
-      .catch((error) => console.error("Keeping files", error));
+          if (!files.length) { await migrate(); files = await list(root, "", []); }
+          postMessage(files, files.flatMap(([, bytes]) => bytes ? [bytes.buffer] : []));
+        } else {
+          if (data.kind === "store") pending.push(data.changes);
+          await flush();
+          if (data.kind === "settle") postMessage({ error: null });
+        }
+      } catch (error) {
+        if (data.kind === "settle" || data.kind === "load") postMessage({ error: String(error) });
+        else console.error("Keeping files", error);
+      }
+    });
   };
 }
 
@@ -132,15 +149,25 @@ export function loadFiles() {
   storage.postMessage({ kind: "load" });
   return new Promise((resolve, reject) => {
     storage.onmessage = ({ data }) => {
-      storage.onmessage = () => settling.shift()?.();
-      resolve(data);
+      storage.onmessage = ({ data }) => {
+        const waiting = settling.shift();
+        if (data.error) waiting?.reject(new Error(data.error));
+        else waiting?.resolve();
+      };
+      if (data.error) reject(new Error(data.error));
+      else resolve(data);
     };
-    storage.onerror = (error) => reject(new Error(`The storage worker failed: ${error.message}`));
+    storage.onerror = (event) => {
+      storageError = new Error(`The storage worker failed: ${event.message}`);
+      reject(storageError);
+      for (const waiting of settling.splice(0)) waiting.reject(storageError);
+    };
   });
 }
 
 // Callers waiting for the storage worker to finish what it was given.
 const settling = [];
+let storageError;
 
 /** Writes `[path]` (removed), `[path, null]` (a folder) and `[path, length, ranges]` entries;
  * those under a folder of the user's go there, a committed section only where nothing else
@@ -322,8 +349,9 @@ export function fetchDictionary(name) {
 
 /** Resolves once every file handed over so far is written. */
 function settled() {
-  const kept = new Promise((resolve) => {
-    settling.push(resolve);
+  if (storageError) return Promise.reject(storageError);
+  const kept = new Promise((resolve, reject) => {
+    settling.push({ resolve, reject });
     storage.postMessage({ kind: "settle" });
   });
   return Promise.all([kept, writing]);
@@ -597,6 +625,7 @@ export function adoptCanvas(fresh) {
 /** Wires the page's canvas, text area and file input to `module`'s exports. */
 export function attach(module) {
   wasm = module;
+  globalThis.snowboundFlushStorage = () => { wasm.flush(); return settled(); };
   canvas = document.getElementById("page");
   input = document.getElementById("input");
   picker = document.getElementById("files");

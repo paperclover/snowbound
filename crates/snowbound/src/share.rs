@@ -6,7 +6,6 @@ use accesskit::Role;
 use notebook::live::{
     Relayed, Trouble,
     share::{self, Refusal, Sharing},
-    wire::Welcome,
 };
 use std::sync::{
     Arc,
@@ -59,7 +58,7 @@ pub(crate) struct JoinDialog {
     code: String,
     password: String,
     status: Status,
-    replies: crate::live::Channel<Result<Welcome, Refusal>>,
+    replies: crate::live::Channel<Result<String, String>>,
     alive: Arc<AtomicBool>,
     approval: Arc<AtomicBool>,
 }
@@ -607,21 +606,14 @@ impl State {
         let mut welcomed = None;
         for reply in dialog.replies.1.try_iter() {
             match reply {
-                Ok(welcome) => welcomed = Some(welcome),
-                Err(refused) => dialog.status = Status::Failed(refusal(&refused)),
+                Ok(location) => welcomed = Some(location),
+                Err(message) => dialog.status = Status::Failed(message),
             }
         }
-        if let Some(welcome) = welcomed {
-            match crate::live::joined(&self.cache, welcome) {
-                Ok(location) => {
-                    self.ui.close_popup(join_id());
-                    self.open_notebook(location, None);
-                    return;
-                }
-                Err(error) => {
-                    dialog.status = Status::Failed(format!("Couldn’t keep the code: {error}"));
-                }
-            }
+        if let Some(location) = welcomed {
+            self.ui.close_popup(join_id());
+            self.open_notebook(location, None);
+            return;
         }
         let ui = &mut self.ui;
         let owners = [join_id(), code_field(), join_password()];
@@ -679,15 +671,27 @@ impl State {
                     dialog.status = Status::Waiting;
                     let (replies, redraw) = (dialog.replies.0.clone(), self.redraw.clone());
                     let password = dialog.password.clone();
+                    let cache = self.cache.clone();
                     let (alive, approval) =
                         (Arc::clone(&dialog.alive), Arc::clone(&dialog.approval));
-                    crate::spawn(move || {
+                    crate::spawn_async(move || async move {
                         let reply = crate::live::join(&code, &password, |waiting| {
                             if approval.swap(waiting, Ordering::AcqRel) != waiting {
                                 redraw.wake_by_ref();
                             }
                             alive.load(Ordering::Acquire)
-                        });
+                        })
+                        .await;
+                        approval.store(false, Ordering::Release);
+                        redraw.wake_by_ref();
+                        let reply = match reply {
+                            Ok(welcome) => {
+                                crate::live::joined(&cache, welcome).await.map_err(|error| {
+                                    format!("Couldn’t open the shared notebook: {error}")
+                                })
+                            }
+                            Err(error) => Err(refusal(&error)),
+                        };
                         let _ = replies.send(reply);
                         redraw.wake();
                     });

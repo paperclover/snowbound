@@ -5,6 +5,7 @@
 pub mod discover;
 pub mod fs;
 #[cfg(feature = "live")]
+#[cfg_attr(target_arch = "wasm32", path = "live/web.rs")]
 pub mod live;
 #[cfg(feature = "smb")]
 pub mod smb;

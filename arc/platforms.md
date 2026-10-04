@@ -185,6 +185,10 @@ keyboard, the toolbar and the macOS menu bar all run commands from it.
   `/Cache`. A storage worker keeps them in the origin's private file system, writing the
   byte ranges each burst changed through OPFS's synchronous handles, which only workers get.
   One tab at a time holds them.
+- Live Share joins desktop hosts through sealed WebSockets. Approval, device removal,
+  presence and edits use the desktop protocol; replicas await remote operations and an
+  ordered OPFS flush before publishing or returning a durable receipt. Hosting and section
+  organization stay on desktop.
 - Open Notebook, where the browser has the File System Access API (Chromium), opens a folder
   of the user's: mirrored under `/Folders`, its handle kept in IndexedDB, other apps' writes
   read every few seconds. A browser takes no locks, so a commit there stands only once the

@@ -32,6 +32,32 @@ struct Data {
 const RANGES: usize = 64;
 
 impl Data {
+    fn flush(&mut self) {
+        if let Some(path) = self.path.clone() {
+            with(|files| {
+                if files.changed.remove(&path) {
+                    files.durable.push((path, self.change()));
+                }
+            });
+        }
+    }
+
+    fn change(&mut self) -> Change {
+        let length = self.bytes.len();
+        let ranges = self
+            .unwritten
+            .replace(Vec::new())
+            .unwrap_or_else(|| std::iter::once(0..length).collect());
+        Change::File {
+            length: length as u64,
+            ranges: ranges
+                .into_iter()
+                .map(|range| range.start.min(length)..range.end.min(length))
+                .filter(|range| !range.is_empty())
+                .map(|range| (range.start as u64, self.bytes[range].to_vec()))
+                .collect(),
+        }
+    }
     fn new(
         bytes: Vec<u8>,
         modified: f64,
@@ -79,6 +105,8 @@ struct Files {
     nodes: BTreeMap<PathBuf, Node>,
     /// Paths written, made or removed since the host last asked.
     changed: BTreeSet<PathBuf>,
+    /// Flushes and removals in order, including SQLite's WAL before its database checkpoint.
+    durable: Vec<(PathBuf, Change)>,
     /// Folders the host mirrors from elsewhere (`mount`).
     mounts: BTreeSet<PathBuf>,
     /// Images committed under a mount, waiting for the host to write them (`committed`).
@@ -164,39 +192,24 @@ pub enum Change {
 
 /// Whether any path changed since `changes` was last called.
 pub fn changed() -> bool {
-    FILES.with_borrow(|files| !files.changed.is_empty() || !files.committed.is_empty())
+    FILES.with_borrow(|files| {
+        !files.durable.is_empty() || !files.changed.is_empty() || !files.committed.is_empty()
+    })
 }
 
-/// The paths changed since the last call, each with how; a folder before what it holds.
+/// Ordered file flushes, followed by changes not yet flushed.
 pub fn changes() -> Vec<(PathBuf, Change)> {
     FILES.with_borrow_mut(|files| {
-        std::mem::take(&mut files.changed)
-            .into_iter()
-            .map(|path| {
-                let change = match files.nodes.get(&path) {
-                    None => Change::Removed,
-                    Some(Node::Directory) => Change::Directory,
-                    Some(Node::File(data)) => {
-                        let mut data = data.borrow_mut();
-                        let length = data.bytes.len();
-                        let ranges = data
-                            .unwritten
-                            .replace(Vec::new())
-                            .unwrap_or_else(|| std::iter::once(0..length).collect());
-                        Change::File {
-                            length: length as u64,
-                            ranges: ranges
-                                .into_iter()
-                                .map(|range| range.start.min(length)..range.end.min(length))
-                                .filter(|range| !range.is_empty())
-                                .map(|range| (range.start as u64, data.bytes[range].to_vec()))
-                                .collect(),
-                        }
-                    }
-                };
-                (path, change)
-            })
-            .collect()
+        let mut changes = std::mem::take(&mut files.durable);
+        changes.extend(std::mem::take(&mut files.changed).into_iter().map(|path| {
+            let change = match files.nodes.get(&path) {
+                None => Change::Removed,
+                Some(Node::Directory) => Change::Directory,
+                Some(Node::File(data)) => data.borrow_mut().change(),
+            };
+            (path, change)
+        }));
+        changes
     })
 }
 
@@ -445,9 +458,13 @@ pub fn remove_file(path: impl AsRef<Path>) -> io::Result<()> {
     let path = normal(path.as_ref());
     with(|files| {
         let data = files.file(&path)?;
-        data.borrow_mut().path = None;
+        let mut data = data.borrow_mut();
+        if files.changed.remove(&path) {
+            files.durable.push((path.clone(), data.change()));
+        }
+        data.path = None;
         files.nodes.remove(&path);
-        files.changed.insert(path);
+        files.durable.push((path, Change::Removed));
         Ok(())
     })
 }
@@ -687,11 +704,12 @@ impl File {
     }
 
     pub fn sync_all(&self) -> io::Result<()> {
+        self.data.borrow_mut().flush();
         Ok(())
     }
 
     pub fn sync_data(&self) -> io::Result<()> {
-        Ok(())
+        self.sync_all()
     }
 
     pub fn set_len(&self, size: u64) -> io::Result<()> {
@@ -847,4 +865,25 @@ pub fn supersede_file(
     base.check(&mut writable(&path).map_err(not_committed)?)
         .map_err(not_committed)?;
     rename(with, path).map_err(not_committed)
+}
+
+/// Waits until the browser host has durably written every ordered flush handed to it.
+pub async fn durable() -> io::Result<()> {
+    use wasm_bindgen::prelude::*;
+    #[wasm_bindgen]
+    extern "C" {
+        #[wasm_bindgen(catch, js_namespace = globalThis, js_name = snowboundFlushStorage)]
+        fn flush_storage() -> Result<js_sys::Promise, JsValue>;
+    }
+    let failure = |error: JsValue| {
+        io::Error::other(
+            error
+                .as_string()
+                .unwrap_or_else(|| "Browser storage failed".into()),
+        )
+    };
+    wasm_bindgen_futures::JsFuture::from(flush_storage().map_err(failure)?)
+        .await
+        .map_err(failure)?;
+    Ok(())
 }

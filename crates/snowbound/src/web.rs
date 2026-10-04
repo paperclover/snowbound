@@ -1185,6 +1185,18 @@ async fn open(
             None => state.create_notebook(own.clone())?,
         }
     }
+    #[cfg(feature = "live")]
+    if let Some(code) = web_sys::window()
+        .and_then(|window| window.location().search().ok())
+        .and_then(|query| {
+            query
+                .trim_start_matches('?')
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("join=").map(str::to_owned))
+        })
+    {
+        state.join_link(code);
+    }
     Ok(state)
 }
 

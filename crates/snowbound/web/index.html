@@ -205,6 +205,11 @@
     ]);
     status.textContent = "Starting Snowbound";
     await snowbound.start(snowbound, fonts, dictionaries);
+    const opened = new URL(location.href);
+    if (opened.searchParams.has("join")) {
+      opened.searchParams.delete("join");
+      history.replaceState(null, "", opened);
+    }
     sessionStorage.removeItem("snowbound.refetched");
   } catch (error) {
     // A module and JavaScript from different builds can't link: an old cached copy. Once,

@@ -214,13 +214,13 @@ impl Replica {
                 }
                 let result = match remote.as_mut() {
                     Some(remote) => {
-                        if reported && replica.settled(remote).unwrap_or(false) {
+                        if reported && replica.settled(remote).await.unwrap_or(false) {
                             worker_signal.requested.store(false, Ordering::Release);
                             worker_signal.synced.store(crate::now(), Ordering::Release);
                             rest().await;
                             continue;
                         }
-                        let result = replica.sync_once(remote);
+                        let result = replica.sync_once_async(remote).await;
                         reported = result.is_ok();
                         result
                     }

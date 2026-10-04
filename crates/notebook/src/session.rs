@@ -1588,9 +1588,9 @@ impl Notebook {
                 let (folder, remote) = (root.clone(), remote.clone());
                 let bind = move |path: &str| remote(&folder.join(path));
                 let mut local = discover::Local::open(&root)?;
-                let list = move |folder: &str| {
+                let list = move |folder: String| {
                     use discover::Source;
-                    local.entries(folder, LIMITS.entries)
+                    std::future::ready(local.entries(&folder, LIMITS.entries))
                 };
                 Ok(((bind, list), watched))
             },

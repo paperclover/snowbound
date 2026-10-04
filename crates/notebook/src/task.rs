@@ -1,7 +1,6 @@
 //! The sync worker's and background's loops: threads natively, and in the browser, which
-//! gives a module one thread, tasks on its event loop. A loop is an `async` block whose only
-//! waits are `wait`; natively each wait blocks its thread, so `complete` runs the block to the
-//! end in one poll.
+//! gives a module one thread, tasks on its event loop. Native waits block their thread, so
+//! `complete` runs the block to the end in one poll.
 
 use std::{io, time::Duration};
 
@@ -10,6 +9,22 @@ pub(crate) use std::{
     sync::mpsc::{Receiver, SyncSender as Sender},
     thread::JoinHandle,
 };
+
+#[cfg(all(feature = "live", not(target_arch = "wasm32")))]
+pub(crate) type Answer<T> = std::sync::mpsc::Sender<T>;
+
+#[cfg(all(feature = "live", not(target_arch = "wasm32")))]
+pub(crate) fn response<T>() -> (Answer<T>, std::sync::mpsc::Receiver<T>) {
+    std::sync::mpsc::channel()
+}
+
+#[cfg(all(feature = "live", not(target_arch = "wasm32")))]
+pub(crate) async fn answered<T>(
+    receiver: &std::sync::mpsc::Receiver<T>,
+    timeout: Duration,
+) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
+    receiver.recv_timeout(timeout)
+}
 
 /// A wake that waits, at most one, as `mpsc::sync_channel(1)` keeps one.
 #[cfg(not(target_arch = "wasm32"))]
@@ -50,6 +65,18 @@ pub(crate) fn complete<T>(work: impl Future<Output = T>) -> T {
     }
 }
 
+/// Polls a synchronous entry point once; browser I/O must use the async entry point.
+pub(crate) fn ready<T>(work: impl Future<Output = T>) -> io::Result<T> {
+    let mut work = std::pin::pin!(work);
+    match work
+        .as_mut()
+        .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+    {
+        std::task::Poll::Ready(output) => Ok(output),
+        std::task::Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 pub(crate) use web::*;
 
@@ -61,6 +88,77 @@ mod web {
         task::{Poll, Waker},
     };
     use wasm_bindgen::{JsCast, prelude::*};
+
+    struct Response<T> {
+        value: Option<T>,
+        closed: bool,
+        waiting: Option<Waker>,
+    }
+
+    pub(crate) struct Answer<T>(Arc<Mutex<Response<T>>>);
+    pub(crate) struct Answered<T>(Arc<Mutex<Response<T>>>);
+
+    pub(crate) fn response<T>() -> (Answer<T>, Answered<T>) {
+        let response = Arc::new(Mutex::new(Response {
+            value: None,
+            closed: false,
+            waiting: None,
+        }));
+        (Answer(response.clone()), Answered(response))
+    }
+
+    impl<T> Answer<T> {
+        pub(crate) fn send(self, value: T) -> Result<(), ()> {
+            let wake = {
+                let mut response = self.0.lock().map_err(|_| ())?;
+                response.value = Some(value);
+                response.waiting.take()
+            };
+            if let Some(wake) = wake {
+                wake.wake();
+            }
+            Ok(())
+        }
+    }
+
+    impl<T> Drop for Answer<T> {
+        fn drop(&mut self) {
+            let wake = {
+                let mut response = self.0.lock().unwrap();
+                response.closed = true;
+                response.waiting.take()
+            };
+            if let Some(wake) = wake {
+                wake.wake();
+            }
+        }
+    }
+
+    pub(crate) async fn answered<T>(
+        receiver: &Answered<T>,
+        timeout: Duration,
+    ) -> Result<T, std::sync::mpsc::RecvTimeoutError> {
+        let deadline = web_time::Instant::now() + timeout;
+        let mut armed = false;
+        std::future::poll_fn(|context| {
+            let mut response = receiver.0.lock().unwrap();
+            if let Some(value) = response.value.take() {
+                return Poll::Ready(Ok(value));
+            }
+            if response.closed {
+                return Poll::Ready(Err(std::sync::mpsc::RecvTimeoutError::Disconnected));
+            }
+            if web_time::Instant::now() >= deadline {
+                return Poll::Ready(Err(std::sync::mpsc::RecvTimeoutError::Timeout));
+            }
+            response.waiting = Some(context.waker().clone());
+            if !std::mem::replace(&mut armed, true) {
+                after(timeout, context.waker().clone());
+            }
+            Poll::Pending
+        })
+        .await
+    }
 
     #[derive(Default)]
     struct Bell {

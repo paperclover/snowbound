@@ -80,7 +80,7 @@ def lanes():
     result.append(dict(
         name='web', minutes=20, packages=['snowbound'], paths=('crates/snowbound/web/', 'tools/release_web.py'),
         # Clippy builds it; the module itself is linked by release_web.py.
-        commands=[cargo('clippy', '-p', 'snowbound', '--target', 'wasm32-unknown-unknown', '--no-default-features', '--features', 'wgpu', '--', '-D', 'warnings')],
+        commands=[cargo('clippy', '-p', 'snowbound', '--target', 'wasm32-unknown-unknown', '--no-default-features', '--features', 'wgpu,live', '--', '-D', 'warnings')],
         environment={**(wasm or {}), 'CARGO_TARGET_DIR': str(TARGET / 'wasm')},
         missing='needs the wasm32-unknown-unknown target' if 'wasm32-unknown-unknown' not in targets.split()
         else None if wasm else 'needs nix for a clang that builds for wasm32'))

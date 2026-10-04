@@ -49,6 +49,7 @@ impl VfsFile for File {
     }
 
     fn flush(&mut self) -> VfsResult<()> {
+        self.0.borrow_mut().flush();
         Ok(())
     }
 

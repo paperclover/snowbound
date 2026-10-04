@@ -14,6 +14,11 @@ use std::{
 /// Errors retain publication state; confirmation checks the stamp, flushes, and notifies
 /// cached readers.
 pub trait Remote {
+    /// Completes a non-blocking operation that returned `WouldBlock`; retrying that
+    /// operation then takes its result. Blocking providers leave this absent.
+    fn pending(&mut self) -> Option<std::pin::Pin<Box<dyn Future<Output = ()> + '_>>> {
+        None
+    }
     fn read(&mut self) -> io::Result<Vec<u8>>;
     /// The file's stamp without reading its body or coordinating with writers. While it is
     /// the last observed image's, synchronization neither reads nor revalidates the file.
@@ -51,6 +56,38 @@ pub trait Remote {
     fn retire(&mut self, id: &str, keep: bool) -> io::Result<()> {
         let _ = (id, keep);
         Ok(())
+    }
+}
+
+pub(crate) trait Waiting {
+    fn waiting(&self) -> bool;
+}
+
+impl Waiting for io::Error {
+    fn waiting(&self) -> bool {
+        self.kind() == io::ErrorKind::WouldBlock
+    }
+}
+
+impl Waiting for CommitError {
+    fn waiting(&self) -> bool {
+        self.error.kind() == io::ErrorKind::WouldBlock
+    }
+}
+
+pub(crate) async fn awaited<R: Remote, T, E: Waiting>(
+    remote: &mut R,
+    mut operation: impl FnMut(&mut R) -> std::result::Result<T, E>,
+) -> std::result::Result<T, E> {
+    loop {
+        let result = operation(remote);
+        if result.as_ref().is_err_and(Waiting::waiting)
+            && let Some(pending) = remote.pending()
+        {
+            pending.await;
+            continue;
+        }
+        return result;
     }
 }
 
@@ -189,29 +226,53 @@ impl Replica {
     /// Versions the remote keeps beside the file merge into it first, each published as one
     /// more revision and then retired (`resolve.rs`).
     pub fn sync_once(&self, remote: &mut impl Remote) -> Result<Synced> {
+        crate::task::ready(self.sync_once_async(remote))?
+    }
+
+    /// The same guarded synchronization step, awaiting non-blocking remote operations.
+    pub async fn sync_once_async(&self, remote: &mut impl Remote) -> Result<Synced> {
+        let result = self.sync_once_inner(remote).await;
+        crate::fs::durable().await?;
+        result
+    }
+
+    /// Ownership uses `try_lock`; the cache mutex is released before every await.
+    #[allow(clippy::await_holding_lock)]
+    async fn sync_once_inner(&self, remote: &mut impl Remote) -> Result<Synced> {
         let _owner = self.sync_owner()?;
-        for version in remote.versions().map_err(Error::RemoteIo)? {
-            let image = remote.version(&version.id).map_err(Error::RemoteIo)?;
-            let current = remote.read().map_err(Error::RemoteIo)?;
+        for version in awaited(remote, Remote::versions)
+            .await
+            .map_err(Error::RemoteIo)?
+        {
+            let image = awaited(remote, |remote| remote.version(&version.id))
+                .await
+                .map_err(Error::RemoteIo)?;
+            let current = awaited(remote, Remote::read)
+                .await
+                .map_err(Error::RemoteIo)?;
             let device = version.device.as_deref().unwrap_or("Another device");
             let keep = match crate::resolve::merge(&current, &image, device) {
                 Ok(Merged::Held) => false,
                 Ok(Merged::Publish(transaction)) => {
-                    remote.publish(&transaction)?;
+                    awaited(remote, |remote| remote.publish(&transaction)).await?;
                     false
                 }
                 // A version this cannot merge is kept whole rather than lost.
                 Ok(Merged::Foreign) | Err(Error::Document(_) | Error::Rejected(_)) => true,
                 Err(error) => return Err(error),
             };
-            remote.retire(&version.id, keep).map_err(Error::RemoteIo)?;
+            awaited(remote, |remote| remote.retire(&version.id, keep))
+                .await
+                .map_err(Error::RemoteIo)?;
         }
         let state = state(&*self.lock()?)?;
         let batched = self.section.key.is_none()
             && state.queued
             && state.blocked.is_none()
             && remote.accepts_edits();
-        let observed = remote.stamp().map_err(Error::RemoteIo)?;
+        let observed = awaited(remote, Remote::stamp)
+            .await
+            .map_err(Error::RemoteIo)?;
         if let Some(blocked) = &state.blocked
             && observed == *state.remote.as_ref().unwrap_or(&state.base)
         {
@@ -229,7 +290,9 @@ impl Replica {
         let image = match observed {
             observed if observed == state.base || batched => None,
             _ => {
-                let image = remote.read().map_err(Error::RemoteIo)?;
+                let image = awaited(remote, Remote::read)
+                    .await
+                    .map_err(Error::RemoteIo)?;
                 // Protected elsewhere: a section written anew, which only its key reads.
                 if self.section.key.is_none() && crate::discover::locked(&Store::parse(&image)?) {
                     return Err(Error::RemoteIo(io::Error::new(
@@ -297,7 +360,8 @@ impl Replica {
                             .collect(),
                     )
                 };
-                if let Err(error) = remote.confirm(&Stamp::of(&image)?) {
+                let stamp = Stamp::of(&image)?;
+                if let Err(error) = awaited(remote, |remote| remote.confirm(&stamp)).await {
                     if error.state == CommitState::Committed {
                         self.acknowledge(*batch, sealed.as_ref(), receipts.as_ref())?;
                     }
@@ -351,7 +415,7 @@ impl Replica {
         let Some(transaction) = transaction else {
             // Edits that changed nothing are published once the remote's image is durable.
             let base = base::base_stamp(&*self.lock()?)?;
-            if let Err(error) = remote.confirm(&base) {
+            if let Err(error) = awaited(remote, |remote| remote.confirm(&base)).await {
                 if error.state == CommitState::Committed {
                     self.acknowledge(batch, None, None)?;
                 }
@@ -364,18 +428,28 @@ impl Replica {
                 changed,
             });
         };
+        if let Err(error) = crate::fs::durable().await {
+            self.lock()?
+                .execute("UPDATE batches SET attempted=0 WHERE id=?1", [batch])?;
+            return Err(error.into());
+        }
         let published = if self.section.key.is_none() && remote.accepts_edits() {
-            let connection = self.lock()?;
-            let edits = queue::load(&connection, None, Some(batch))?;
-            let revisions = decode_revisions(&connection.query_row(
-                "SELECT revisions FROM batches WHERE id=?1",
-                [batch],
-                |row| row.get::<_, String>(0),
-            )?)?;
-            drop(connection);
-            remote.publish_edits(&transaction, &edits, &revisions)
+            let (edits, revisions) = {
+                let connection = self.lock()?;
+                let edits = queue::load(&connection, None, Some(batch))?;
+                let revisions = decode_revisions(&connection.query_row(
+                    "SELECT revisions FROM batches WHERE id=?1",
+                    [batch],
+                    |row| row.get::<_, String>(0),
+                )?)?;
+                (edits, revisions)
+            };
+            awaited(remote, |remote| {
+                remote.publish_edits(&transaction, &edits, &revisions)
+            })
+            .await
         } else {
-            remote.publish(&transaction)
+            awaited(remote, |remote| remote.publish(&transaction)).await
         };
         match published {
             Ok(()) => {}
@@ -393,7 +467,13 @@ impl Replica {
         self.acknowledge(batch, Some(&transaction), None)?;
         let revision = self.receipt(id)?;
         if batched {
-            changed.extend(self.rebase(Some(remote.read().map_err(Error::RemoteIo)?))?);
+            changed.extend(
+                self.rebase(Some(
+                    awaited(remote, Remote::read)
+                        .await
+                        .map_err(Error::RemoteIo)?,
+                ))?,
+            );
             changed.sort();
             changed.dedup();
         }
@@ -550,15 +630,21 @@ impl Replica {
     /// Whether nothing is queued and the remote still has the base's stamp, or the queue
     /// is blocked on a remote that has not changed since; reads neither image and does not
     /// lock the cache during remote I/O.
-    pub(crate) fn settled(&self, remote: &mut impl Remote) -> Result<bool> {
+    pub(crate) async fn settled(&self, remote: &mut impl Remote) -> Result<bool> {
         let state = state(&*self.lock()?)?;
         let expected = match &state.blocked {
             Some(_) => state.remote.unwrap_or(state.base),
             None if !state.queued => state.base,
             None => return Ok(false),
         };
-        Ok(remote.stamp().map_err(Error::RemoteIo)? == expected
-            && remote.versions().map_err(Error::RemoteIo)?.is_empty())
+        Ok(awaited(remote, Remote::stamp)
+            .await
+            .map_err(Error::RemoteIo)?
+            == expected
+            && awaited(remote, Remote::versions)
+                .await
+                .map_err(Error::RemoteIo)?
+                .is_empty())
     }
 }
 

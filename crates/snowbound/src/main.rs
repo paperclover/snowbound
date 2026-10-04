@@ -4247,6 +4247,23 @@ impl State {
             .filter(|(_, paths)| !paths.is_empty())
             .collect();
         for (library, paths) in &reported {
+            #[cfg(all(feature = "live", target_arch = "wasm32"))]
+            if library.joined.is_some() && paths.iter().any(|path| !path.ends_with(".one")) {
+                let refreshed = Arc::new(library.with(library.reopen()?));
+                let shown = self
+                    .session
+                    .as_ref()
+                    .filter(|session| session.library.location == library.location)
+                    .and_then(|session| {
+                        let path = &session.tabs[session.tab].path;
+                        if refreshed.contains(path) {
+                            Some(path.clone())
+                        } else {
+                            refreshed.first_section()
+                        }
+                    });
+                self.adopt(refreshed, shown.as_deref())?;
+            }
             self.sections_changed(library, paths.clone());
         }
         let changed: Vec<String> = (reported.iter())
@@ -6182,6 +6199,22 @@ fn spawn(work: impl FnOnce() + Send + 'static) {
     std::thread::spawn(work);
     #[cfg(target_arch = "wasm32")]
     platform::defer(work);
+}
+
+/// Runs asynchronous work beside the frame, creating the future on its executor.
+#[cfg(feature = "live")]
+fn spawn_async<F: Future<Output = ()> + 'static>(work: impl FnOnce() -> F + Send + 'static) {
+    RUNNING.fetch_add(1, Ordering::Relaxed);
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::spawn(move || {
+        pollster::block_on(work());
+        RUNNING.fetch_sub(1, Ordering::Release);
+    });
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_futures::spawn_local(async move {
+        work().await;
+        RUNNING.fetch_sub(1, Ordering::Release);
+    });
 }
 
 /// FILETIME now: when an edit happened, which its modification times record.

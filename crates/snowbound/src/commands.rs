@@ -1163,6 +1163,7 @@ impl State {
             #[cfg(feature = "live")]
             Id::LiveShare => enabled(
                 !modal
+                    && cfg!(not(target_arch = "wasm32"))
                     && self.notebook().is_some_and(|library| {
                         library.catalog().is_some() && library.joined.is_none()
                     }),

@@ -601,7 +601,7 @@ impl State {
                 }
                 actions.extend([
                     item(Action::CopyLink, "Copy Link to Notebook", false, true),
-                    #[cfg(feature = "live")]
+                    #[cfg(all(feature = "live", not(target_arch = "wasm32")))]
                     item(
                         Action::LiveShare,
                         commands::command(commands::Id::LiveShare).title,

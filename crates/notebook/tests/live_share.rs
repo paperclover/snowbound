@@ -398,7 +398,7 @@ fn stopping_lets_every_guest_go_and_retires_the_code() {
     let (guest, _notebook) = guest("Grace", &code, &url, &directory.path().join("grace"));
     host.stop();
     until("the guest never heard the host stop", || {
-        guest.stopped() && guest.host().is_none()
+        guest.ended() == Some(share::Ended::Stopped) && guest.host().is_none()
     });
     assert!(host.code().is_none() && host.guests().is_empty());
     assert!(matches!(

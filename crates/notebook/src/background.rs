@@ -79,7 +79,7 @@ pub(crate) struct Reports {
 #[derive(Default)]
 struct Watched {
     sections: Vec<Watch>,
-    /// Sections whose file changed since `changed` was last asked.
+    /// Sections or cached folders changed since `changed` was last asked.
     changed: Vec<String>,
     /// Folders a watch reported without naming the file, listed at `relist`.
     folders: BTreeSet<String>,
@@ -127,7 +127,7 @@ impl Background {
     /// lists each folder, both by catalog path, arming any watch that reports the folder's
     /// changes through `Reports`, and whether one does; it runs again after a transport
     /// failure. `copies` keeps an offline copy of every section.
-    pub(crate) fn start<R, B, L>(
+    pub(crate) fn start<R, B, L, LF>(
         copies: bool,
         mut connect: impl FnMut(Reports) -> io::Result<((B, L), bool)> + Send + 'static,
         notify: impl Fn() + Send + 'static,
@@ -135,7 +135,8 @@ impl Background {
     where
         R: Remote,
         B: FnMut(&str) -> R,
-        L: FnMut(&str) -> io::Result<Vec<Entry>>,
+        L: FnMut(String) -> LF,
+        LF: Future<Output = io::Result<Vec<Entry>>>,
     {
         let (signal, receiver) = Signal::new();
         let shared = Arc::new(Shared {
@@ -192,33 +193,39 @@ impl Background {
                             connection: connection + 1,
                         };
                         let connected = connect(reports);
-                        let Ok(mut watched) = owner.watched.lock() else {
-                            return;
-                        };
-                        // Whatever ended before now ended with the last connection.
-                        watched.connection += 1;
-                        watched.lost = false;
-                        match connected {
-                            Ok((mut files, reported)) => {
-                                watched.watching(reported);
-                                let folders = watched.rescanning();
-                                drop(watched);
-                                let listings = list(&mut files.1, folders);
-                                let Ok(mut watched) = owner.watched.lock() else {
-                                    return;
-                                };
-                                watched.listed(&listings, Some(copies), Instant::now());
-                                bound = Some(files);
-                            }
-                            Err(error) => {
-                                let error = Error::RemoteIo(error);
-                                let retry = now + RETRY;
-                                for watch in &mut watched.sections {
-                                    news |= watch.fail(&error, None);
-                                    watch.due = watch.due.max(retry);
+                        let folders = {
+                            let Ok(mut watched) = owner.watched.lock() else {
+                                return;
+                            };
+                            watched.connection += 1;
+                            watched.lost = false;
+                            match &connected {
+                                Ok((_, reported)) => {
+                                    watched.watching(*reported);
+                                    Some(watched.rescanning())
                                 }
-                                watched.relist = watched.relist.map(|due| due.max(retry));
+                                Err(error) => {
+                                    let error = Error::RemoteIo(io::Error::new(
+                                        error.kind(),
+                                        error.to_string(),
+                                    ));
+                                    let retry = now + RETRY;
+                                    for watch in &mut watched.sections {
+                                        news |= watch.fail(&error, None);
+                                        watch.due = watch.due.max(retry);
+                                    }
+                                    watched.relist = watched.relist.map(|due| due.max(retry));
+                                    None
+                                }
                             }
+                        };
+                        if let (Ok((mut files, _)), Some(folders)) = (connected, folders) {
+                            let listings = list(&mut files.1, folders).await;
+                            let Ok(mut watched) = owner.watched.lock() else {
+                                return;
+                            };
+                            watched.listed(&listings, Some(copies), Instant::now());
+                            bound = Some(files);
                         }
                         continue;
                     }
@@ -226,7 +233,7 @@ impl Background {
                         let Some((_, list_folder)) = &mut bound else {
                             continue;
                         };
-                        let listings = list(list_folder, folders);
+                        let listings = list(list_folder, folders).await;
                         let Ok(mut watched) = owner.watched.lock() else {
                             return;
                         };
@@ -244,14 +251,15 @@ impl Background {
                 let Some((bind, _)) = &mut bound else {
                     continue;
                 };
-                let (queued, outcome) = step(
+                let (queued, outcome) = step_async(
                     &mut bind(&path),
                     replica.as_deref(),
                     seen.as_deref(),
                     current,
                     image,
                     copies,
-                );
+                )
+                .await;
                 if outcome.as_ref().is_err_and(disconnected) {
                     bound = None;
                 }
@@ -339,10 +347,12 @@ impl Background {
                     crate::SmbRemote::new(Arc::clone(&bound), file, limit)
                 };
                 let root = root.clone();
-                let list = move |folder: &str| {
-                    use crate::discover::Source;
-                    crate::discover::Smb::new(&client, &root)?
-                        .entries(folder, crate::session::LIMITS.entries)
+                let list = move |folder: String| {
+                    std::future::ready((|| {
+                        use crate::discover::Source;
+                        crate::discover::Smb::new(&client, &root)?
+                            .entries(&folder, crate::session::LIMITS.entries)
+                    })())
                 };
                 Ok(((bind, list), reported))
             },
@@ -364,7 +374,10 @@ impl Background {
                 guest.watch(reports)?;
                 let (bound, listing) = (Arc::clone(&guest), Arc::clone(&guest));
                 let bind = move |path: &str| crate::live::share::HostedRemote::new(&bound, path);
-                let list = move |folder: &str| listing.entries(folder);
+                let list = move |folder: String| {
+                    let listing = listing.clone();
+                    async move { listing.entries_async(&folder).await }
+                };
                 Ok(((bind, list), true))
             },
             notify,
@@ -553,6 +566,16 @@ impl Shared {
 
 #[cfg_attr(not(any(feature = "smb", feature = "live")), allow(dead_code))]
 impl Reports {
+    #[cfg(all(feature = "live", target_arch = "wasm32"))]
+    pub(crate) fn catalog(&self, folder: &str) {
+        if let Some(shared) = self.shared.upgrade()
+            && let Ok(mut watched) = shared.watched.lock()
+            && !watched.changed.iter().any(|path| path == folder)
+        {
+            watched.changed.push(folder.to_owned());
+        }
+    }
+
     /// The sections at or below these paths changed.
     pub(crate) fn touched(&self, paths: &[String]) {
         if let Some(shared) = self.shared.upgrade() {
@@ -768,13 +791,13 @@ impl Watched {
                 return Next::Wait(wait.map(|at| at.saturating_duration_since(now)));
             };
             let watch = &mut self.sections[index];
+            if !bound {
+                return Next::Connect(self.connection);
+            }
             if let Some(worker) = watch.held.as_ref().and_then(Weak::upgrade) {
                 worker.wake();
                 watch.due = now + interval;
                 continue;
-            }
-            if !bound {
-                return Next::Connect(self.connection);
             }
             return Next::Check {
                 path: watch.path.clone(),
@@ -789,17 +812,16 @@ impl Watched {
 
 /// Lists each of `folders` through `list`; a folder that cannot be listed lists nothing, so
 /// that its sections are checked.
-fn list(
-    list: &mut impl FnMut(&str) -> io::Result<Vec<Entry>>,
+async fn list<F: Future<Output = io::Result<Vec<Entry>>>>(
+    list: &mut impl FnMut(String) -> F,
     folders: BTreeSet<String>,
 ) -> BTreeMap<String, Vec<Entry>> {
-    folders
-        .into_iter()
-        .map(|folder| {
-            let entries = list(&folder).unwrap_or_default();
-            (folder, entries)
-        })
-        .collect()
+    let mut listings = BTreeMap::new();
+    for folder in folders {
+        let entries = list(folder.clone()).await.unwrap_or_default();
+        listings.insert(folder, entries);
+    }
+    listings
 }
 
 /// Deletes the replica at `replica` if it holds nothing unpublished and no one holds it.
@@ -870,7 +892,7 @@ fn summary(status: &SyncStatus) -> (bool, Option<io::ErrorKind>, u64) {
 /// with `current` is the stamp now, unread. With `copies`, a section without a replica gets
 /// one from the file as it is now. `image`, the file as discovery read it, stands in for
 /// reading it while the stamp is still its own.
-fn step<R: Remote>(
+async fn step_async<R: Remote>(
     remote: &mut R,
     replica: Option<&Path>,
     seen: Option<&Stamp>,
@@ -880,7 +902,7 @@ fn step<R: Remote>(
 ) -> (Option<u64>, Result<(Stamp, bool)>) {
     let stamp = match seen.filter(|_| current) {
         Some(seen) => seen.clone(),
-        None => match remote.stamp() {
+        None => match crate::sync::awaited(remote, Remote::stamp).await {
             Ok(stamp) => stamp,
             Err(error) => return (None, Err(Error::RemoteIo(error))),
         },
@@ -898,14 +920,18 @@ fn step<R: Remote>(
         if !copies {
             return (Some(0), Ok((stamp, moved)));
         }
-        let copied = (|| {
-            let image = remote.read().map_err(Error::RemoteIo)?;
+        let copied = (async {
+            let image = crate::sync::awaited(remote, Remote::read)
+                .await
+                .map_err(Error::RemoteIo)?;
             if let Some(folder) = replica.parent() {
                 fs::create_dir_all(folder)?;
             }
             Replica::seed(replica, &image, None)?;
+            fs::durable().await?;
             Ok(Stamp::of(&image)?)
-        })();
+        })
+        .await;
         return match copied {
             Ok(stamp) => (Some(0), Ok((stamp, moved))),
             // A session made it first.
@@ -916,7 +942,7 @@ fn step<R: Remote>(
         };
     }
     // A version kept beside the file leaves its stamp as it was.
-    let versions = match remote.versions() {
+    let versions = match crate::sync::awaited(remote, Remote::versions).await {
         Ok(versions) => versions,
         Err(error) => return (None, Err(Error::RemoteIo(error))),
     };
@@ -932,16 +958,22 @@ fn step<R: Remote>(
         Err(error) if error.busy() => return (None, Ok((stamp, false))),
         Err(error) => return (None, Err(error)),
     };
-    let synced = (|| {
+    let synced = (async {
         let mut changed = moved;
         loop {
-            let synced = replica.sync_once(remote)?;
+            let synced = replica.sync_once_async(remote).await?;
             changed |= !synced.changed.is_empty();
             if !matches!(synced.edit, Some((_, EditStatus::Published { .. }))) {
-                return Ok((remote.stamp().map_err(Error::RemoteIo)?, changed));
+                return Ok((
+                    crate::sync::awaited(remote, Remote::stamp)
+                        .await
+                        .map_err(Error::RemoteIo)?,
+                    changed,
+                ));
             }
         }
-    })();
+    })
+    .await;
     let queued = replica
         .recovery_summary()
         .ok()
@@ -958,6 +990,10 @@ struct Discovered<'a, R> {
 }
 
 impl<R: Remote> Remote for Discovered<'_, R> {
+    fn pending(&mut self) -> Option<std::pin::Pin<Box<dyn Future<Output = ()> + '_>>> {
+        self.remote.pending()
+    }
+
     fn read(&mut self) -> io::Result<Vec<u8>> {
         match self.image.take() {
             Some((stamp, image)) if stamp == self.stamp => Ok(image),
@@ -1034,6 +1070,20 @@ mod tests {
                 image: None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_notebook_with_every_section_held_still_connects_its_watch() {
+        let now = Instant::now();
+        let mut watched = Watched::default();
+        watched.watch(sections(1, true), now);
+        let (held, woken) = Signal::new();
+        watched.sections[0].held = Some(Arc::downgrade(&held));
+        assert!(matches!(watched.next(now, false), Next::Connect(0)));
+        watched.watching(true);
+        assert!(held.watched.load(Ordering::Acquire));
+        assert!(matches!(watched.next(now, true), Next::Wait(_)));
+        assert!(woken.recv_timeout(Duration::from_millis(50)).is_ok());
     }
 
     /// The notebook's folders as a listing shows its first `count` sections.
@@ -1311,7 +1361,7 @@ mod tests {
                 armed.send(reports).unwrap();
                 let (files, listed) = (remote.clone(), remote.clone());
                 let bind = move |path: &str| File(files.clone(), path.to_owned());
-                let list = move |folder: &str| Ok(listed.list(folder));
+                let list = move |folder: String| std::future::ready(Ok(listed.list(&folder)));
                 Ok(((bind, list), true))
             },
             || {},
@@ -1387,7 +1437,7 @@ mod tests {
                 armed.send(reports).unwrap();
                 let (files, listed) = (remote.clone(), remote.clone());
                 let bind = move |path: &str| File(files.clone(), path.to_owned());
-                let list = move |folder: &str| Ok(listed.list(folder));
+                let list = move |folder: String| std::future::ready(Ok(listed.list(&folder)));
                 Ok(((bind, list), true))
             },
             || {},
@@ -1412,10 +1462,16 @@ mod tests {
             quiet(&stamps, SETTLE).is_empty(),
             "the worker reads, not this"
         );
-        // The watch ending hands polling back to the worker.
         watch.lost();
         assert!(woken.recv_timeout(SETTLE).is_ok());
-        assert!(!signal.watched.load(Ordering::Acquire));
+        let rearmed = watches.recv_timeout(SETTLE).unwrap();
+        while !signal.watched.load(Ordering::Acquire) {
+            woken.recv_timeout(SETTLE * 2).unwrap();
+        }
+        assert!(signal.watched.load(Ordering::Acquire));
+        rearmed.touched(std::slice::from_ref(&held));
+        assert!(woken.recv_timeout(SETTLE * 2).is_ok());
+        assert!(quiet(&stamps, SETTLE).is_empty());
         drop(signal);
         drop(background);
     }

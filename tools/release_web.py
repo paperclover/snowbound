@@ -100,7 +100,7 @@ def build(out):
     """Writes index.html, the module, its JavaScript and the fonts to `out`, the module knowing
     when it was built."""
     built = str(int(time.time()))
-    run(['cargo', 'build', '--locked', '-p', 'snowbound', '--release', '--target', 'wasm32-unknown-unknown', '--no-default-features', '--features', 'wgpu',
+    run(['cargo', 'build', '--locked', '-p', 'snowbound', '--release', '--target', 'wasm32-unknown-unknown', '--no-default-features', '--features', 'wgpu,live',
          *PROFILE], env={**environment(), 'SNOWBOUND_WEB_BUILD': built})
     if out.exists():
         shutil.rmtree(out)

@@ -549,48 +549,72 @@ pub fn open(
     room: &str,
     secret: &[u8],
 ) -> io::Result<(Sealer, Sealer)> {
-    let password = Password::new(secret);
-    let [initiator, responder] = [b"initiator", b"responder"]
-        .map(|role| Identity::new(&[&role[..], room.as_bytes()].concat()));
-    let (pake, message) = match side {
-        Side::Initiator => Spake2::<Ed25519Group>::start_a(&password, &initiator, &responder),
-        Side::Responder => Spake2::<Ed25519Group>::start_b(&password, &initiator, &responder),
-    };
-    let ours = Open {
-        version: VERSION,
-        room: room.into(),
-        pake: message,
-    };
+    let (opening, ours) = Opening::new(side, room, secret)?;
     if side == Side::Initiator {
-        write_block(stream, &minicbor::to_vec(&ours).map_err(io::Error::other)?)?;
+        write_block(stream, &ours)?;
     }
-    let theirs: Open =
-        minicbor::decode(&read_block(stream)?).map_err(|_| invalid("A malformed opening"))?;
-    // A responder answers even a peer of another version, so that both ends can say which
-    // should update.
+    let theirs = read_block(stream)?;
     if side == Side::Responder {
-        write_block(stream, &minicbor::to_vec(&ours).map_err(io::Error::other)?)?;
+        write_block(stream, &ours)?;
     }
-    if theirs.version != VERSION {
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            Version(theirs.version),
-        ));
+    opening.finish(&theirs)
+}
+
+pub(super) struct Opening {
+    pake: Spake2<Ed25519Group>,
+    side: Side,
+    room: String,
+}
+
+impl Opening {
+    pub(super) fn new(side: Side, room: &str, secret: &[u8]) -> io::Result<(Self, Vec<u8>)> {
+        let password = Password::new(secret);
+        let [initiator, responder] = [b"initiator", b"responder"]
+            .map(|role| Identity::new(&[&role[..], room.as_bytes()].concat()));
+        let (pake, message) = match side {
+            Side::Initiator => Spake2::<Ed25519Group>::start_a(&password, &initiator, &responder),
+            Side::Responder => Spake2::<Ed25519Group>::start_b(&password, &initiator, &responder),
+        };
+        let ours = Open {
+            version: VERSION,
+            room: room.into(),
+            pake: message,
+        };
+        let message = minicbor::to_vec(&ours).map_err(io::Error::other)?;
+        Ok((
+            Self {
+                pake,
+                side,
+                room: room.to_owned(),
+            },
+            message,
+        ))
     }
-    if theirs.room != room {
-        return Err(invalid("The peer means another room"));
+
+    pub(super) fn finish(self, bytes: &[u8]) -> io::Result<(Sealer, Sealer)> {
+        let theirs: Open = minicbor::decode(bytes).map_err(|_| invalid("A malformed opening"))?;
+        if theirs.version != VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                Version(theirs.version),
+            ));
+        }
+        if theirs.room != self.room {
+            return Err(invalid("The peer means another room"));
+        }
+        let key = self
+            .pake
+            .finish(&theirs.pake)
+            .map_err(|_| invalid("A malformed key exchange"))?;
+        let [from_initiator, from_responder] = [
+            Sealer::new(&key, b"Snowbound live v1 initiator"),
+            Sealer::new(&key, b"Snowbound live v1 responder"),
+        ];
+        Ok(match self.side {
+            Side::Initiator => (from_initiator, from_responder),
+            Side::Responder => (from_responder, from_initiator),
+        })
     }
-    let key = pake
-        .finish(&theirs.pake)
-        .map_err(|_| invalid("A malformed key exchange"))?;
-    let [from_initiator, from_responder] = [
-        Sealer::new(&key, b"Snowbound live v1 initiator"),
-        Sealer::new(&key, b"Snowbound live v1 responder"),
-    ];
-    Ok(match side {
-        Side::Initiator => (from_initiator, from_responder),
-        Side::Responder => (from_responder, from_initiator),
-    })
 }
 
 fn write_block(to: &mut impl Write, bytes: &[u8]) -> io::Result<()> {

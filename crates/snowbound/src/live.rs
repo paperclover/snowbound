@@ -147,7 +147,7 @@ fn keep(file: &Path, value: &impl serde::Serialize) -> io::Result<()> {
     let folder = file.parent().unwrap_or(Path::new("."));
     notebook::fs::create_dir_all(folder)?;
     let partial = file.with_extension("partial");
-    let mut options = std::fs::OpenOptions::new();
+    let mut options = notebook::fs::OpenOptions::new();
     options.write(true).create(true).truncate(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
@@ -217,8 +217,9 @@ impl Joined {
                 )
             })
             .map_err(|error| refused(&error))?;
+        #[cfg(not(target_arch = "wasm32"))]
         if !share.listed {
-            let since = std::time::Instant::now();
+            let since = web_time::Instant::now();
             while guest.host().is_none() && since.elapsed() < FIRST_LISTING {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -257,17 +258,17 @@ impl Joined {
 }
 
 /// Meets whoever shares `code` (and `password`): the share it welcomes this computer to.
-pub(crate) fn join(
+pub(crate) async fn join(
     code: &str,
     password: &str,
     waiting: impl Fn(bool) -> bool,
 ) -> Result<live::wire::Welcome, live::share::Refusal> {
     let me = hello().map_err(|_| live::share::Refusal::Unreachable(live::Trouble::Other))?;
-    live::share::join_while(me, code, password, reach(), relay().as_deref(), waiting)
+    live::share::join_while_async(me, code, password, reach(), relay().as_deref(), waiting).await
 }
 
 /// Keeps `welcome` as the notebook this computer joined: its location.
-pub(crate) fn joined(cache: &Path, welcome: live::wire::Welcome) -> io::Result<String> {
+pub(crate) async fn joined(cache: &Path, welcome: live::wire::Welcome) -> io::Result<String> {
     let location = live::share::location(&welcome.share);
     let file = kept(cache, JOINED);
     let mut shares: BTreeMap<String, Share> = read_kept(&file);
@@ -276,20 +277,32 @@ pub(crate) fn joined(cache: &Path, welcome: live::wire::Welcome) -> io::Result<S
         Share {
             share: welcome.share,
             secret: welcome.secret,
-            notebook: welcome.notebook,
-            host: welcome.host,
+            notebook: welcome.notebook.clone(),
+            host: welcome.host.clone(),
             listed: false,
             protocol: live::wire::VERSION,
         },
     );
     keep(&file, &shares)?;
+    #[cfg(target_arch = "wasm32")]
+    {
+        let guest = Guest::start(
+            hello()?,
+            welcome.share,
+            welcome.secret,
+            None,
+            relay().as_deref(),
+            crate::library::notify_background,
+        )?;
+        live::share::Hosted::prepare(guest, cache).await?;
+    }
     Ok(location)
 }
 
 /// A peer to go to, since when, and the section and page already asked to open.
 type Going = (
     [u8; 16],
-    std::time::Instant,
+    web_time::Instant,
     Option<(Option<[u8; 16]>, Option<live::Guid>)>,
 );
 
@@ -319,9 +332,9 @@ pub(crate) struct Peers {
     /// Each peer's picture as drawn, cut to a circle, decoded once.
     pictures: HashMap<[u8; 16], Option<draw::RasterImage>>,
     /// Where each peer's caret was last seen, and when it got there.
-    moved: HashMap<[u8; 16], (Caret, std::time::Instant)>,
+    moved: HashMap<[u8; 16], (Caret, web_time::Instant)>,
     /// Where each peer was last seen, and when they last moved, for ordering the avatars.
-    active: HashMap<[u8; 16], (Option<live::Presence>, std::time::Instant)>,
+    active: HashMap<[u8; 16], (Option<live::Presence>, web_time::Instant)>,
     /// The peer an avatar's click goes to, since when, and the place already asked to open.
     going: Option<Going>,
     pub(crate) share: Option<crate::share::ShareDialog>,
@@ -650,7 +663,7 @@ impl State {
         if peers.is_empty() {
             return;
         }
-        let now = std::time::Instant::now();
+        let now = web_time::Instant::now();
         for peer in &peers {
             let id = peer.hello.peer;
             let seen = self
@@ -921,7 +934,7 @@ impl State {
                 (y * viewport.scale + viewport.origin[1]) / scale,
             ]
         };
-        let now = std::time::Instant::now();
+        let now = web_time::Instant::now();
         let (mut placed, mut above, mut below) = (Vec::new(), Vec::new(), Vec::new());
         for peer in self.connected() {
             let Some(caret) = (peer.presence.as_ref())

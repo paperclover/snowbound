@@ -8,9 +8,7 @@
 
 use super::{
     Event, Hello, Line, Live, Peer, Presence, Reach, Relayed, Room, Sender,
-    wire::{
-        self, Delta, Failure, Reply, Request, Touched, Welcome, WireEntry, WireStamp, Written, kind,
-    },
+    wire::{self, Delta, Failure, Reply, Request, Touched, Welcome, WireEntry, Written, kind},
 };
 use crate::{Error, Result, background::Reports, discover, session::Storage};
 use onestore::{CommitError, CommitState, RevisionIndex, Stamp, Store, Transaction};
@@ -25,11 +23,17 @@ use std::{
         mpsc,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
+use web_time::Instant;
 
+#[path = "share/batch.rs"]
 mod batch;
+#[path = "share/membership.rs"]
 mod membership;
+#[cfg(target_arch = "wasm32")]
+#[path = "share/web.rs"]
+mod web;
 pub use membership::Host;
 
 /// The most bytes one message of a read or an upload carries.
@@ -169,11 +173,30 @@ pub fn join_while(
     relay: Option<&str>,
     continue_joining: impl Fn(bool) -> bool,
 ) -> std::result::Result<Welcome, Refusal> {
+    crate::task::ready(join_while_async(
+        me,
+        code,
+        password,
+        reach,
+        relay,
+        continue_joining,
+    ))
+    .map_err(|_| Refusal::Busy)?
+}
+
+pub async fn join_while_async(
+    me: Hello,
+    code: &str,
+    password: &str,
+    reach: Option<Reach>,
+    relay: Option<&str>,
+    continue_joining: impl Fn(bool) -> bool,
+) -> std::result::Result<Welcome, Refusal> {
     let code = self::code(code).ok_or(Refusal::Malformed)?;
     let (welcomed, welcome) = mpsc::channel();
     let approving = Arc::new(AtomicBool::new(false));
     let approval = Arc::clone(&approving);
-    let (changed, waiting) = mpsc::channel();
+    let (changed, waiting) = crate::task::channel();
     let live = Live::start(
         me,
         &Room::join(&code, password),
@@ -207,7 +230,7 @@ pub fn join_while(
                 }
             }
             _ => {
-                let _ = changed.send(());
+                let _ = changed.try_send(());
             }
         },
     )
@@ -257,7 +280,7 @@ pub fn join_while(
             }
             _ => {}
         }
-        let _ = waiting.recv_timeout(Duration::from_millis(100));
+        crate::task::wait(&waiting, Some(Duration::from_millis(100))).await;
     }
 }
 
@@ -963,24 +986,59 @@ struct Inner {
     here: Mutex<Presence>,
     /// The host and the line to it, while connected.
     host: Mutex<Option<(Arc<Hello>, Line)>>,
-    pending: Mutex<HashMap<u64, mpsc::Sender<Reply>>>,
+    pending: Mutex<HashMap<u64, crate::task::Answer<Reply>>>,
     next: AtomicU64,
     /// Where the host's reports of changed files go, while a background watches.
     watch: Mutex<Option<Reports>>,
-    /// The host stopped sharing.
+    /// Why this device can no longer reach the share.
     ended: Mutex<Option<Ended>>,
     /// Bytes of chunks asked for and not yet given.
-    asked: (Mutex<usize>, Condvar),
+    asked: (Mutex<Chunks>, Condvar),
     /// The sections read lately, kept as the host's deltas change them, newest first.
     images: Mutex<Vec<(String, Arc<Vec<u8>>)>>,
     /// The stamps of sections whose image held is the host's now, as its last report of
     /// them said.
     current: Mutex<HashMap<String, Stamp>>,
+    #[cfg(target_arch = "wasm32")]
+    catalog: Mutex<Option<PathBuf>>,
 }
 
-enum Ended {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
     Stopped,
     Removed,
+}
+
+#[derive(Default)]
+struct Chunks {
+    bytes: usize,
+    #[cfg(target_arch = "wasm32")]
+    waiting: Vec<std::task::Waker>,
+}
+
+struct Requested<'a> {
+    inner: &'a Inner,
+    id: u64,
+    chunked: bool,
+}
+
+impl Drop for Requested<'_> {
+    fn drop(&mut self) {
+        self.inner.pending.lock().unwrap().remove(&self.id);
+        if self.chunked {
+            let (asked, room) = &self.inner.asked;
+            let mut asked = asked.lock().unwrap();
+            asked.bytes -= CHUNK;
+            #[cfg(target_arch = "wasm32")]
+            let waiting = std::mem::take(&mut asked.waiting);
+            drop(asked);
+            room.notify_all();
+            #[cfg(target_arch = "wasm32")]
+            for waker in waiting {
+                waker.wake();
+            }
+        }
+    }
 }
 
 impl Guest {
@@ -1010,6 +1068,8 @@ impl Guest {
             asked: Default::default(),
             images: Mutex::default(),
             current: Mutex::default(),
+            #[cfg(target_arch = "wasm32")]
+            catalog: Mutex::default(),
         });
         let heard = Arc::clone(&inner);
         let live = Live::start(me, &Room::Notebook(secret), reach, relay, move |event| {
@@ -1030,9 +1090,9 @@ impl Guest {
         host.as_ref().map(|(hello, _)| Arc::clone(hello))
     }
 
-    /// Whether the host said it stopped sharing.
-    pub fn stopped(&self) -> bool {
-        self.inner.ended.lock().unwrap().is_some()
+    /// Why the host ended this device's access.
+    pub fn ended(&self) -> Option<Ended> {
+        *self.inner.ended.lock().unwrap()
     }
 
     /// Everyone in the share's room: the host and the other guests.
@@ -1077,27 +1137,62 @@ impl Guest {
     }
 
     /// Asks the host `kind` of `request`, waiting for its reply.
-    fn request(&self, kind: u16, mut request: Request) -> std::result::Result<Reply, Failed> {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn request(&self, kind: u16, request: Request) -> std::result::Result<Reply, Failed> {
+        crate::task::ready(self.request_async(kind, request)).map_err(Failed::Unsent)?
+    }
+
+    async fn request_async(
+        &self,
+        kind: u16,
+        mut request: Request,
+    ) -> std::result::Result<Reply, Failed> {
         let Some((_, line)) = self.inner.host.lock().unwrap().clone() else {
             return Err(Failed::Unsent(self.offline()));
         };
         let chunked = matches!(kind, kind::READ | kind::READ_FILE | kind::PUT);
         if chunked {
-            let (asked, room) = &self.inner.asked;
-            let mut asked = asked.lock().unwrap();
-            while *asked + CHUNK > WINDOW {
-                asked = room.wait(asked).unwrap();
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let (asked, _room) = &self.inner.asked;
+                let mut asked = asked.lock().unwrap();
+                while asked.bytes + CHUNK > WINDOW {
+                    asked = _room.wait(asked).unwrap();
+                }
+                asked.bytes += CHUNK;
             }
-            *asked += CHUNK;
+            #[cfg(target_arch = "wasm32")]
+            std::future::poll_fn(|context| {
+                let mut asked = self.inner.asked.0.lock().unwrap();
+                if asked.bytes + CHUNK > WINDOW {
+                    if !asked
+                        .waiting
+                        .iter()
+                        .any(|waker| waker.will_wake(context.waker()))
+                    {
+                        asked.waiting.push(context.waker().clone());
+                    }
+                    std::task::Poll::Pending
+                } else {
+                    asked.bytes += CHUNK;
+                    std::task::Poll::Ready(())
+                }
+            })
+            .await;
         }
         let id = self.inner.next.fetch_add(1, Ordering::Relaxed);
         request.id = id;
-        let (answer, answered) = mpsc::channel();
+        let (answer, answered) = crate::task::response();
         self.inner.pending.lock().unwrap().insert(id, answer);
+        let _requested = Requested {
+            inner: &self.inner,
+            id,
+            chunked,
+        };
         let sent = line.send(kind, &request);
         let reply = match sent {
             Err(error) => Err(Failed::Unsent(error)),
-            Ok(()) => match answered.recv_timeout(TIMEOUT) {
+            Ok(()) => match crate::task::answered(&answered, TIMEOUT).await {
                 Ok(reply) => Ok(reply),
                 Err(mpsc::RecvTimeoutError::Timeout) => Err(Failed::Lost(io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -1106,12 +1201,6 @@ impl Guest {
                 Err(mpsc::RecvTimeoutError::Disconnected) => Err(Failed::Lost(self.offline())),
             },
         };
-        self.inner.pending.lock().unwrap().remove(&id);
-        if chunked {
-            let (asked, room) = &self.inner.asked;
-            *asked.lock().unwrap() -= CHUNK;
-            room.notify_all();
-        }
         let reply = reply?;
         match reply.failure {
             Some(failure) => Err(Failed::Refused(failure)),
@@ -1119,12 +1208,26 @@ impl Guest {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn ask(&self, kind: u16, request: Request) -> io::Result<Reply> {
         self.request(kind, request).map_err(Failed::io)
     }
 
+    async fn ask_async(&self, kind: u16, request: Request) -> io::Result<Reply> {
+        self.request_async(kind, request).await.map_err(Failed::io)
+    }
+
     /// Puts `bytes` in `request`, or uploads them first where they are large.
+    #[cfg(not(target_arch = "wasm32"))]
     fn carry(&self, request: &mut Request, bytes: Vec<u8>) -> std::result::Result<(), Failed> {
+        crate::task::ready(self.carry_async(request, bytes)).map_err(Failed::Unsent)?
+    }
+
+    async fn carry_async(
+        &self,
+        request: &mut Request,
+        bytes: Vec<u8>,
+    ) -> std::result::Result<(), Failed> {
         if bytes.len() <= CHUNK {
             request.bytes = Some(bytes);
             return Ok(());
@@ -1138,7 +1241,8 @@ impl Guest {
                 ..Request::default()
             };
             // Nothing the upload carries happens before the request that uses it.
-            self.request(kind::PUT, put)
+            self.request_async(kind::PUT, put)
+                .await
                 .map_err(|failed| match failed {
                     Failed::Lost(error) => Failed::Unsent(error),
                     failed => failed,
@@ -1150,22 +1254,29 @@ impl Guest {
 
     /// Reads the file at `path` a chunk at a time, as `kind` reads it; a section held, as
     /// the changes to it.
+    #[cfg(not(target_arch = "wasm32"))]
     fn read(&self, kind: u16, path: &str, limit: usize) -> io::Result<Vec<u8>> {
+        crate::task::ready(self.read_async(kind, path, limit))?
+    }
+
+    async fn read_async(&self, kind: u16, path: &str, limit: usize) -> io::Result<Vec<u8>> {
         let held = (kind == kind::READ)
             .then(|| self.inner.image(path))
             .flatten();
-        let first = self.ask(
-            kind,
-            Request {
-                path: path.to_owned(),
-                offset: Some(0),
-                limit: Some(limit as u64),
-                stamp: (held.as_deref())
-                    .and_then(|image| Stamp::of(image).ok())
-                    .map(|stamp| (&stamp).into()),
-                ..Request::default()
-            },
-        )?;
+        let first = self
+            .ask_async(
+                kind,
+                Request {
+                    path: path.to_owned(),
+                    offset: Some(0),
+                    limit: Some(limit as u64),
+                    stamp: (held.as_deref())
+                        .and_then(|image| Stamp::of(image).ok())
+                        .map(|stamp| (&stamp).into()),
+                    ..Request::default()
+                },
+            )
+            .await?;
         if let (Some(writes), Some(held)) = (&first.writes, held) {
             let stamp: Option<Stamp> = first.stamp.as_ref().and_then(|s| s.try_into().ok());
             let image = written(&held, first.length.unwrap_or_default(), writes)
@@ -1181,7 +1292,7 @@ impl Guest {
         let mut image = first.bytes.unwrap_or_default();
         while image.len() < length {
             let chunk = self
-                .ask(
+                .ask_async(
                     kind,
                     Request {
                         path: path.to_owned(),
@@ -1189,7 +1300,8 @@ impl Guest {
                         handle: first.handle,
                         ..Request::default()
                     },
-                )?
+                )
+                .await?
                 .bytes
                 .unwrap_or_default();
             if chunk.is_empty() {
@@ -1210,35 +1322,52 @@ impl Guest {
         (Stamp::of(&image).ok().as_ref() == Some(stamp)).then(|| image.to_vec())
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn entries(&self, folder: &str) -> io::Result<Vec<discover::Entry>> {
-        let reply = self.ask(
-            kind::LIST,
-            Request {
-                path: folder.to_owned(),
-                ..Request::default()
-            },
-        )?;
-        Ok(reply
+        crate::task::ready(self.entries_async(folder))?
+    }
+
+    pub(crate) async fn entries_async(&self, folder: &str) -> io::Result<Vec<discover::Entry>> {
+        let reply = self
+            .ask_async(
+                kind::LIST,
+                Request {
+                    path: folder.to_owned(),
+                    ..Request::default()
+                },
+            )
+            .await?;
+        let entries: Vec<_> = reply
             .entries
             .unwrap_or_default()
             .iter()
             .map(entry)
-            .collect())
+            .collect();
+        #[cfg(target_arch = "wasm32")]
+        self.cache_entries(folder, &entries).await?;
+        Ok(entries)
     }
 
     /// The stamp of the file at `path`: the host's last report of it where this guest holds
     /// that image, else the host's answer.
+    #[cfg(not(target_arch = "wasm32"))]
     fn stamp(&self, path: &str) -> io::Result<Stamp> {
+        crate::task::ready(self.stamp_async(path))?
+    }
+
+    async fn stamp_async(&self, path: &str) -> io::Result<Stamp> {
         if let Some(stamp) = self.inner.current.lock().unwrap().get(path) {
             return Ok(stamp.clone());
         }
-        let reply = self.ask(
-            kind::STAMP,
-            Request {
-                path: path.to_owned(),
-                ..Request::default()
-            },
-        )?;
+        let reply = self
+            .ask_async(
+                kind::STAMP,
+                Request {
+                    path: path.to_owned(),
+                    ..Request::default()
+                },
+            )
+            .await?;
         reply
             .stamp
             .as_ref()
@@ -1246,7 +1375,19 @@ impl Guest {
             .try_into()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn commit(
+        &self,
+        path: &str,
+        transaction: &Transaction,
+    ) -> std::result::Result<(), CommitError> {
+        crate::task::ready(self.commit_async(path, transaction)).map_err(|error| CommitError {
+            state: CommitState::NotCommitted,
+            error,
+        })?
+    }
+
+    async fn commit_async(
         &self,
         path: &str,
         transaction: &Transaction,
@@ -1255,25 +1396,93 @@ impl Guest {
             path: path.to_owned(),
             ..Request::default()
         };
-        self.carry(&mut request, transaction.to_bytes())
+        self.carry_async(&mut request, transaction.to_bytes())
+            .await
             .map_err(Failed::commit)?;
-        self.request(kind::COMMIT, request)
+        self.request_async(kind::COMMIT, request)
+            .await
             .map(drop)
             .map_err(Failed::commit)
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     fn confirm(&self, path: &str, base: &Stamp) -> std::result::Result<(), CommitError> {
+        crate::task::ready(self.confirm_async(path, base)).map_err(|error| CommitError {
+            state: CommitState::NotCommitted,
+            error,
+        })?
+    }
+
+    async fn confirm_async(
+        &self,
+        path: &str,
+        base: &Stamp,
+    ) -> std::result::Result<(), CommitError> {
         let request = Request {
             path: path.to_owned(),
             stamp: Some(base.into()),
             ..Request::default()
         };
-        self.request(kind::CONFIRM, request)
+        self.request_async(kind::CONFIRM, request)
+            .await
             .map(drop)
             .map_err(Failed::commit)
     }
 
+    async fn edits_async(
+        &self,
+        path: &str,
+        transaction: &Transaction,
+        edits: &[crate::PendingEdit],
+        revisions: &BTreeMap<onestore::ExGuid, onestore::ExGuid>,
+    ) -> std::result::Result<(), CommitError> {
+        let bytes = serde_json::to_vec(&batch::Edits {
+            edits: edits
+                .iter()
+                .map(|edit| (edit.author.clone(), edit.edit.clone()))
+                .collect(),
+            revisions: revisions.clone(),
+        })
+        .map_err(|error| CommitError {
+            state: CommitState::NotCommitted,
+            error: io::Error::other(error),
+        })?;
+        let mut request = Request {
+            path: path.to_owned(),
+            stamp: Some(transaction.base().into()),
+            ..Request::default()
+        };
+        self.carry_async(&mut request, bytes)
+            .await
+            .map_err(Failed::commit)?;
+        match self.request_async(kind::EDITS, request).await {
+            Ok(reply) => {
+                if let Some(stamp) = reply.stamp {
+                    let stamp = Stamp::try_from(&stamp).map_err(|error| CommitError {
+                        state: CommitState::Unknown,
+                        error,
+                    })?;
+                    self.inner
+                        .current
+                        .lock()
+                        .unwrap()
+                        .insert(path.to_owned(), stamp);
+                }
+                Ok(())
+            }
+            Err(Failed::Refused(failure))
+                if wire::error_kind(failure.kind) == io::ErrorKind::Unsupported =>
+            {
+                self.commit_async(path, transaction).await?;
+                self.inner.published(path, transaction);
+                Ok(())
+            }
+            Err(error) => Err(error.commit()),
+        }
+    }
+
     /// A request on `path` that answers nothing but whether it happened.
+    #[cfg(not(target_arch = "wasm32"))]
     fn verb(&self, kind: u16, path: &str, request: Request) -> Result<()> {
         self.ask(
             kind,
@@ -1338,16 +1547,14 @@ impl Inner {
 
     fn heard(self: &Arc<Self>, event: Event) {
         let serves = |hello: &Hello| {
-            hello.serves == Some(self.share)
-                || self
-                    .host
-                    .lock()
-                    .unwrap()
-                    .as_ref()
-                    .is_some_and(|(host, _)| host.peer == hello.peer)
+            self.host
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|(host, _)| host.peer == hello.peer)
         };
         match event {
-            Event::Met(hello, line) if serves(hello) => {
+            Event::Met(hello, line) if hello.serves == Some(self.share) => {
                 *self.host.lock().unwrap() = Some((Arc::clone(hello), line.clone()));
             }
             Event::Left(hello) if serves(hello) => {
@@ -1419,7 +1626,13 @@ impl Inner {
             self.relay.as_deref(),
             move |event| {
                 if let Some(inner) = inner.upgrade() {
-                    if matches!(event, Event::Frame { .. }) {
+                    if matches!(
+                        event,
+                        Event::Frame {
+                            kind: kind::DELTA | kind::TOUCHED,
+                            ..
+                        }
+                    ) {
                         inner.heard(event);
                     }
                     (inner.events)();
@@ -1450,6 +1663,8 @@ pub struct HostedRemote {
     /// The stamp last asked for, which an image the guest holds may already have.
     seen: Option<Stamp>,
     rejected: bool,
+    #[cfg(target_arch = "wasm32")]
+    pending: Option<web::Pending>,
 }
 
 impl HostedRemote {
@@ -1459,10 +1674,13 @@ impl HostedRemote {
             path: path.to_owned(),
             seen: None,
             rejected: false,
+            #[cfg(target_arch = "wasm32")]
+            pending: None,
         }
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl crate::Remote for HostedRemote {
     fn accepts_edits(&self) -> bool {
         !self.rejected
@@ -1478,57 +1696,26 @@ impl crate::Remote for HostedRemote {
         edits: &[crate::PendingEdit],
         revisions: &BTreeMap<onestore::ExGuid, onestore::ExGuid>,
     ) -> std::result::Result<(), CommitError> {
-        let bytes = serde_json::to_vec(&batch::Edits {
-            edits: edits
-                .iter()
-                .map(|edit| (edit.author.clone(), edit.edit.clone()))
-                .collect(),
-            revisions: revisions.clone(),
-        })
-        .map_err(|error| CommitError {
-            state: CommitState::NotCommitted,
-            error: io::Error::other(error),
-        })?;
-        let mut request = Request {
-            path: self.path.clone(),
-            stamp: Some(transaction.base().into()),
-            ..Request::default()
-        };
-        self.guest
-            .carry(&mut request, bytes)
-            .map_err(Failed::commit)?;
-        let result = self.guest.request(kind::EDITS, request);
-        match result {
-            Ok(reply) => {
-                if let Some(stamp) = reply.stamp {
-                    let stamp = Stamp::try_from(&stamp).map_err(|error| CommitError {
-                        state: CommitState::Unknown,
-                        error,
-                    })?;
-                    self.guest
-                        .inner
-                        .current
-                        .lock()
-                        .unwrap()
-                        .insert(self.path.clone(), stamp);
-                }
-                self.seen = None;
-                Ok(())
-            }
-            Err(Failed::Refused(failure))
-                if wire::error_kind(failure.kind) == io::ErrorKind::Unsupported =>
-            {
-                self.publish(transaction)
-            }
-            Err(error) => {
-                let error = error.commit();
-                if error.state == CommitState::NotCommitted {
-                    self.rejected = true;
-                    self.guest.inner.current.lock().unwrap().remove(&self.path);
-                }
-                Err(error)
-            }
+        let result =
+            crate::task::ready(
+                self.guest
+                    .edits_async(&self.path, transaction, edits, revisions),
+            )
+            .map_err(|error| CommitError {
+                state: CommitState::NotCommitted,
+                error,
+            })?;
+        if result.is_ok() {
+            self.seen = None;
         }
+        if result
+            .as_ref()
+            .is_err_and(|error| error.state == CommitState::NotCommitted)
+        {
+            self.rejected = true;
+            self.guest.inner.current.lock().unwrap().remove(&self.path);
+        }
+        result
     }
 
     fn read(&mut self) -> io::Result<Vec<u8>> {
@@ -1574,17 +1761,23 @@ type Listings = BTreeMap<String, Vec<(String, u8, u64, u64)>>;
 
 impl Hosted {
     pub(crate) fn new(guest: Arc<Guest>, listed: PathBuf) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        {
+            *guest.inner.catalog.lock().unwrap() = Some(listed.clone());
+        }
         Self { guest, listed }
     }
 }
 
 /// The host's folders, or as they were last listed while it can't be reached.
+#[cfg(not(target_arch = "wasm32"))]
 struct Source<'a> {
     guest: &'a Guest,
     kept: Listings,
     listed: Listings,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl discover::Source for Source<'_> {
     fn entries(&mut self, path: &str, limit: usize) -> io::Result<Vec<discover::Entry>> {
         let entries = match self.guest.entries(path) {
@@ -1630,6 +1823,7 @@ impl discover::Source for Source<'_> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Storage for Hosted {
     fn discover(
         &self,
@@ -1749,7 +1943,7 @@ impl Storage for Hosted {
     fn supersede(&self, path: &str, base: &Stamp, with: &str) -> Result<()> {
         let request = Request {
             to: Some(with.to_owned()),
-            stamp: Some(WireStamp::from(base)),
+            stamp: Some(wire::WireStamp::from(base)),
             ..Request::default()
         };
         self.guest.verb(kind::SUPERSEDE, path, request)

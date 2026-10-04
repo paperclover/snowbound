@@ -21,6 +21,106 @@ fn save(cache: &Replica, text: ExGuid, range: Range<u32>, replacement: &str) -> 
 }
 
 #[test]
+fn asynchronous_io_keeps_the_attempt_and_recovers_a_lost_reply() {
+    use std::{
+        future::Future,
+        pin::Pin,
+        task::{Context, Poll, Waker},
+    };
+
+    struct Deferred {
+        server: Server,
+        ready: bool,
+    }
+    impl Remote for Deferred {
+        fn pending(&mut self) -> Option<Pin<Box<dyn Future<Output = ()> + '_>>> {
+            let mut yielded = false;
+            Some(Box::pin(std::future::poll_fn(move |context| {
+                if yielded {
+                    self.ready = true;
+                    Poll::Ready(())
+                } else {
+                    yielded = true;
+                    context.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            })))
+        }
+        fn read(&mut self) -> io::Result<Vec<u8>> {
+            if !std::mem::take(&mut self.ready) {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            self.server.read()
+        }
+        fn stamp(&mut self) -> io::Result<onestore::Stamp> {
+            if !std::mem::take(&mut self.ready) {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            self.server.stamp()
+        }
+        fn publish(&mut self, transaction: &Transaction) -> Result<(), CommitError> {
+            if !std::mem::take(&mut self.ready) {
+                return Err(CommitError {
+                    state: CommitState::NotCommitted,
+                    error: io::ErrorKind::WouldBlock.into(),
+                });
+            }
+            self.server.publish(transaction)
+        }
+        fn confirm(&mut self, base: &onestore::Stamp) -> Result<(), CommitError> {
+            if !std::mem::take(&mut self.ready) {
+                return Err(CommitError {
+                    state: CommitState::NotCommitted,
+                    error: io::ErrorKind::WouldBlock.into(),
+                });
+            }
+            self.server.confirm(base)
+        }
+    }
+    fn run<T>(work: impl Future<Output = T>) -> T {
+        let mut work = std::pin::pin!(work);
+        let mut polls = 0;
+        loop {
+            polls += 1;
+            assert!(polls < 100, "An async operation stopped making progress");
+            if let Poll::Ready(result) = work.as_mut().poll(&mut Context::from_waker(Waker::noop()))
+            {
+                assert!(polls > 1);
+                return result;
+            }
+        }
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cache.sqlite");
+    let source = onestore::create_section("async.one", "Original", "Fixture").unwrap();
+    let (_, object, _) = text(&source);
+    let cache = Replica::create(&path, &source).unwrap();
+    let id = save(&cache, object, 0..0, "Browser ").unwrap();
+    let mut remote = Deferred {
+        server: Server::new(&source),
+        ready: false,
+    };
+    remote.server.fault = Fault::UnknownAfter;
+    assert!(matches!(
+        run(cache.sync_once_async(&mut remote)),
+        Err(Error::Remote(CommitError {
+            state: CommitState::Unknown,
+            ..
+        }))
+    ));
+    assert_eq!(remote.server.publications, 1);
+    drop(cache);
+    let cache = Replica::open(&path).unwrap();
+    assert!(
+        matches!(run(cache.sync_once_async(&mut remote)).unwrap().edit, Some((published, EditStatus::Published { .. })) if published == id)
+    );
+    assert_eq!(remote.server.publications, 1);
+    assert_eq!(text(&remote.server.visible).2, "Browser Original");
+    assert_eq!(remote.server.visible, remote.server.durable);
+    assert!(cache.pending().unwrap().is_empty());
+}
+
+#[test]
 fn an_unchanged_stamp_publishes_and_settles_without_reading_the_remote() {
     struct Counted {
         server: Server,

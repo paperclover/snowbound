@@ -119,7 +119,7 @@ fn removal_retires_one_credential_and_other_devices_reconnect_after_a_restart() 
         .secret;
     host.remove(&bob_key).unwrap();
     until("Bob was not removed", || {
-        bob.stopped() && bob.host().is_none()
+        bob.ended() == Some(share::Ended::Removed) && bob.host().is_none()
     });
     until("presence did not move to the new room", || {
         host.guests().len() == 1
@@ -129,7 +129,7 @@ fn removal_retires_one_credential_and_other_devices_reconnect_after_a_restart() 
     assert_eq!(current.members.len(), 1);
     assert_ne!(original_code, code(&host));
     assert!(alice.host().is_some());
-    assert!(!alice.stopped());
+    assert_eq!(alice.ended(), None);
     let live = Notebook::open_hosted(Arc::clone(&alice), directory.path().join("alice")).unwrap();
     assert_eq!(live.catalog().sections.len(), 2);
     let restarted: Sharing =

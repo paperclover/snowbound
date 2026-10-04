@@ -19,7 +19,6 @@ pub use wire::{Caret, Guid, Hello, Presence, Spot};
 
 use mdns_sd::{IfKind, ServiceDaemon, ServiceEvent, ServiceInfo};
 use minicbor::Encode;
-use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     io::{self, Read, Write},
@@ -46,124 +45,9 @@ const PATIENCE: Duration = Duration::from_secs(30);
 /// Wrong tries of a code met off any relay before it admits no one new, as a relay burns one.
 const TRIES: u32 = 5;
 
-/// The secret peers meet through.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Room {
-    /// A notebook's room, or a share's: a random secret only its members hold.
-    Notebook([u8; 16]),
-    /// A code typed on both ends (`code`), with a password where one is set: its room's
-    /// number names it on the network, and its secret and password only the two people know.
-    /// Its `owner`, the end sharing it, takes the number from a relay (the one the code has,
-    /// coming back; any free one for a secret alone) or picks one where it has no relay, and
-    /// judges every try, burning the code after too many wrong ones.
-    Code {
-        code: String,
-        password: String,
-        owner: bool,
-    },
-}
-
-impl Room {
-    /// The room a code typed on this end leads to.
-    pub fn join(code: &str, password: &str) -> Self {
-        Self::Code {
-            code: code.to_owned(),
-            password: password.to_owned(),
-            owner: false,
-        }
-    }
-
-    /// The room of a code this end shares: its secret, or a whole code to keep its number.
-    pub fn share(code: &str, password: &str) -> Self {
-        Self::Code {
-            code: code.to_owned(),
-            password: password.to_owned(),
-            owner: true,
-        }
-    }
-
-    /// What names the room in the clear: a hash of a room's secret, a code's number; none for
-    /// a code without one yet.
-    fn tag(&self) -> Option<String> {
-        match self {
-            Room::Notebook(id) => Some(hex(&Sha256::digest(
-                [&b"Snowbound room "[..], id].concat(),
-            )[..8])),
-            Room::Code { code, .. } => code_parts(code).0.map(|number| format!("code-{number}")),
-        }
-    }
-
-    fn secret(&self) -> Vec<u8> {
-        match self {
-            Room::Notebook(id) => id.to_vec(),
-            Room::Code { code, password, .. } => {
-                let mut secret = code_parts(code).1.into_bytes();
-                if !password.is_empty() {
-                    secret.push(b'\n');
-                    secret.extend_from_slice(password.as_bytes());
-                }
-                secret
-            }
-        }
-    }
-
-    fn owner(&self) -> bool {
-        matches!(self, Room::Code { owner: true, .. })
-    }
-}
-
-/// A code's room number, if it has one, and its secret: a whole code, or a secret alone.
-fn code_parts(code: &str) -> (Option<u32>, String) {
-    match code::parse(code) {
-        Some((number, secret)) => (Some(number), secret),
-        None => (None, code.trim().to_uppercase()),
-    }
-}
-
-/// Where peers are looked for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Reach {
-    /// Every network this computer is on.
-    Network,
-    /// This computer alone, for two copies of the app side by side.
-    Loopback,
-}
-
-#[derive(Clone, Debug)]
-pub struct Peer {
-    pub hello: Arc<Hello>,
-    /// None until the peer first says where it is.
-    pub presence: Option<Presence>,
-}
-
-/// What happened, as `Live::start`'s `events` hears it on a network thread.
-pub enum Event<'a> {
-    /// The peers, their presence, the code or the relay's answer changed.
-    Changed,
-    /// A stream to a peer opened, with the line to it.
-    Met(&'a Arc<Hello>, &'a Line),
-    /// A peer's stream ended.
-    Left(&'a Arc<Hello>),
-    /// A frame of a kind presence doesn't read itself, on a stream or to the group.
-    Frame {
-        from: &'a Arc<Hello>,
-        kind: u16,
-        body: &'a [u8],
-    },
-}
-
-/// How the relay last answered.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Relayed {
-    /// Not asked yet, or no relay.
-    Unknown,
-    /// In the room.
-    Joined,
-    /// Answered with this HTTP status, and how long it asked to wait.
-    Refused(u16, Option<Duration>),
-    /// Not reached, and why.
-    Unreachable(Trouble),
-}
+mod model;
+pub use model::{Event, Peer, Reach, Relayed, Room};
+use model::{code_parts, hex};
 
 /// Presence on the network while it lives; dropping it leaves.
 pub struct Live {
@@ -907,10 +791,6 @@ fn decode(text: &str) -> String {
         }
     }
     String::from_utf8_lossy(&decoded).into_owned()
-}
-
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(test)]
