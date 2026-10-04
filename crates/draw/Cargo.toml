@@ -64,3 +64,7 @@ web-sys = { version = "0.3", optional = true, features = [
 [dev-dependencies]
 pollster = "0.4"
 png = "0.18"
+
+[[example]]
+name = "snowflakes"
+required-features = ["wgpu"]
