@@ -564,7 +564,7 @@ export function mirrorTree({ tree, focus, root, nodes }) {
     const text = role === "Label" || role === "TextRun" || role === "StaticText";
     if (name && !text) node.setAttribute("aria-label", name);
     else node.removeAttribute("aria-label");
-    node.toggleAttribute("aria-disabled", disabled);
+    node.setAttribute("aria-disabled", String(disabled));
     if (toggled === null) node.removeAttribute("aria-checked");
     else node.setAttribute("aria-checked", String(toggled));
     const kids = children.map(element);

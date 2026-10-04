@@ -428,7 +428,7 @@ fn mirrored(update: &accesskit::TreeUpdate) -> js_sys::Object {
             let children: js_sys::Array = node
                 .children()
                 .iter()
-                .map(|child| JsValue::from_f64(child.0 as f64))
+                .map(|child| JsValue::from_str(&child.0.to_string()))
                 .collect();
             let bounds = node.bounds().map_or(JsValue::NULL, |rect| {
                 js_sys::Array::of4(
@@ -441,7 +441,7 @@ fn mirrored(update: &accesskit::TreeUpdate) -> js_sys::Object {
             });
             let text = |text: Option<&str>| text.map_or(JsValue::NULL, JsValue::from_str);
             [
-                JsValue::from_f64(id.0 as f64),
+                JsValue::from_str(&id.0.to_string()),
                 JsValue::from_str(&format!("{:?}", node.role())),
                 text(node.label()),
                 text(node.value()),
@@ -462,13 +462,12 @@ fn mirrored(update: &accesskit::TreeUpdate) -> js_sys::Object {
         let _ = js_sys::Reflect::set(&mirrored, &key.into(), value);
     };
     set("tree", &tree(update.tree_id));
-    set("focus", &JsValue::from_f64(update.focus.0 as f64));
+    set("focus", &JsValue::from_str(&update.focus.0.to_string()));
     set(
         "root",
-        &update
-            .tree
-            .as_ref()
-            .map_or(JsValue::NULL, |info| JsValue::from_f64(info.root.0 as f64)),
+        &update.tree.as_ref().map_or(JsValue::NULL, |info| {
+            JsValue::from_str(&info.root.0.to_string())
+        }),
     );
     set("nodes", &nodes);
     mirrored
@@ -486,8 +485,8 @@ pub fn accessibility(on: bool) {
 
 /// Assistive technology acted on node `node` of tree `tree`: 0 clicks it, 1 focuses it.
 #[wasm_bindgen]
-pub fn access(tree: String, node: f64, action: u8) {
-    let Ok(tree) = tree.parse() else {
+pub fn access(tree: String, node: String, action: u8) {
+    let (Ok(tree), Ok(node)) = (tree.parse(), node.parse()) else {
         return;
     };
     let request = accesskit::ActionRequest {
@@ -496,7 +495,7 @@ pub fn access(tree: String, node: f64, action: u8) {
             _ => accesskit::Action::Click,
         },
         target_tree: accesskit::TreeId(tree),
-        target_node: accesskit::NodeId(node as u64),
+        target_node: accesskit::NodeId(node),
         data: None,
     };
     send(UserEvent::Then(Box::new(move |state| {
