@@ -1,8 +1,7 @@
 //! Live Share: a notebook one Snowbound holds, opened on others through a short code. The
-//! host serves its notebook's storage verbs (`session::Storage`) to each peer in the share's
-//! room; a guest runs the replica, queue and merge it runs on an SMB share against those
-//! verbs, so offline queueing, rebases and conflict pages work as there, and the host's files
-//! stay what its own storage writes. A guest first meets the host in the code's room, where
+//! host serves its notebook's storage verbs (`session::Storage`) and batches guests' ops into
+//! guarded publications. A guest runs the same replica and durable queue as on an SMB share;
+//! protected sections and older peers use transactions. A guest first meets the host in the code's room, where
 //! the host welcomes it with the share's room and secret; a new share has a new secret, so
 //! stopping retires every guest. Large bodies travel a chunk at a time, each answered before
 //! the next, so a relay never holds much for a slow peer.
@@ -28,6 +27,8 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+mod batch;
 
 /// The most bytes one message of a read or an upload carries.
 const CHUNK: usize = 128 << 10;
@@ -234,6 +235,7 @@ impl Host {
             snapshots: Mutex::default(),
             puts: Mutex::default(),
             guests: Mutex::default(),
+            writers: Mutex::default(),
             host: Mutex::default(),
             room: OnceLock::new(),
         });
@@ -393,6 +395,7 @@ struct Served {
     /// Bytes a later request carries, by guest and upload.
     puts: Mutex<ByGuest<Vec<u8>>>,
     guests: Mutex<BTreeMap<[u8; 16], Admitted>>,
+    writers: Mutex<HashMap<String, mpsc::SyncSender<batch::Waiting>>>,
     /// Hears the paths guests changed, as the host's own notebook should.
     host: Mutex<Option<crate::session::Listener>>,
     /// The share's room, to tell guests what changed.
@@ -524,7 +527,7 @@ impl Served {
         guest.held.truncate(IMAGES);
     }
 
-    fn handle(&self, peer: &[u8; 16], kind: u16, body: &[u8]) -> Reply {
+    fn handle(self: &Arc<Self>, peer: &[u8; 16], kind: u16, body: &[u8]) -> Reply {
         let request = match minicbor::decode::<Request>(body) {
             Ok(request) => request,
             Err(_) => {
@@ -541,7 +544,7 @@ impl Served {
         }
     }
 
-    fn answer(&self, peer: &[u8; 16], kind: u16, request: Request) -> Result<Reply> {
+    fn answer(self: &Arc<Self>, peer: &[u8; 16], kind: u16, request: Request) -> Result<Reply> {
         let path = request.path.as_str();
         if !(path.is_empty() && matches!(kind, kind::LIST | kind::PUT) || allowed(path))
             || request.to.as_deref().is_some_and(|to| !allowed(to))
@@ -606,6 +609,7 @@ impl Served {
                 self.changed(&[path.to_owned()]);
                 done
             }
+            kind::EDITS => self.batch(peer, request)?,
             kind::CONFIRM => {
                 self.storage.confirm(path, &stamp()?)?;
                 done
@@ -1474,6 +1478,7 @@ pub struct HostedRemote {
     path: String,
     /// The stamp last asked for, which an image the guest holds may already have.
     seen: Option<Stamp>,
+    rejected: bool,
 }
 
 impl HostedRemote {
@@ -1482,12 +1487,81 @@ impl HostedRemote {
             guest: Arc::clone(guest),
             path: path.to_owned(),
             seen: None,
+            rejected: false,
         }
     }
 }
 
 impl crate::Remote for HostedRemote {
+    fn accepts_edits(&self) -> bool {
+        !self.rejected
+            && self
+                .guest
+                .host()
+                .is_some_and(|host| host.ops == Some(1) && host.kinds.contains(&kind::EDITS))
+    }
+
+    fn publish_edits(
+        &mut self,
+        transaction: &Transaction,
+        edits: &[crate::PendingEdit],
+        revisions: &BTreeMap<onestore::ExGuid, onestore::ExGuid>,
+    ) -> std::result::Result<(), CommitError> {
+        let bytes = serde_json::to_vec(&batch::Edits {
+            edits: edits
+                .iter()
+                .map(|edit| (edit.author.clone(), edit.edit.clone()))
+                .collect(),
+            revisions: revisions.clone(),
+        })
+        .map_err(|error| CommitError {
+            state: CommitState::NotCommitted,
+            error: io::Error::other(error),
+        })?;
+        let mut request = Request {
+            path: self.path.clone(),
+            stamp: Some(transaction.base().into()),
+            ..Request::default()
+        };
+        self.guest
+            .carry(&mut request, bytes)
+            .map_err(Failed::commit)?;
+        let result = self.guest.request(kind::EDITS, request);
+        match result {
+            Ok(reply) => {
+                if let Some(stamp) = reply.stamp {
+                    let stamp = Stamp::try_from(&stamp).map_err(|error| CommitError {
+                        state: CommitState::Unknown,
+                        error,
+                    })?;
+                    self.guest
+                        .inner
+                        .current
+                        .lock()
+                        .unwrap()
+                        .insert(self.path.clone(), stamp);
+                }
+                self.seen = None;
+                Ok(())
+            }
+            Err(Failed::Refused(failure))
+                if wire::error_kind(failure.kind) == io::ErrorKind::Unsupported =>
+            {
+                self.publish(transaction)
+            }
+            Err(error) => {
+                let error = error.commit();
+                if error.state == CommitState::NotCommitted {
+                    self.rejected = true;
+                    self.guest.inner.current.lock().unwrap().remove(&self.path);
+                }
+                Err(error)
+            }
+        }
+    }
+
     fn read(&mut self) -> io::Result<Vec<u8>> {
+        self.rejected = false;
         if let Some(image) = (self.seen.as_ref()).and_then(|seen| self.guest.held(&self.path, seen))
         {
             return Ok(image);

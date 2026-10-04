@@ -19,6 +19,18 @@ pub trait Remote {
     /// the last observed image's, synchronization neither reads nor revalidates the file.
     fn stamp(&mut self) -> io::Result<Stamp>;
     fn publish(&mut self, transaction: &Transaction) -> std::result::Result<(), CommitError>;
+    fn accepts_edits(&self) -> bool {
+        false
+    }
+    fn publish_edits(
+        &mut self,
+        transaction: &Transaction,
+        edits: &[PendingEdit],
+        revisions: &BTreeMap<ExGuid, ExGuid>,
+    ) -> std::result::Result<(), CommitError> {
+        let _ = (edits, revisions);
+        self.publish(transaction)
+    }
     /// Confirms that the file still has `base`'s stamp and is durable (`onestore::confirm`).
     fn confirm(&mut self, base: &Stamp) -> std::result::Result<(), CommitError>;
     /// The versions a file provider keeps beside the file, as iCloud Drive keeps the commits
@@ -195,6 +207,10 @@ impl Replica {
             remote.retire(&version.id, keep).map_err(Error::RemoteIo)?;
         }
         let state = state(&*self.lock()?)?;
+        let batched = self.section.key.is_none()
+            && state.queued
+            && state.blocked.is_none()
+            && remote.accepts_edits();
         let observed = remote.stamp().map_err(Error::RemoteIo)?;
         if let Some(blocked) = &state.blocked
             && observed == *state.remote.as_ref().unwrap_or(&state.base)
@@ -211,7 +227,7 @@ impl Replica {
             });
         }
         let image = match observed {
-            observed if observed == state.base => None,
+            observed if observed == state.base || batched => None,
             _ => {
                 let image = remote.read().map_err(Error::RemoteIo)?;
                 // Protected elsewhere: a section written anew, which only its key reads.
@@ -348,7 +364,20 @@ impl Replica {
                 changed,
             });
         };
-        match remote.publish(&transaction) {
+        let published = if self.section.key.is_none() && remote.accepts_edits() {
+            let connection = self.lock()?;
+            let edits = queue::load(&connection, None, Some(batch))?;
+            let revisions = decode_revisions(&connection.query_row(
+                "SELECT revisions FROM batches WHERE id=?1",
+                [batch],
+                |row| row.get::<_, String>(0),
+            )?)?;
+            drop(connection);
+            remote.publish_edits(&transaction, &edits, &revisions)
+        } else {
+            remote.publish(&transaction)
+        };
+        match published {
             Ok(()) => {}
             Err(error) if error.state == CommitState::NotCommitted => {
                 self.lock()?
@@ -363,6 +392,11 @@ impl Replica {
         }
         self.acknowledge(batch, Some(&transaction), None)?;
         let revision = self.receipt(id)?;
+        if batched {
+            changed.extend(self.rebase(Some(remote.read().map_err(Error::RemoteIo)?))?);
+            changed.sort();
+            changed.dedup();
+        }
         Ok(Synced {
             edit: Some((id, EditStatus::Published { revision })),
             changed,

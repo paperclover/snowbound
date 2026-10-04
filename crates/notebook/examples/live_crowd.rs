@@ -141,6 +141,11 @@ fn host(url: &str, paragraphs: usize) {
     println!("code {}", host.code().unwrap());
     let _ = std::io::stdin().read_to_end(&mut Vec::new());
     let image = std::fs::read(&file).unwrap();
+    if let Some(output) = std::env::var_os("SNOWBOUND_LIVE_EVIDENCE") {
+        let output = Path::new(&output);
+        std::fs::create_dir_all(output).unwrap();
+        std::fs::copy(&file, output.join("Garden.one")).unwrap();
+    }
     let size = image.len();
     let arena = onestore::Arena::default();
     let mut section = onestore::Section::open(&arena, image).unwrap();

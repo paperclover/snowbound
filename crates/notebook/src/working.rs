@@ -823,6 +823,14 @@ fn rebase(
         )
         .collect();
     changed.extend(converged);
+    for (space, rid) in &before {
+        if after.get(space) == Some(rid)
+            && let (Ok(before), Ok(after)) = (old.page(*space), remote.page(*space))
+            && before != after
+        {
+            changed.insert(*space);
+        }
+    }
     Ok(changed.into_iter().collect())
 }
 

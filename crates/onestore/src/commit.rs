@@ -492,6 +492,38 @@ impl TryFrom<Wire> for Transaction {
 }
 
 impl Transaction {
+    /// Combines a following transaction into one guarded publication, retaining every revision.
+    pub fn extend(&mut self, next: Transaction) -> Result<(), crate::Error> {
+        let length = self.base.length + self.append.len() as u64;
+        if next.base.header != self.header || next.base.length != length {
+            return Err(crate::Error {
+                offset: 0,
+                message: "Transactions are not consecutive",
+            });
+        }
+        if next.patches.iter().any(|(offset, bytes)| {
+            *offset < 1024 || offset.saturating_add(bytes.len() as u64) > length
+        }) {
+            return Err(crate::Error {
+                offset: 0,
+                message: "A patch outside the base's data",
+            });
+        }
+        for (offset, bytes) in next.patches {
+            let earlier = (self.base.length.saturating_sub(offset) as usize).min(bytes.len());
+            if earlier != 0 {
+                self.patches.push((offset, bytes[..earlier].to_vec()));
+            }
+            if earlier < bytes.len() {
+                let at = (offset + earlier as u64 - self.base.length) as usize;
+                self.append[at..at + bytes.len() - earlier].copy_from_slice(&bytes[earlier..]);
+            }
+        }
+        self.append.extend_from_slice(&next.append);
+        self.header = next.header;
+        Ok(())
+    }
+
     /// The image this transaction applies to.
     pub fn base(&self) -> &Stamp {
         &self.base
@@ -656,6 +688,33 @@ mod tests {
             output[..count].copy_from_slice(&rest[..count]);
             Ok(count)
         }
+    }
+
+    #[test]
+    fn consecutive_transactions_publish_the_same_bytes_together() {
+        let original = vec![1; 2048];
+        let first = Transaction {
+            base: Stamp::of(&original).unwrap(),
+            append: vec![2; 32],
+            patches: vec![(1024, vec![3; 8])],
+            header: [4; 1024],
+        };
+        let mut separate = original.clone();
+        first.apply(&mut separate).unwrap();
+        let second = Transaction {
+            base: Stamp::of(&separate).unwrap(),
+            append: vec![5; 16],
+            patches: vec![(1028, vec![6; 8]), (2044, vec![7; 12])],
+            header: [8; 1024],
+        };
+        second.apply(&mut separate).unwrap();
+        let mut combined = first.clone();
+        assert!(combined.extend(first).is_err());
+        combined.extend(second).unwrap();
+        let combined = Transaction::from_bytes(&combined.to_bytes()).unwrap();
+        let mut together = original;
+        combined.apply(&mut together).unwrap();
+        assert_eq!(together, separate);
     }
 
     #[test]

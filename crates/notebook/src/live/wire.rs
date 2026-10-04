@@ -65,6 +65,7 @@ pub mod kind {
     pub const EXISTS: u16 = 271;
     /// A chunk of the bytes a later request carries.
     pub const PUT: u16 = 272;
+    pub const EDITS: u16 = 273;
     pub const REPLY: u16 = 511;
 }
 
@@ -94,6 +95,7 @@ pub const KNOWN: &[u16] = &[
     kind::READ_FILE,
     kind::EXISTS,
     kind::PUT,
+    kind::EDITS,
     kind::REPLY,
 ];
 
@@ -118,6 +120,8 @@ pub struct Hello {
     /// The share this peer hosts, whose storage requests it answers.
     #[cbor(n(5), with = "minicbor::bytes")]
     pub serves: Option<[u8; 16]>,
+    #[n(6)]
+    pub ops: Option<u16>,
 }
 
 impl Hello {
@@ -132,6 +136,7 @@ impl Hello {
             app: format!("Snowbound {}", env!("CARGO_PKG_VERSION")),
             kinds: KNOWN.to_vec(),
             serves: None,
+            ops: Some(1),
         })
     }
 }

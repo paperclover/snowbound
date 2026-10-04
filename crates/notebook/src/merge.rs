@@ -120,7 +120,7 @@ pub(crate) fn rebase(
                 }
                 Op::Section(section_op) => {
                     advance(&mut state.local, section_op);
-                    let mut kept = state.form(new, section_op)?.map(Op::Section);
+                    let mut kept = state.form(old, new, section_op)?.map(Op::Section);
                     if let Some(form) = &kept
                         && !apply(&mut state, new, form)?
                     {
@@ -425,11 +425,15 @@ impl Replay {
             Some(diff) => diff,
             None => {
                 let diff = match (self.before.get(&space), self.after.get(&space)) {
-                    (Some(before), Some(after)) if before != after => Some(Diff {
-                        old: Index::of(&old.page(space)?),
-                        new: Index::of(&new.page(space)?),
-                        regions: BTreeMap::new(),
-                    }),
+                    (Some(before), Some(after)) => {
+                        let (old, new) = (old.page(space)?, new.page(space)?);
+                        // A host's merged batch retains its guest's revision identity.
+                        (before != after || old != new).then(|| Diff {
+                            old: Index::of(&old),
+                            new: Index::of(&new),
+                            regions: BTreeMap::new(),
+                        })
+                    }
                     _ => None,
                 };
                 self.diffs.entry(space).or_insert(diff)
@@ -469,7 +473,12 @@ impl Replay {
     /// `anchor`, the page edits of pages the remote still has and did not move, removals of
     /// pages the remote still has (a page it changed is not removed), a conflict page's
     /// content as a page of its own where the remote removed its page.
-    fn form(&self, new: &mut Section<'_>, op: &SectionOp) -> Result<Option<SectionOp>> {
+    fn form(
+        &self,
+        old: &mut Section<'_>,
+        new: &mut Section<'_>,
+        op: &SectionOp,
+    ) -> Result<Option<SectionOp>> {
         let conflicts: BTreeSet<ExGuid> = new
             .conflicts()?
             .into_iter()
@@ -539,6 +548,7 @@ impl Replay {
                     .iter()
                     .filter(|space| {
                         self.listed(**space) && self.before.get(space) == self.after.get(space)
+                            && matches!((old.page(**space), new.page(**space)), (Ok(a), Ok(b)) if a == b)
                             || conflicts.contains(space)
                     })
                     .copied()
