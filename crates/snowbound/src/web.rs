@@ -44,6 +44,8 @@ extern "C" {
     fn place_input(x: f32, y: f32, height: f32, text: bool);
     #[wasm_bindgen(js_name = writeClipboard)]
     fn write_clipboard(text: &str);
+    #[wasm_bindgen(js_name = copyPicture)]
+    fn copy_picture(bytes: &[u8]);
     /// Hands `bytes` to the browser to save as `name`, of MIME type `kind`.
     pub fn download(name: &str, bytes: &[u8], kind: &str);
     #[wasm_bindgen(js_name = pickFiles)]
@@ -523,9 +525,14 @@ impl Clipboard {
         Ok(())
     }
 
-    /// A copy's text, the format every browser's clipboard takes.
+    /// Text or a PNG picture on the browser's clipboard.
     pub fn set(&mut self, copied: &crate::paste::Copied) -> Result<(), Box<dyn Error>> {
-        self.set_text(copied.text.clone())
+        if let Some(picture) = &copied.picture {
+            copy_picture(picture);
+            Ok(())
+        } else {
+            self.set_text(copied.text.clone())
+        }
     }
 
     pub fn get_clip(&mut self) -> Option<String> {

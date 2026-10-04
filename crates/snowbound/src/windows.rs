@@ -1112,22 +1112,49 @@ impl Clipboard {
         self.0.set_text(text)
     }
 
-    /// Text, `HTML Format` and Snowbound's own, as one copy.
+    /// Text and HTML, or a PNG and DIB, beside Snowbound's lossless clip.
     pub fn set(&mut self, copied: &crate::paste::Copied) -> Result<(), &'static str> {
-        use windows_sys::Win32::System::{DataExchange as clip, Memory, Ole::CF_UNICODETEXT};
-        let text: Vec<u8> = copied
-            .text
-            .replace('\n', "\r\n")
-            .encode_utf16()
-            .chain([0])
-            .flat_map(u16::to_le_bytes)
-            .collect();
-        let html = crate::paste::cf_html(&copied.html);
-        let formats = [
-            (u32::from(CF_UNICODETEXT), text),
-            (registered("HTML Format"), [html.as_bytes(), &[0]].concat()),
-            (registered(CLIP), [copied.clip.as_bytes(), &[0]].concat()),
-        ];
+        use windows_sys::Win32::System::{
+            DataExchange as clip, Memory,
+            Ole::{CF_DIB, CF_UNICODETEXT},
+        };
+        let formats = if let Some(picture) = &copied.picture {
+            let (size, mut rgba) =
+                crate::paste::pixels(picture).map_err(|_| "The picture couldn't be decoded")?;
+            for pixel in rgba.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            let header = [
+                40_u32.to_le_bytes().as_slice(),
+                (size[0] as i32).to_le_bytes().as_slice(),
+                (-(size[1] as i32)).to_le_bytes().as_slice(),
+                1_u16.to_le_bytes().as_slice(),
+                32_u16.to_le_bytes().as_slice(),
+                0_u32.to_le_bytes().as_slice(),
+                (rgba.len() as u32).to_le_bytes().as_slice(),
+                &[0; 16],
+            ]
+            .concat();
+            vec![
+                (u32::from(CF_DIB), [header, rgba].concat()),
+                (registered("PNG"), picture.clone()),
+                (registered(CLIP), [copied.clip.as_bytes(), &[0]].concat()),
+            ]
+        } else {
+            let text: Vec<u8> = copied
+                .text
+                .replace('\n', "\r\n")
+                .encode_utf16()
+                .chain([0])
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            let html = crate::paste::cf_html(&copied.html);
+            vec![
+                (u32::from(CF_UNICODETEXT), text),
+                (registered("HTML Format"), [html.as_bytes(), &[0]].concat()),
+                (registered(CLIP), [copied.clip.as_bytes(), &[0]].concat()),
+            ]
+        };
         let _open = Open::new(self.1)?;
         if unsafe { clip::EmptyClipboard() } == 0 {
             return Err("The clipboard couldn't be emptied");

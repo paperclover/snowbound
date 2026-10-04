@@ -2069,14 +2069,15 @@ impl CanvasEditor {
 
     /// The address picture `id` links to, in an outline or on the page.
     pub(crate) fn picture_link(&self, id: ExGuid) -> Option<&str> {
-        let image = match self.image(id) {
-            Some(image) => image,
-            None => match &self.outline_picture(id)?.3.content {
-                ParagraphContent::Image(image) => image,
-                _ => return None,
-            },
-        };
-        image.link.as_deref()
+        self.picture(id)?.link.as_deref()
+    }
+
+    pub(crate) fn picture(&self, id: ExGuid) -> Option<&onestore::page::Image> {
+        self.image(id)
+            .or_else(|| match &self.outline_picture(id)?.3.content {
+                ParagraphContent::Image(image) => Some(image),
+                _ => None,
+            })
     }
 
     /// The file a paragraph holds or the page shows, which the host opens and saves.

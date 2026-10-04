@@ -47,8 +47,12 @@ const CLIP: &str = "application/x-snowbound-clip";
 /// How long a paste waits on the app that copied.
 const PATIENCE: Duration = Duration::from_secs(2);
 
-/// The HTML and Snowbound's own format of this process's last copy through X11.
-static LAST_COPY: Mutex<Option<(String, String)>> = Mutex::new(None);
+enum CopyFormat {
+    Html(String),
+    Picture(arboard::ImageData<'static>),
+}
+
+static LAST_COPY: Mutex<Option<(CopyFormat, String)>> = Mutex::new(None);
 
 pub enum Clipboard {
     Wayland(Box<Wayland>),
@@ -82,28 +86,61 @@ impl Clipboard {
     pub fn set(&mut self, copied: &crate::paste::Copied) -> Result<(), Box<dyn Error>> {
         match self {
             Self::Wayland(wayland) => {
+                if let Some(picture) = &copied.picture {
+                    return wayland.copy(vec![
+                        ("image/png", picture.clone()),
+                        (CLIP, copied.clip.clone().into_bytes()),
+                    ]);
+                }
                 let text = TEXT.map(|kind| (kind, copied.text.clone().into_bytes()));
                 let rich = [("text/html", &copied.html), (CLIP, &copied.clip)]
                     .map(|(kind, bytes)| (kind, bytes.clone().into_bytes()));
                 wayland.copy(text.into_iter().chain(rich).collect())
             }
             Self::X11(clipboard) => {
+                if let Some(picture) = &copied.picture {
+                    let ([width, height], bytes) = crate::paste::pixels(picture)?;
+                    let image = arboard::ImageData {
+                        width: width as usize,
+                        height: height as usize,
+                        bytes: bytes.into(),
+                    };
+                    clipboard.set_image(image.clone())?;
+                    *LAST_COPY.lock().unwrap() =
+                        Some((CopyFormat::Picture(image), copied.clip.clone()));
+                    return Ok(());
+                }
                 clipboard.set().html(&copied.html, Some(&copied.text))?;
-                *LAST_COPY.lock().unwrap() = Some((copied.html.clone(), copied.clip.clone()));
+                *LAST_COPY.lock().unwrap() =
+                    Some((CopyFormat::Html(copied.html.clone()), copied.clip.clone()));
                 Ok(())
             }
         }
     }
 
-    /// What Snowbound itself copied, if it did: on X11, which arboard offers no format of
-    /// Snowbound's own through, the last copy's, while the clipboard holds its HTML.
+    /// On X11, the last clip while the clipboard still holds its HTML or pixels.
     pub fn get_clip(&mut self) -> Option<String> {
         if let Self::Wayland(wayland) = self {
             return String::from_utf8(wayland.paste(CLIP)?).ok();
         }
-        let html = self.get_html()?;
+        let Self::X11(clipboard) = self else {
+            return None;
+        };
         match &*LAST_COPY.lock().unwrap() {
-            Some((copied, clip)) if *copied == html => Some(clip.clone()),
+            Some((CopyFormat::Html(copied), clip))
+                if clipboard.get().html().ok().as_ref() == Some(copied) =>
+            {
+                Some(clip.clone())
+            }
+            Some((CopyFormat::Picture(copied), clip)) => clipboard
+                .get_image()
+                .ok()
+                .filter(|image| {
+                    image.width == copied.width
+                        && image.height == copied.height
+                        && image.bytes == copied.bytes
+                })
+                .map(|_| clip.clone()),
             _ => None,
         }
     }

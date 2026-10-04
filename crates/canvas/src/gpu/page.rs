@@ -316,8 +316,7 @@ impl PageScene {
         Ok(())
     }
 
-    /// Follows `editor` after an edit or undo brought page-level pictures the scene has not
-    /// seen, as `refresh` does.
+    /// Follows pictures and file previews brought by an edit or undo.
     pub(crate) fn follow(
         &mut self,
         editor: &mut CanvasEditor,
@@ -332,7 +331,20 @@ impl PageScene {
             }
             _ => true,
         };
-        if editor.objects.iter().all(known) {
+        let outlines_known = editor.outlines().iter().all(|outline| {
+            crate::document::descendants(outline.document().nodes(), None).all(|(_, _, node)| {
+                match &node.content {
+                    onestore::page::ParagraphContent::Image(image) => {
+                        self.pictures.contains_key(&image.id)
+                    }
+                    onestore::page::ParagraphContent::Attachment(file) => {
+                        file.preview.is_none() || self.pictures.contains_key(&file.id)
+                    }
+                    _ => true,
+                }
+            })
+        });
+        if editor.objects.iter().all(known) && outlines_known {
             return Ok(());
         }
         self.refresh(editor, engine)
@@ -400,14 +412,15 @@ impl PageScene {
                     payloads.push((source.id, [source.preview.as_ref(), None]))
                 }
                 Content::Outline { source, .. } => nested(&source.paragraphs, &mut payloads),
-                Content::Editable(id) => {
-                    if let Some(outline) =
-                        editor.and_then(|editor| editor.outlines().iter().find(|o| o.id == *id))
-                    {
-                        nested(outline.document().nodes(), &mut payloads);
-                    }
-                }
-                Content::Date { .. } | Content::Ink(_) | Content::ReadOnly(_) => {}
+                Content::Editable(_)
+                | Content::Date { .. }
+                | Content::Ink(_)
+                | Content::ReadOnly(_) => {}
+            }
+        }
+        if let Some(editor) = editor {
+            for outline in editor.outlines() {
+                nested(outline.document().nodes(), &mut payloads);
             }
         }
         let mut pictures = std::collections::BTreeMap::new();
@@ -515,14 +528,15 @@ impl PageScene {
                         outline(layout, origin, &mut rects);
                     }
                 }
-                Content::Editable(id) => {
-                    if let Some(editable) =
-                        editor.and_then(|editor| editor.visible_outlines().find(|o| o.id == *id))
-                    {
-                        outline(editable.shaped(), editable.origin(), &mut rects);
-                    }
-                }
-                Content::Date { .. } | Content::Ink(_) | Content::ReadOnly(_) => {}
+                Content::Editable(_)
+                | Content::Date { .. }
+                | Content::Ink(_)
+                | Content::ReadOnly(_) => {}
+            }
+        }
+        if let Some(editor) = editor {
+            for editable in editor.visible_outlines() {
+                outline(editable.shaped(), editable.origin(), &mut rects);
             }
         }
         rects

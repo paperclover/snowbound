@@ -443,6 +443,11 @@ export function writeClipboard(text) {
   navigator.clipboard.writeText(text).catch((error) => console.warn("Copy", error));
 }
 
+export function copyPicture(bytes) {
+  navigator.clipboard.write([new ClipboardItem({ "image/png": new Blob([bytes], { type: "image/png" }) })])
+    .catch((error) => console.warn("Copy", error));
+}
+
 export function download(name, bytes, kind) {
   const url = URL.createObjectURL(new Blob([bytes], { type: kind }));
   const link = Object.assign(document.createElement("a"), { href: url, download: name });

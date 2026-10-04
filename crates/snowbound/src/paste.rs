@@ -8,26 +8,85 @@ use std::{
     path::{Path, PathBuf},
 };
 
-/// Every format Copy puts on the clipboard for one selection, which each platform's clipboard
-/// offers together: text; HTML, as OneNote 2010 offers it beside text (lab, 2026-10-02); and
-/// Snowbound's own format, [`Clip::encode`]'s JSON, which pastes losslessly into Snowbound.
-/// Its name is `net.paperclover.snowbound.clip` on macOS, `Snowbound Clip` on Windows and
-/// `application/x-snowbound-clip` where formats are MIME types.
+/// Copy offers text and HTML, or a picture as PNG, beside Snowbound's lossless clip.
 pub(crate) struct Copied {
     pub text: String,
     /// A whole page, the copy between `<!--StartFragment-->` and `<!--EndFragment-->`.
     pub html: String,
     pub clip: String,
+    pub picture: Option<Vec<u8>>,
 }
 
 impl Copied {
-    pub(crate) fn new(clip: &Clip) -> Self {
-        Self {
+    pub(crate) fn new(clip: &Clip) -> Result<Self, Box<dyn Error>> {
+        let picture = match clip.paragraphs.as_slice() {
+            [
+                onestore::page::PageParagraph {
+                    content: onestore::page::ParagraphContent::Image(image),
+                    ..
+                },
+            ] => image.display.as_deref().or(image.bytes.as_deref()),
+            _ => None,
+        };
+        let picture = picture
+            .map(|bytes| -> Result<Vec<u8>, Box<dyn Error>> {
+                if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                    Ok(bytes.to_vec())
+                } else {
+                    let (size, rgba) = pixels(bytes)?;
+                    Ok(png(size, &rgba)?)
+                }
+            })
+            .transpose()?;
+        Ok(Self {
             text: clip.text(),
             html: clip.html(),
             clip: clip.encode(),
-        }
+            picture,
+        })
     }
+}
+
+pub(crate) fn pixels(encoded: &[u8]) -> Result<([u32; 2], Vec<u8>), Box<dyn Error>> {
+    if !encoded.starts_with(b"\x89PNG\r\n\x1a\n") {
+        let image = draw::RasterImage::decode(encoded, [u32::MAX; 2])
+            .map_err(|error| format!("{error:?}"))?;
+        let mut rgba = image.pixels().to_vec();
+        for pixel in rgba.chunks_exact_mut(4) {
+            let alpha = u32::from(pixel[3]);
+            for channel in &mut pixel[..3] {
+                *channel = (u32::from(*channel) * 255 + alpha / 2)
+                    .checked_div(alpha)
+                    .unwrap_or(0)
+                    .min(255) as u8;
+            }
+        }
+        return Ok((image.size(), rgba));
+    }
+    let size = draw::RasterImage::measure(encoded).map_err(|error| format!("{error:?}"))?;
+    if u64::from(size[0]) * u64::from(size[1]) * 4 > draw::MAX_IMAGE_BYTES {
+        return Err("The picture is too large for the clipboard".into());
+    }
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(encoded));
+    decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+    let mut reader = decoder.read_info()?;
+    let mut bytes = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .ok_or("The picture is too large")?
+    ];
+    let info = reader.next_frame(&mut bytes)?;
+    let rgba = bytes[..info.buffer_size()]
+        .chunks_exact(info.color_type.samples())
+        .flat_map(|pixel| match info.color_type {
+            png::ColorType::Rgba => [pixel[0], pixel[1], pixel[2], pixel[3]],
+            png::ColorType::Rgb => [pixel[0], pixel[1], pixel[2], 255],
+            png::ColorType::GrayscaleAlpha => [pixel[0], pixel[0], pixel[0], pixel[1]],
+            _ => [pixel[0], pixel[0], pixel[0], 255],
+        })
+        .collect();
+    Ok(([info.width, info.height], rgba))
 }
 
 /// `html` behind the header Windows' `HTML Format` begins with, which gives the byte offsets
@@ -420,6 +479,13 @@ pub(crate) fn png(size: [u32; 2], rgba: &[u8]) -> Result<Vec<u8>, png::EncodingE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clipboard_pixels_keep_straight_alpha() {
+        let rgba = [239, 17, 123, 37, 8, 49, 203, 0];
+        let encoded = png([2, 1], &rgba).unwrap();
+        assert_eq!(pixels(&encoded).unwrap(), ([2, 1], rgba.to_vec()));
+    }
 
     fn png_at(pixels_per_metre: Option<u32>) -> Vec<u8> {
         let mut bytes = Vec::new();

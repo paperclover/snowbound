@@ -79,12 +79,13 @@ pub struct Context {
     /// The address of the link at the caret.
     pub link: Option<String>,
     pub equation: bool,
-    /// Whether text is selected, which Cut and Copy take.
+    /// Whether text or a picture is selected, which Cut and Copy take.
     pub selected: bool,
     /// The paragraph at the caret, which Copy Link to Paragraph names.
     pub paragraph: Option<onestore::ExGuid>,
     /// The file the press selected, which Open and Save As take.
     pub attachment: Option<onestore::page::Attachment>,
+    pub image: Option<onestore::page::Image>,
     /// The marked word the press landed on, which the menu offers corrections for.
     pub spelling: Option<Correction>,
 }
@@ -640,9 +641,12 @@ impl PageView {
 
     /// Page coordinates of a focused object.
     fn object_rect(&self, focus: ObjectFocus) -> [f32; 4] {
-        let (scene, offset) = self.scene.as_ref().unwrap();
         let rect = match focus {
-            ObjectFocus::ReadOnly(index) => scene
+            ObjectFocus::ReadOnly(index) => self
+                .scene
+                .as_ref()
+                .unwrap()
+                .0
                 .read_only(Some(&self.editor))
                 .nth(index)
                 .unwrap()
@@ -653,7 +657,10 @@ impl PageView {
             }
             ObjectFocus::File(id) => self.editor.attachment_rect(id).unwrap(),
         };
-        crate::translated(rect, *offset)
+        crate::translated(
+            rect,
+            self.scene.as_ref().map_or([0.0; 2], |(_, offset)| *offset),
+        )
     }
 
     /// Keeps the view in bounds and restarts the caret blink after a change.
@@ -1570,6 +1577,22 @@ impl PageView {
 
     /// Copy, or Cut with `cut`: [`CanvasEditor::clip`] goes to the clipboard.
     pub fn copy(&mut self, cut: bool) -> Result<Response> {
+        if let Some(ObjectFocus::Image(id)) = self.object_focus {
+            let Some(clip) = self.editor.clip_picture(id)? else {
+                return Ok(Response::default());
+            };
+            if cut {
+                self.editor.remove_image(&mut self.engine, id)?;
+                self.set_object_focus(None);
+            }
+            return Ok(Response {
+                request: Some(Request::Copy(clip)),
+                ..self.changed()?
+            });
+        }
+        if self.object_focus.is_some() {
+            return Ok(Response::default());
+        }
         let page = self.editor.whole() == Some(Whole::Page);
         let Some(clip) = self.editor.clip()? else {
             return Ok(Response::default());
@@ -1585,20 +1608,33 @@ impl PageView {
         })
     }
 
+    pub fn restore_picture_size(&mut self, id: onestore::ExGuid) -> Result<Response> {
+        let Some(size) = self.editor.picture(id).and_then(|image| image.size) else {
+            return Ok(Response::default());
+        };
+        let Some((origin, _)) = self.editor.image_placement(id) else {
+            return Ok(Response::default());
+        };
+        self.editor
+            .place_image(&mut self.engine, id, origin, size)?;
+        self.edited()
+    }
+
     /// A secondary press at the pointer: text there takes the caret unless it lies in the
-    /// selection, and a file is selected, as OneNote's context menu acts where it opens.
-    /// `None` off text and files.
+    /// selection, and a picture or file is selected.
+    /// `None` off text, pictures and files.
     pub fn context(&mut self) -> Result<Option<(Response, Context)>> {
         let point = self.viewport.document_point(self.pointer);
         let (id, point) = match self.hit_test(point) {
             Some(Hit::Text { id, point }) => (id, point),
-            Some(Hit::File(id)) => {
-                let attachment = self.editor.attachment(id).cloned();
-                self.set_object_focus(Some(ObjectFocus::File(id)));
-                let context = Context {
-                    attachment,
-                    ..Context::default()
+            Some(Hit::File(id)) | Some(Hit::Image { id, .. }) => {
+                let focus = if self.editor.attachment(id).is_some() {
+                    ObjectFocus::File(id)
+                } else {
+                    ObjectFocus::Image(id)
                 };
+                self.set_object_focus(Some(focus));
+                let context = self.caret_context().unwrap_or_default();
                 return Ok(Some((self.changed()?, context)));
             }
             _ => return Ok(None),
@@ -1622,9 +1658,16 @@ impl PageView {
         Ok(Some((self.changed()?, context)))
     }
 
-    /// What a context menu at the caret or the selected file acts on; `None` where neither
+    /// What a context menu at the caret or the selected object acts on; `None` where neither
     /// takes one.
     pub fn caret_context(&self) -> Option<Context> {
+        if let Some(ObjectFocus::Image(id)) = self.object_focus {
+            return Some(Context {
+                image: self.editor.picture(id).cloned(),
+                selected: true,
+                ..Context::default()
+            });
+        }
         if let Some(ObjectFocus::File(id)) = self.object_focus {
             return Some(Context {
                 attachment: self.editor.attachment(id).cloned(),
@@ -1649,6 +1692,7 @@ impl PageView {
                 .leaf(anchor.min(focus).paragraph)
                 .map(|(_, _, node)| node.id),
             attachment: None,
+            image: None,
             spelling: self.selected_correction(),
         })
     }
@@ -1991,7 +2035,7 @@ impl PageView {
         self.changed()
     }
 
-    /// Draws page-level pictures an edit or undo brought to the page.
+    /// Draws pictures and file previews brought by an edit or undo.
     fn follow_pictures(&mut self) -> Result<()> {
         if let Some((scene, _)) = &mut self.scene {
             scene.follow(&mut self.editor, &mut self.engine)?;

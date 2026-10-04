@@ -260,6 +260,17 @@ impl Clipboard {
     pub fn set(&mut self, copied: &crate::paste::Copied) -> Result<(), &'static str> {
         let set = unsafe {
             let _: isize = msg_send![&self.0, clearContents];
+            if let Some(picture) = &copied.picture {
+                let data: Retained<AnyObject> = msg_send_id![class!(NSData), dataWithBytes: picture.as_ptr().cast::<std::ffi::c_void>(), length: picture.len()];
+                let kind = NSString::from_str("public.png");
+                let set: bool = msg_send![&self.0, setData: &*data, forType: &*kind];
+                let clip = NSString::from_str(&copied.clip);
+                let kind = NSString::from_str(CLIP);
+                let own: bool = msg_send![&self.0, setString: &*clip, forType: &*kind];
+                return (set && own)
+                    .then_some(())
+                    .ok_or("The pasteboard refused the picture");
+            }
             [
                 (TEXT, &copied.text),
                 ("public.html", &copied.html),
@@ -368,8 +379,8 @@ unsafe fn ns_data_bytes(data: &AnyObject) -> Vec<u8> {
         if length == 0 {
             return Vec::new();
         }
-        let bytes: *const u8 = msg_send![data, bytes];
-        std::slice::from_raw_parts(bytes, length).to_vec()
+        let bytes: *const std::ffi::c_void = msg_send![data, bytes];
+        std::slice::from_raw_parts(bytes.cast::<u8>(), length).to_vec()
     }
 }
 
@@ -1748,12 +1759,23 @@ mod tests {
         let copied = crate::paste::Copied {
             text: "Copied".into(),
             html: "<p>Copied</p>".into(),
+            picture: None,
             clip: "{}".into(),
         };
         clipboard.set(&copied).unwrap();
         assert_eq!(clipboard.get_text().unwrap(), "Copied");
         assert_eq!(clipboard.get_html().as_deref(), Some("<p>Copied</p>"));
         assert_eq!(clipboard.get_clip().as_deref(), Some("{}"));
+        let picture = include_bytes!("../../../corpus/object-tags/native/notebook/photo.png");
+        let copied = crate::paste::Copied {
+            picture: Some(picture.to_vec()),
+            ..copied
+        };
+        clipboard.set(&copied).unwrap();
+        assert_eq!(clipboard.get_picture().as_deref(), Some(picture.as_slice()));
+        assert_eq!(clipboard.get_clip().as_deref(), Some("{}"));
+        assert_eq!(clipboard.get_html(), None);
+        assert!(clipboard.get_text().is_err());
         clipboard.set_text("Plain".into()).unwrap();
         assert_eq!(clipboard.get_clip(), None);
         unsafe { msg_send![&board, releaseGlobally] }

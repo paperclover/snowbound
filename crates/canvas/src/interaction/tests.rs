@@ -1594,6 +1594,150 @@ fn picture_view() -> (PageView, onestore::ExGuid) {
 }
 
 #[test]
+fn a_picture_context_copies_and_cuts_the_picture_instead_of_hidden_text() {
+    use onestore::page::{PageObject, ParagraphContent};
+    for floating in [false, true] {
+        let (mut view, _) = picture_view();
+        let bytes = include_bytes!("../../../../corpus/object-tags/native/notebook/photo.png");
+        let id = if floating {
+            let _ = view
+                .drop_picture([400.0, 200.0], bytes.to_vec(), [40.0, 30.0])
+                .unwrap();
+            view.editor
+                .page()
+                .unwrap()
+                .objects
+                .iter()
+                .find_map(|object| match object {
+                    PageObject::Image(image) => Some(image.id),
+                    _ => None,
+                })
+                .unwrap()
+        } else {
+            let image = crate::editor::picture(bytes.to_vec(), [40.0, 30.0]).unwrap();
+            let id = image.id;
+            view.editor.insert_picture(&mut view.engine, image).unwrap();
+            id
+        };
+        let (scene, _) =
+            PageScene::from_page(view.editor.page().unwrap(), &mut view.engine).unwrap();
+        view.scene = Some((scene, [0.0; 2]));
+        let (origin, size) = view.editor.image_placement(id).unwrap();
+        let _ = view
+            .pointer_moved([origin[0] + size[0] / 2.0, origin[1] + size[1] / 2.0])
+            .unwrap();
+        let (_, context) = view.context().unwrap().unwrap();
+        assert_eq!(context.image.as_ref().unwrap().id, id);
+        assert!(context.selected);
+        let copied = view.copy(false).unwrap();
+        let Some(Request::Copy(clip)) = copied.request else {
+            panic!("a picture copy");
+        };
+        assert_eq!(clip.paragraphs.len(), 1);
+        let ParagraphContent::Image(picture) = &clip.paragraphs[0].content else {
+            panic!("a picture");
+        };
+        assert_eq!(picture.id, id);
+        assert_eq!([picture.layout.x, picture.layout.y], [None; 2]);
+        assert_eq!(picture.bytes.as_deref(), Some(bytes.as_slice()));
+        assert_eq!(clip.text(), "");
+        assert!(view.editor.image_placement(id).is_some());
+        let cut = view.copy(true).unwrap();
+        assert!(cut.changed);
+        assert!(matches!(cut.request, Some(Request::Copy(_))));
+        assert!(view.editor.image_placement(id).is_none());
+        assert!(view.undo(false).unwrap().changed);
+        assert!(view.editor.image_placement(id).is_some());
+        assert!(view.undo(true).unwrap().changed);
+        assert!(view.editor.image_placement(id).is_none());
+        view.editor
+            .place_caret(&mut view.engine, [600.0, 400.0], 240.0)
+            .unwrap();
+        assert!(view.paste_clip(clip).unwrap().changed);
+        let page = view.editor.page().unwrap();
+        assert!(
+            page.objects
+                .iter()
+                .filter_map(|object| match object {
+                    PageObject::Outline(outline) => Some(outline),
+                    _ => None,
+                })
+                .flat_map(|outline| &outline.paragraphs)
+                .filter_map(|node| node.text())
+                .any(|text| text.text.text() == "Before")
+        );
+        let pasted = view
+            .editor
+            .outlines()
+            .iter()
+            .flat_map(|outline| crate::document::descendants(outline.document().nodes(), None))
+            .find_map(|(_, _, node)| match &node.content {
+                ParagraphContent::Image(image) if image.bytes.is_some() => Some(image.id),
+                _ => None,
+            })
+            .unwrap();
+        let (scene, _) = view.scene.as_mut().unwrap();
+        scene.settle(Some(&view.editor), 1.0, crate::gpu::Paper::WHITE);
+        assert!(scene.image(pasted).is_some());
+    }
+}
+
+#[test]
+fn restoring_a_pictures_original_size_is_undoable_in_an_outline_and_on_the_page() {
+    for floating in [false, true] {
+        let (mut view, _) = picture_view();
+        let bytes = include_bytes!("../../../../corpus/object-tags/native/notebook/photo.png");
+        let id = if floating {
+            let _ = view
+                .drop_picture([400.0, 200.0], bytes.to_vec(), [40.0, 30.0])
+                .unwrap();
+            view.editor
+                .page()
+                .unwrap()
+                .objects
+                .iter()
+                .find_map(|object| match object {
+                    onestore::page::PageObject::Image(image) => Some(image.id),
+                    _ => None,
+                })
+                .unwrap()
+        } else {
+            let image = crate::editor::picture(bytes.to_vec(), [40.0, 30.0]).unwrap();
+            let id = image.id;
+            view.editor.insert_picture(&mut view.engine, image).unwrap();
+            id
+        };
+        let (scene, _) =
+            PageScene::from_page(view.editor.page().unwrap(), &mut view.engine).unwrap();
+        view.scene = Some((scene, [0.0; 2]));
+        let (origin, _) = view.editor.image_placement(id).unwrap();
+        view.editor
+            .place_image(&mut view.engine, id, origin, [80.0, 60.0])
+            .unwrap();
+        let _ = view
+            .pointer_moved([origin[0] + 10.0, origin[1] + 10.0])
+            .unwrap();
+        let (_, context) = view.context().unwrap().unwrap();
+        assert_eq!(context.image.unwrap().id, id);
+        assert!(view.restore_picture_size(id).unwrap().changed);
+        assert_eq!(
+            view.editor.image_placement(id),
+            Some((origin, [40.0, 30.0]))
+        );
+        assert!(view.undo(false).unwrap().changed);
+        assert_eq!(
+            view.editor.image_placement(id),
+            Some((origin, [80.0, 60.0]))
+        );
+        assert!(view.undo(true).unwrap().changed);
+        assert_eq!(
+            view.editor.image_placement(id),
+            Some((origin, [40.0, 30.0]))
+        );
+    }
+}
+
+#[test]
 fn a_page_outline_emptied_by_backspace_still_draws() {
     let mut engine = TextEngine::default();
     let objects = [[36.0, 36.0], [36.0, 200.0]]

@@ -348,7 +348,7 @@ impl Clipboard {
 
     fn set(&mut self, clip: Clip) -> Result<(), Box<dyn Error>> {
         match self {
-            Self::System(clipboard) => clipboard.set(&paste::Copied::new(&clip))?,
+            Self::System(clipboard) => clipboard.set(&paste::Copied::new(&clip)?)?,
             Self::Memory(held, kept) => (*held, *kept) = (clip.text(), Some(clip)),
         }
         Ok(())

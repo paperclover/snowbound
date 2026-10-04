@@ -56,6 +56,22 @@ impl Clip {
 }
 
 impl CanvasEditor {
+    pub(crate) fn clip_picture(&self, id: ExGuid) -> Result<Option<Clip>, EditError> {
+        let Some(image) = self.picture(id).filter(|image| image.bytes.is_some()) else {
+            return Ok(None);
+        };
+        let mut node = crate::document::node(
+            Paragraph::new(String::new(), Default::default()),
+            Default::default(),
+        )?;
+        let mut image = image.clone();
+        image.layout.x = None;
+        image.layout.y = None;
+        image.background = false;
+        node.content = ParagraphContent::Image(image);
+        Ok(Some(Clip::new(vec![node], &self.definitions)))
+    }
+
     /// What Copy takes: the selection's paragraphs with the first and last cut to it, or the
     /// page selection's outlines top to bottom with an empty paragraph between, as OneNote
     /// 2010 copies them. None where nothing shows.
@@ -156,17 +172,10 @@ impl CanvasEditor {
         let added = leaves(&nodes, None).count();
         edit.replacement.splice(1..=count, nodes);
         let head = drop_empty_halves(&mut edit, count, ends_in_text);
-        let paragraph = start.paragraph + added - usize::from(head);
-        let caret = if ends_in_text {
-            TextPosition {
-                paragraph,
-                offset: last,
-            }
-        } else {
-            TextPosition {
-                paragraph: paragraph + 1,
-                offset: 0,
-            }
+        let paragraph = start.paragraph + added + usize::from(!ends_in_text) - usize::from(head);
+        let caret = TextPosition {
+            paragraph,
+            offset: last,
         };
         self.commit(engine, edit, [caret; 2].into())
     }

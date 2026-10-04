@@ -1122,7 +1122,13 @@ impl State {
         // Edit commands act on a focused field instead of the page.
         let field = self.ui.focused_field().is_some();
         let [anchor, focus] = self.view.editor.selection().positions;
-        let selected = page && !field && typing && anchor != focus;
+        let selected = page
+            && !field
+            && (typing && anchor != focus
+                || matches!(
+                    self.view.object_focus(),
+                    Some(canvas::interaction::ObjectFocus::Image(_))
+                ));
         let enabled = |enabled| Status {
             enabled,
             checked: None,

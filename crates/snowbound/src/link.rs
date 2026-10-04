@@ -250,7 +250,7 @@ impl State {
         Ok(())
     }
 
-    /// A secondary press on the page's text or a file opens its context menu there.
+    /// A secondary press on text, a picture or a file opens its context menu there.
     pub(crate) fn open_text_menu(&mut self) -> Result<(), Box<dyn Error>> {
         let Some((response, context)) = self.view.context()? else {
             return Ok(());
@@ -263,7 +263,7 @@ impl State {
     }
 
     /// The page's context menu while it is open, with OneNote 2010's commands for text,
-    /// links, equations and files.
+    /// links, equations, pictures and files.
     pub(crate) fn text_menu(&mut self) -> Result<(), Box<dyn Error>> {
         let Some((context, point)) = &self.text_menu else {
             return Ok(());
@@ -371,6 +371,53 @@ impl State {
         };
         let format = self.format_state();
         let disabled = |id| !self.status(&commands::Choice::Command(id), &format).enabled;
+        if let Some(image) = &context.image {
+            return vec![
+                (
+                    Item {
+                        disabled: disabled(commands::Id::Cut) || image.bytes.is_none(),
+                        ..drawn("Cut", art::CUT)
+                    },
+                    "Cut",
+                ),
+                (
+                    Item {
+                        disabled: image.bytes.is_none(),
+                        ..drawn("Copy", art::COPY)
+                    },
+                    "Copy",
+                ),
+                (
+                    Item {
+                        disabled: image.text.as_ref().is_none_or(|text| text.text.is_empty()),
+                        ..drawn("Copy Text from Picture", art::COPY)
+                    },
+                    "Copy Text from Picture",
+                ),
+                (
+                    Item {
+                        separated: true,
+                        disabled: image.bytes.is_none(),
+                        ..drawn("Save As", art::SAVE)
+                    },
+                    "Save Picture As",
+                ),
+                (
+                    Item {
+                        separated: true,
+                        disabled: disabled(commands::Id::Cut)
+                            || image.size.is_none_or(|size| {
+                                self.view
+                                    .editor
+                                    .image_placement(image.id)
+                                    .is_none_or(|(_, shown)| shown == size)
+                            }),
+                        ..drawn("Restore to Original Size", art::PICTURE)
+                    },
+                    "Restore to Original Size",
+                ),
+            ];
+        }
         // Paste stands for any edit to the text here.
         let (fixed, unlinkable) = (disabled(commands::Id::Paste), disabled(commands::Id::Link));
         if context.attachment.is_some() {
@@ -471,6 +518,49 @@ impl State {
         context: Context,
         text: &str,
     ) -> Result<(), Box<dyn Error>> {
+        if let Some(image) = &context.image {
+            match text {
+                "Save As" => {
+                    if let Some(bytes) = &image.bytes {
+                        let name = if bytes.starts_with(b"\xff\xd8") {
+                            "Picture.jpg"
+                        } else if bytes.starts_with(b"GIF8") {
+                            "Picture.gif"
+                        } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+                            "Picture.png"
+                        } else {
+                            "Picture"
+                        };
+                        #[cfg(target_arch = "wasm32")]
+                        platform::download(name, bytes, "application/octet-stream");
+                        #[cfg(not(target_arch = "wasm32"))]
+                        platform::pick_new(
+                            "Save As",
+                            name,
+                            "Save",
+                            None,
+                            self.reply({
+                                let bytes = bytes.clone();
+                                move |_, path| Ok(notebook::fs::write(path, bytes)?)
+                            }),
+                        );
+                    }
+                    return Ok(());
+                }
+                "Copy Text from Picture" => {
+                    if let Some(text) = &image.text {
+                        self.clipboard.set_text(text.text.clone())?;
+                    }
+                    return Ok(());
+                }
+                "Restore to Original Size" => {
+                    let response = self.view.restore_picture_size(image.id)?;
+                    self.respond(response);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
         if let Some(file) = &context.attachment {
             return match text {
                 "Open" => self.open_attachment(file),
