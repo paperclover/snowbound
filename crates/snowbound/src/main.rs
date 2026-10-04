@@ -2332,6 +2332,10 @@ impl State {
                 },
             );
         }
+        #[cfg(target_arch = "wasm32")]
+        if ui::button(&mut self.ui, "download", "Download Desktop App").clicked {
+            platform::reveal("https://file.paperclover.net/shr/snowbound/latest/");
+        }
         self.ui.close();
         if title {
             platform::window_controls(&mut self.ui, &self.window, true);
