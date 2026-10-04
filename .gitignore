@@ -16,3 +16,5 @@ __pycache__/
 !AGENTS.md
 # Build output of nested crates outside the workspace.
 **/target/
+# Claude Code keeps per-person settings here.
+.claude/settings.local.json
