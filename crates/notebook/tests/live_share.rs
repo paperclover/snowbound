@@ -133,7 +133,9 @@ fn two_guests_on_one_page_conflict_as_on_a_share() {
         texts.contains(&"Grace's text".to_owned()) && texts.contains(&"Alan's text".to_owned()),
         "{texts:?}"
     );
-    assert!(!alans.conflicts().unwrap().is_empty() || !graces.conflicts().unwrap().is_empty());
+    until("the host's conflict never reached a guest", || {
+        !alans.conflicts().unwrap().is_empty() || !graces.conflicts().unwrap().is_empty()
+    });
     drop(host);
 }
 
