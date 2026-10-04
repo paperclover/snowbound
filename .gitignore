@@ -10,6 +10,8 @@ __pycache__/
 /soak/
 /tools/w7/payload/vendor/
 /resources/
+# jj workspaces for CI, releases and agents, inside the checkout that holds the repo.
+/workspaces/
 /.env
 
 # The global ignore excludes AGENTS.md; this repo keeps its own.

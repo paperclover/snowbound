@@ -3,11 +3,11 @@
 ## The CI gate
 
 `python3 tools/ci.py` gates `main` (or `--rev REV`, or `--working-copy` for this
-checkout's `@`) in the jj workspace `../snowbound-ci`: it points that
+checkout's `@`) in the jj workspace `workspaces/ci`: it points that
 workspace's own commit, a child of `main`, at the revision's files, so other
 checkouts' edits in progress never reach the result, and a working copy is
 frozen as it was when the run started. Its build cache is
-`../snowbound-ci/target`, apart from every agent's `target/`. Runs wait for one
+`workspaces/ci/target`, apart from every agent's `target/`. Runs wait for one
 another, and the exit status is the result.
 
 | Lane | Runs |
@@ -31,17 +31,17 @@ python3 tools/ci.py --rev xyz --lanes test windows   # `windows` names both wind
 Lanes run four at a time (`--jobs`), each under its own time limit
 (`--timeout MINUTES` overrides them all). The table it prints names each
 failure's first errors with their files and lines, to tell whose edit broke
-it; `../snowbound-ci/target/ci/runs/TIME/` keeps every lane's log and
+it; `workspaces/ci/target/ci/runs/TIME/` keeps every lane's log and
 `summary.json` (status, seconds, errors with files, each test executable's
-time), for the last 20 runs. After a run over `--budget` (80 GB), it deletes
+time), for the last 20 runs. After a run over `--budget` (40 GB), it deletes
 the build units this run didn't use, least recently used first, which keeps
 `deps/` small for the font tests that scan it. Windows needs llvm-mingw from
-`platform/windows/toolchain.sh` in this checkout's `target/windows`, or
+`platform/windows/toolchain.sh` in the main checkout's `target/windows`, or
 `LLVM_MINGW`; Linux needs `zig`. `release.py` runs the gate on the commit it
 publishes.
 
 The workspace is made on first use; to drop it, `jj workspace forget ci` and
-delete `../snowbound-ci`.
+delete `workspaces/ci`.
 
 ## Public fixtures
 

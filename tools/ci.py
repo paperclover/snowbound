@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Gates a revision (main by default) on formatting, Clippy, the tests, the Python suite and
-every platform's build, checked out in the jj workspace ../snowbound-ci so that edits in
+every platform's build, checked out in the jj workspace workspaces/ci so that edits in
 progress elsewhere never reach it. See tools/TESTING.md."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -18,7 +18,10 @@ import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[1]
-CI = ROOT.parent / 'snowbound-ci'
+# The checkout holding the jj repository, which a nested workspace's `.jj/repo` file names.
+STORE = ROOT / '.jj/repo'
+MAIN = (STORE.parent / STORE.read_text()).resolve().parents[1] if STORE.is_file() else ROOT
+CI = MAIN / 'workspaces/ci'
 TARGET = CI / 'target'
 RUNS = TARGET / 'ci'
 # Changes here rebuild every package.
@@ -43,8 +46,8 @@ def lanes():
                     '--', '-D', 'warnings']
     windows = CI / 'platform/windows/cargo.sh'
     linux = ROOT / 'platform/linux/cargo.sh'
-    mingw = os.environ.get('LLVM_MINGW') or ROOT / 'target/windows/llvm-mingw'
-    sdk = Path(os.environ.get('SNOW_LEOPARD_SDK') or ROOT / 'target/snow-leopard/MacOSX10.6.sdk')
+    mingw = os.environ.get('LLVM_MINGW') or MAIN / 'target/windows/llvm-mingw'
+    sdk = Path(os.environ.get('SNOW_LEOPARD_SDK') or MAIN / 'target/snow-leopard/MacOSX10.6.sdk')
     nightly = subprocess.run(['rustup', 'component', 'list', '--installed', '--toolchain', 'nightly'],
                              capture_output=True, text=True).stdout.split()
     result = [
@@ -122,6 +125,7 @@ def checkout(rev):
     if len(commits) != 1:
         sys.exit(f'{rev} names {len(commits)} revisions, not one.')
     if not CI.exists():
+        CI.parent.mkdir(exist_ok=True)
         jj('workspace', 'add', '--name', 'ci', '-r', 'main', str(CI))
     jj('workspace', 'update-stale', cwd=CI)
     jj('rebase', '-r', '@', '-o', 'main', cwd=CI)
@@ -376,7 +380,7 @@ def main():
     parser.add_argument('--test-jobs', type=int, default=4, help='Test executables at once (default 4)')
     parser.add_argument('--timeout', type=float, metavar='MINUTES', help="Each lane's limit, overriding its own")
     parser.add_argument('--budget', type=float, default=40, metavar='GB',
-                        help='Prune ../snowbound-ci/target to this size after the run (default 40)')
+                        help='Prune workspaces/ci/target to this size after the run (default 40)')
     args = parser.parse_args()
     if ROOT == CI:
         sys.exit(f'Run ci.py from another checkout; {CI} is its own.')
