@@ -3960,7 +3960,7 @@ impl State {
 
     /// Follows a page shown in place of another.
     fn opened(&mut self) -> Result<(), Box<dyn Error>> {
-        if let Err(error) = self.wear_theme() {
+        if let Err(error) = self.wear_theme(true) {
             eprintln!("Restyling the page failed: {error}");
         }
         // A page a search result shows leaves the keys with the search.
@@ -4243,6 +4243,7 @@ impl State {
     /// Applies what the section, and each notebook's closed sections, reported since the
     /// last poll.
     fn synced(&mut self) -> Result<(), Box<dyn Error>> {
+        self.wear_theme(false)?;
         // Every notebook's changes are taken, so none is reported again.
         let reported: Vec<(Arc<Library>, Vec<String>)> = (self.notebooks.iter())
             .filter_map(|library| {

@@ -324,8 +324,7 @@ pub struct Library {
     /// Sections opened ahead of being shown, or left open after, most recent first, which
     /// `open` hands out before opening any.
     kept: Mutex<crate::prefetch::Recent<String, Section>>,
-    /// The notebook's style themes, and when they were read.
-    themes: Mutex<Option<(Instant, Arc<Themes>)>>,
+    themes: Mutex<ThemeCache>,
     /// The keys of its password-protected sections unlocked this run, kept as it is read again.
     keys: Arc<Keys>,
     /// The share a notebook another computer shares by Live Share is reached through.
@@ -337,6 +336,13 @@ pub struct Library {
 /// worked in; in memory only, each cleared as it goes.
 #[derive(Default)]
 pub struct Keys(Mutex<std::collections::HashMap<[u8; 16], (Key, Instant)>>);
+
+#[derive(Default)]
+struct ThemeCache {
+    value: Arc<Themes>,
+    checked: Option<Instant>,
+    reading: bool,
+}
 
 impl Library {
     /// `location` named `name`, with no notebook read, server, sync or kept sections.
@@ -645,27 +651,53 @@ impl Library {
         });
     }
 
-    /// The notebook's style themes, read again after a while so other machines' changes
-    /// reach pages opened later; a section opened on its own has none.
-    pub fn themes(&self) -> Arc<Themes> {
+    /// The notebook's last-read themes, refreshed off the frame thread.
+    pub fn themes(self: &Arc<Self>) -> Arc<Themes> {
         let mut kept = self
             .themes
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some((read, themes)) = &*kept
-            && read.elapsed() < Duration::from_secs(30)
+        let themes = Arc::clone(&kept.value);
+        if !matches!(self.notebook, Ok(Some(_)))
+            || kept.reading
+            || kept
+                .checked
+                .is_some_and(|read| read.elapsed() < Duration::from_secs(30))
         {
-            return Arc::clone(themes);
+            return themes;
         }
-        let themes = match &self.notebook {
-            Ok(Some(notebook)) => notebook.themes().unwrap_or_else(|error| {
-                eprintln!("{}: reading its themes failed: {error}", self.location);
-                Themes::default()
-            }),
-            _ => Themes::default(),
-        };
-        let themes = Arc::new(themes);
-        *kept = Some((Instant::now(), Arc::clone(&themes)));
+        kept.reading = true;
+        drop(kept);
+        let (library, before) = (Arc::clone(self), Arc::clone(&themes));
+        crate::spawn(move || {
+            let read = match &library.notebook {
+                Ok(Some(notebook)) => notebook.themes(),
+                _ => Ok(Themes::default()),
+            };
+            let mut kept = library
+                .themes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            kept.reading = false;
+            kept.checked = Some(Instant::now());
+            match read {
+                Ok(mut read) => {
+                    // A local edit may have landed while the file was being read.
+                    if !Arc::ptr_eq(&before, &kept.value) {
+                        notebook::sidecar::themes::merge(&mut read, (*kept.value).clone());
+                    }
+                    let changed = *kept.value != read;
+                    kept.value = Arc::new(read);
+                    drop(kept);
+                    if changed {
+                        notify_background();
+                    }
+                }
+                Err(error) => {
+                    eprintln!("{}: reading its themes failed: {error}", library.location);
+                }
+            }
+        });
         themes
     }
 
@@ -675,13 +707,15 @@ impl Library {
         if !matches!(self.notebook, Ok(Some(_))) {
             return;
         }
-        let mut themes = (*self.themes()).clone();
-        notebook::sidecar::themes::merge(&mut themes, change.clone());
-        *self
-            .themes
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-            Some((Instant::now(), Arc::new(themes)));
+        self.themes();
+        {
+            let mut kept = self
+                .themes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            notebook::sidecar::themes::merge(Arc::make_mut(&mut kept.value), change.clone());
+            kept.checked = Some(Instant::now());
+        }
         let library = Arc::clone(self);
         crate::spawn(move || {
             let kept = library
@@ -1470,6 +1504,89 @@ pub fn locate(path: &Path) -> Located {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn stalled_theme_reads_leave_the_cache_usable_and_keep_local_edits() {
+        use notebook::sidecar::themes::{Assignment, Scope, merge};
+        use std::{
+            io::Write,
+            os::unix::{ffi::OsStrExt, fs::OpenOptionsExt},
+        };
+
+        let root =
+            std::env::temp_dir().join(format!("snowbound-stalled-themes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("notebook/.snowbound")).unwrap();
+        let path = root.join("notebook/.snowbound/themes.json");
+        let filename = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(filename.as_ptr(), 0o600) }, 0);
+        let library = Arc::new(Library::notebook(
+            root.join("notebook").to_str().unwrap(),
+            &root.join("cache"),
+        ));
+        let cached = |library: Arc<Library>| {
+            let (send, receive) = std::sync::mpsc::channel();
+            std::thread::spawn(move || send.send(library.themes()).unwrap());
+            receive
+                .recv_timeout(Duration::from_secs(1))
+                .expect("theme access must not wait for storage")
+        };
+        assert_eq!(*cached(Arc::clone(&library)), Themes::default());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut writer = loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(&path)
+            {
+                Ok(writer) => break writer,
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ENXIO) && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("theme reader did not start: {error}"),
+            }
+        };
+        assert_eq!(*cached(Arc::clone(&library)), Themes::default());
+        let assignment = |theme: &str, assigned| Themes {
+            assignments: vec![Assignment {
+                scope: Scope::Notebook,
+                theme: Some(theme.to_owned()),
+                assigned,
+            }],
+            ..Themes::default()
+        };
+        let local = assignment("local", 10);
+        {
+            let mut kept = library.themes.lock().unwrap();
+            merge(Arc::make_mut(&mut kept.value), local.clone());
+        }
+        assert_eq!(*cached(Arc::clone(&library)), local);
+        writer
+            .write_all(&serde_json::to_vec(&assignment("remote", 5)).unwrap())
+            .unwrap();
+        drop(writer);
+        while library.themes.lock().unwrap().reading {
+            assert!(Instant::now() < deadline, "theme read did not finish");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(*cached(Arc::clone(&library)), local);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        library.themes.lock().unwrap().checked = Some(Instant::now() - Duration::from_secs(31));
+        assert_eq!(*cached(Arc::clone(&library)), local);
+        while library.themes.lock().unwrap().reading {
+            assert!(
+                Instant::now() < deadline,
+                "failed theme read did not finish"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(*cached(library), local);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// A section kept open is what `open` hands out next, without opening it again, and
     /// readying a section another holds leaves it to that one at once.

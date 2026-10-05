@@ -1021,7 +1021,7 @@ impl State {
                 change: Change::Themes { from: to, to: from },
             };
             self.undo.note(taken, undo);
-            return self.wear_theme();
+            return self.wear_theme(true);
         }
         let Some(section) = section else {
             let library = self

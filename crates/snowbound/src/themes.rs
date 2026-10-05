@@ -162,11 +162,14 @@ impl State {
     /// Dresses the open page in its theme: new text and Enter take the theme's styles, and
     /// style objects the theme gives otherwise are restyled, as one edit. A page with no theme
     /// keeps what it holds.
-    pub(crate) fn wear_theme(&mut self) -> Result<(), Box<dyn Error>> {
+    pub(crate) fn wear_theme(&mut self, force: bool) -> Result<(), Box<dyn Error>> {
         let theme = self.page_theme();
         let sheet = (theme.as_ref())
             .map(|theme| theme.sheet(self.section_color()))
             .unwrap_or_default();
+        if !force && self.view.editor.styles == sheet {
+            return Ok(());
+        }
         self.view.editor.styles = sheet.clone();
         let Some(session) = &self.session else {
             return Ok(());
@@ -730,7 +733,7 @@ impl State {
         self.ui.close_popup(id());
         self.themes = None;
         if chosen.is_some()
-            && let Err(error) = self.wear_theme()
+            && let Err(error) = self.wear_theme(true)
         {
             eprintln!("Restyling the page failed: {error}");
         }
