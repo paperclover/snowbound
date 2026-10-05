@@ -1581,6 +1581,7 @@ impl State {
                 if let Some(text) = text {
                     self.ui
                         .event(ui::Event::Ime(winit::event::Ime::Commit(text)));
+                    self.window.request_redraw();
                 }
                 return Ok(());
             }
