@@ -2,44 +2,76 @@
 
 use crate::{State, platform};
 use onestore::page::Attachment;
-use std::{error::Error, path::Path};
+use std::{
+    error::Error,
+    path::{Path, PathBuf},
+};
 
 impl State {
-    /// Attach File, or a file dropped at `at`, a window point: a copy of the file's bytes
-    /// at the caret or at `at`, with the icon the system shows for it; audio and video are
-    /// recordings, as OneNote attaches them.
-    pub(crate) fn attach(
-        &mut self,
-        path: &Path,
-        at: Option<[f32; 2]>,
-    ) -> Result<(), Box<dyn Error>> {
+    /// Inserts a file at the caret or window point `at`, as a picture when requested.
+    pub(crate) fn import_file(&mut self, path: &Path, at: Option<[f32; 2]>, picture: bool) {
         if self.session.as_ref().is_some_and(crate::Session::read_only) {
-            return Ok(());
+            return;
         }
-        let (Some(name), Ok(bytes)) = (
-            path.file_name().and_then(|name| name.to_str()),
-            notebook::fs::read(path),
-        ) else {
-            platform::alert("Couldn't attach the file", "Choose a file you can open.");
-            return Ok(());
-        };
-        let file = Attachment {
-            id: onestore::page::text::new_id()?,
-            filename: name.to_owned(),
-            source_path: path.to_str().map(str::to_owned),
-            size: Some(canvas::gpu::page::ICON_SIZE),
-            layout: Default::default(),
-            preview: platform::file_icon(path).map(Into::into),
-            recording: canvas::recording::attached(name, &bytes),
-            bytes: Some(bytes.into()),
-            tags: Vec::new(),
-        };
-        let response = match at {
-            Some(point) => self.view.drop_attachment(self.page_point(point), file)?,
-            None => self.view.insert_attachment(file)?,
-        };
-        self.respond(response);
-        Ok(())
+        let loading = self.loading;
+        let reply = self.reply(
+            move |state, (path, read): (PathBuf, std::io::Result<Vec<u8>>)| {
+                let bytes = match read {
+                    Ok(bytes) => bytes,
+                    Err(error) if error.kind() == std::io::ErrorKind::FileTooLarge => {
+                        too_large();
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        platform::alert("Couldn't insert the file", "Choose a file you can open.");
+                        return Ok(());
+                    }
+                };
+                if state.loading != loading {
+                    platform::alert(
+                        "File wasn't inserted",
+                        "Return to the page and insert the file again.",
+                    );
+                    return Ok(());
+                }
+                if state
+                    .session
+                    .as_ref()
+                    .is_some_and(crate::Session::read_only)
+                {
+                    return Ok(());
+                }
+                if picture && draw::RasterImage::measure(&bytes).is_ok() {
+                    return state.insert_picture(bytes, at);
+                }
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .ok_or("No file name")?;
+                let file = Attachment {
+                    id: onestore::page::text::new_id()?,
+                    filename: name.to_owned(),
+                    source_path: path.to_str().map(str::to_owned),
+                    size: Some(canvas::gpu::page::ICON_SIZE),
+                    layout: Default::default(),
+                    preview: platform::file_icon(&path).map(Into::into),
+                    recording: canvas::recording::attached(name, &bytes),
+                    bytes: Some(bytes.into()),
+                    tags: Vec::new(),
+                };
+                let response = match at {
+                    Some(point) => state.view.drop_attachment(state.page_point(point), file)?,
+                    None => state.view.insert_attachment(file)?,
+                };
+                state.respond(response);
+                Ok(())
+            },
+        );
+        let path = path.to_owned();
+        crate::spawn(move || {
+            let bytes = notebook::fs::read_limited(&path, notebook::MAX_FILE_BYTES);
+            reply.send((path, bytes));
+        });
     }
 
     /// Open: a recording plays; another file opens as a copy, in a folder of its own, with
@@ -87,6 +119,16 @@ impl State {
         platform::pick_new("Save As", &file.filename, "Save", None, reply);
         Ok(())
     }
+}
+
+pub(crate) fn too_large() {
+    platform::alert(
+        "File is too large",
+        &format!(
+            "Choose files totaling at most {} MiB.",
+            notebook::MAX_FILE_BYTES >> 20
+        ),
+    );
 }
 
 /// A file another program stored beside the section rather than in it.

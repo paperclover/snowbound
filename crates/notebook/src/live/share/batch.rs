@@ -10,6 +10,37 @@ pub(super) struct Edits {
     pub revisions: BTreeMap<ExGuid, ExGuid>,
 }
 
+pub(super) fn encode(edits: &Edits, limit: usize) -> io::Result<Vec<u8>> {
+    struct Buffer {
+        bytes: Vec<u8>,
+        limit: usize,
+    }
+    impl io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            if bytes.len() > self.limit.saturating_sub(self.bytes.len()) {
+                return Err(io::ErrorKind::FileTooLarge.into());
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut buffer = Buffer {
+        bytes: Vec::new(),
+        limit,
+    };
+    serde_json::to_writer(&mut buffer, edits).map_err(|error| {
+        io::Error::new(
+            error.io_error_kind().unwrap_or(io::ErrorKind::InvalidData),
+            error,
+        )
+    })?;
+    Ok(buffer.bytes)
+}
+
 pub(super) struct Waiting {
     peer: [u8; 16],
     request: Request,
@@ -260,5 +291,64 @@ impl Served {
             ));
         }
         Ok(transaction)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use onestore::{
+        op::{Op, PageOp},
+        page::{Attachment, PageObject},
+    };
+
+    #[test]
+    fn attachment_encoding_stops_at_the_upload_budget() {
+        let id = ExGuid {
+            guid: [1; 16],
+            n: 1,
+        };
+        let bytes: Arc<[u8]> = (0..4096)
+            .map(|at| (at % 251) as u8)
+            .collect::<Vec<_>>()
+            .into();
+        let edits = Edits {
+            edits: vec![(
+                "Ada".into(),
+                Edit {
+                    at: 0,
+                    ops: vec![Op::Page {
+                        space: id,
+                        op: PageOp::Add {
+                            object: PageObject::Attachment(Attachment {
+                                id,
+                                filename: "payload.bin".into(),
+                                source_path: None,
+                                size: None,
+                                layout: Default::default(),
+                                bytes: Some(Arc::clone(&bytes)),
+                                preview: None,
+                                recording: None,
+                                tags: Vec::new(),
+                            }),
+                            before: None,
+                        },
+                    }],
+                },
+            )],
+            revisions: BTreeMap::new(),
+        };
+        let encoded = serde_json::to_vec(&edits).unwrap();
+        assert_eq!(encode(&edits, encoded.len()).unwrap(), encoded);
+        let decoded: Edits = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.edits, edits.edits);
+        assert_eq!(
+            encode(&edits, encoded.len() - 1).unwrap_err().kind(),
+            io::ErrorKind::FileTooLarge
+        );
+        assert_eq!(
+            encode(&edits, 128).unwrap_err().kind(),
+            io::ErrorKind::FileTooLarge
+        );
     }
 }

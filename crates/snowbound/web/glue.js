@@ -611,10 +611,12 @@ function modifiers(event) {
   );
 }
 
-function read(list) {
-  return Promise.all(
-    [...list].map(async (file) => [file.name, new Uint8Array(await file.arrayBuffer())]),
-  );
+async function read(list) {
+  const files = [...list];
+  if (!wasm.accepts_files(files.reduce((size, file) => size + file.size, 0))) return [];
+  const read = [];
+  for (const file of files) read.push([file.name, new Uint8Array(await file.arrayBuffer())]);
+  return read;
 }
 
 const NOTEBOOK_FILES = /\.(one|onetoc2|onepkg)$/i;

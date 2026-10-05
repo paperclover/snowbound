@@ -1376,6 +1376,16 @@ pub fn appearance_changed(dark: bool) {
     send(UserEvent::Appearance);
 }
 
+/// Rejects a selection before JavaScript reads its files.
+#[wasm_bindgen]
+pub fn accepts_files(size: f64) -> bool {
+    let accepted = size.is_finite() && size >= 0.0 && size <= notebook::MAX_FILE_BYTES as f64;
+    if !accepted {
+        crate::attachment::too_large();
+    }
+    accepted
+}
+
 /// Files chosen or dropped, as `[name, bytes]` pairs, for `purpose`: `open` opens them as
 /// notebooks, sections or packages, `place` puts them at the caret.
 #[wasm_bindgen]
@@ -1388,7 +1398,8 @@ pub fn files(purpose: &str, files: js_sys::Array) {
         _ => {
             for path in keep(files, CHOSEN) {
                 send(UserEvent::Then(Box::new(move |state| {
-                    state.place_file(&path, None)
+                    state.import_file(&path, None, true);
+                    Ok(())
                 })));
             }
         }

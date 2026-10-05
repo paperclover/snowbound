@@ -1247,7 +1247,7 @@ impl State {
             Id::Undo | Id::Redo => enabled(writable && !field && self.can_step(id == Id::Redo)),
             Id::Cut => enabled(writable && selected),
             Id::Copy => enabled(selected),
-            Id::Paste => enabled(text && !field),
+            Id::Paste => enabled(field || text),
             Id::SelectAll => enabled(field || page),
             Id::Back | Id::Forward => {
                 enabled(!modal && self.can_travel()[usize::from(id == Id::Forward)])
@@ -1573,6 +1573,17 @@ impl State {
                 self.respond(response);
                 return Ok(());
             }
+            Id::Paste if field.is_some() => {
+                let text = match &mut self.clipboard {
+                    crate::Clipboard::System(clipboard) => clipboard.get_text().ok(),
+                    crate::Clipboard::Memory(text, _) => Some(text.clone()),
+                };
+                if let Some(text) = text {
+                    self.ui
+                        .event(ui::Event::Ime(winit::event::Ime::Commit(text)));
+                }
+                return Ok(());
+            }
             Id::Paste => Work::Page(Request::Paste),
             Id::FormatPainter => {
                 self.painter = match self.painter {
@@ -1659,7 +1670,10 @@ impl State {
                 return Ok(());
             }
             Id::Attachment => {
-                let reply = self.reply(|state, path: std::path::PathBuf| state.attach(&path, None));
+                let reply = self.reply(|state, path: std::path::PathBuf| {
+                    state.import_file(&path, None, false);
+                    Ok(())
+                });
                 platform::pick_file("Attach File", &[], reply);
                 return Ok(());
             }

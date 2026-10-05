@@ -606,6 +606,48 @@ fn the_find_bar_keeps_room_for_the_query() {
     );
 }
 
+#[test]
+fn paste_replaces_a_focused_input_without_editing_the_page() {
+    let scratch = Scratch::new("paste-field");
+    let notebook =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/cross-container/candidate");
+    let steps = [
+        "move 900 600",
+        "press",
+        "release",
+        "type 雪 paste ☃",
+        "settle",
+        "modifiers command shift",
+        "key Left",
+        "modifiers command",
+        "key c",
+        "modifiers",
+        "settle",
+        "modifiers command",
+        "key f",
+        "modifiers",
+        "settle",
+        "type replace me",
+        "settle",
+        "modifiers command",
+        "key a",
+        "modifiers",
+        "settle",
+        "modifiers command",
+        "key v",
+        "modifiers",
+        "accessibility pasted",
+    ];
+    let [pasted] = replay(&scratch, Some(&notebook), &steps)
+        .try_into()
+        .unwrap();
+    assert!(
+        pasted.contains(r#"SearchInput "Find on Page" = "雪 paste ☃" [focused]"#),
+        "{pasted}"
+    );
+    assert_eq!(pasted.matches("雪 paste ☃").count(), 2, "{pasted}");
+}
+
 /// A launch shows the page each notebook was left on, as the settings recall them: the
 /// notebook shown at once, and another as its section is opened.
 #[test]

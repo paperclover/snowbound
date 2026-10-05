@@ -49,6 +49,9 @@ mod working;
 pub use smb::SmbRemote;
 pub use worker::SyncWorker;
 
+/// The largest file a notebook session or Live Share reads or writes whole.
+pub const MAX_FILE_BYTES: usize = 256 << 20;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]

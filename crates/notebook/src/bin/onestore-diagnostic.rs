@@ -83,7 +83,7 @@ fn run(args: &[std::ffi::OsString]) -> Result<Value, Box<dyn std::error::Error>>
             &mut notebook::discover::Local::open(root)?,
             notebook::discover::Limits {
                 entries: 100_000,
-                bytes_per_file: 256 * 1024 * 1024,
+                bytes_per_file: notebook::MAX_FILE_BYTES,
                 depth: 64,
             },
         )?;

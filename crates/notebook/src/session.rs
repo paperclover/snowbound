@@ -326,7 +326,7 @@ impl Storage for Share {
     fn read(&self, path: &str) -> Result<Vec<u8>> {
         Ok(self
             .client
-            .read_storage(&self.path(path), 256 * 1024 * 1024)?)
+            .read_storage(&self.path(path), crate::MAX_FILE_BYTES)?)
     }
 
     fn read_file(&self, path: &str, limit: usize) -> Result<Vec<u8>> {
@@ -403,7 +403,7 @@ impl Storage for Share {
 
 pub(crate) const LIMITS: discover::Limits = discover::Limits {
     entries: 100_000,
-    bytes_per_file: 256 * 1024 * 1024,
+    bytes_per_file: crate::MAX_FILE_BYTES,
     depth: 64,
 };
 

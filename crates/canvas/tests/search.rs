@@ -136,6 +136,27 @@ fn find_on_page_counts_what_onenote_counts() {
 }
 
 #[test]
+fn find_on_page_keeps_unicode_matches_on_character_boundaries() {
+    let mut engine = TextEngine::default();
+    let page = page(&mut engine, "Unicode", "雪 ☃ 🦀 café");
+    let editor = CanvasEditor::from_page(page, &mut engine).unwrap();
+    for (query, offsets) in [
+        ("雪", [0, 1]),
+        ("☃", [2, 3]),
+        ("🦀", [4, 6]),
+        ("cafe", [7, 11]),
+    ] {
+        let matches = page_matches(&editor, &Query::new(query));
+        assert_eq!(matches.len(), 1, "{query}");
+        assert_eq!(
+            matches[0].1.positions.map(|at| at.offset),
+            offsets,
+            "{query}"
+        );
+    }
+}
+
+#[test]
 fn folding_ignores_case_and_diacritics() {
     assert_eq!(fold("Crème BRÛLÉE"), "creme brulee");
     assert_eq!(fold("Straße Ærø don’t"), "strasse aero don't");

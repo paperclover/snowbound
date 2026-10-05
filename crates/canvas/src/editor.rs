@@ -2503,6 +2503,9 @@ impl CanvasEditor {
         engine: &mut TextEngine,
         mut file: onestore::page::Attachment,
     ) -> Result<(), EditorError> {
+        if self.active_outline().title && self.leave_title_for_body(engine)? {
+            return self.insert_in_flow(engine, ParagraphContent::Attachment(file));
+        }
         if let Focus::Caret { outline, .. } = &self.active {
             [file.layout.x, file.layout.y] = outline.origin().map(Some);
             let layout = Box::new(crate::outline::page_file(engine, &file)?);

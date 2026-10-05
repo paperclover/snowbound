@@ -42,8 +42,7 @@ const CHUNK: usize = 128 << 10;
 const WINDOW: usize = 512 << 10;
 /// How long a request waits for its reply.
 const TIMEOUT: Duration = Duration::from_secs(60);
-/// The largest file read or written whole.
-const LIMIT: usize = 256 << 20;
+use crate::MAX_FILE_BYTES as LIMIT;
 /// Snapshots of files being read, per guest, and how long one is kept unread.
 const SNAPSHOTS: usize = 8;
 const SNAPSHOT_AGE: Duration = Duration::from_secs(120);
@@ -501,14 +500,28 @@ impl Served {
                 let handle = request.handle.unwrap_or_default();
                 let bytes = request.bytes.unwrap_or_default();
                 let mut puts = self.puts.lock().unwrap();
-                let held = puts.entry((*peer, handle)).or_default();
-                if request.offset != Some(held.len() as u64) || held.len() + bytes.len() > LIMIT {
+                let key = (*peer, handle);
+                let length = puts.get(&key).map_or(0, Vec::len);
+                if request.offset != Some(length as u64) || bytes.is_empty() {
+                    puts.remove(&key);
                     return Err(refused(
                         io::ErrorKind::InvalidInput,
                         "An upload out of order",
                     ));
                 }
-                held.extend_from_slice(&bytes);
+                let held: usize = puts
+                    .iter()
+                    .filter(|((guest, _), _)| guest == peer)
+                    .map(|(_, bytes)| bytes.len())
+                    .sum();
+                if bytes.len() > LIMIT.saturating_sub(held) {
+                    puts.remove(&key);
+                    return Err(refused(
+                        io::ErrorKind::FileTooLarge,
+                        "An upload is too large",
+                    ));
+                }
+                puts.entry(key).or_default().extend_from_slice(&bytes);
                 done
             }
             kind::COMMIT => {
@@ -1228,6 +1241,9 @@ impl Guest {
         request: &mut Request,
         bytes: Vec<u8>,
     ) -> std::result::Result<(), Failed> {
+        if bytes.len() > LIMIT {
+            return Err(Failed::Unsent(io::ErrorKind::FileTooLarge.into()));
+        }
         if bytes.len() <= CHUNK {
             request.bytes = Some(bytes);
             return Ok(());
@@ -1436,16 +1452,19 @@ impl Guest {
         edits: &[crate::PendingEdit],
         revisions: &BTreeMap<onestore::ExGuid, onestore::ExGuid>,
     ) -> std::result::Result<(), CommitError> {
-        let bytes = serde_json::to_vec(&batch::Edits {
-            edits: edits
-                .iter()
-                .map(|edit| (edit.author.clone(), edit.edit.clone()))
-                .collect(),
-            revisions: revisions.clone(),
-        })
+        let bytes = batch::encode(
+            &batch::Edits {
+                edits: edits
+                    .iter()
+                    .map(|edit| (edit.author.clone(), edit.edit.clone()))
+                    .collect(),
+                revisions: revisions.clone(),
+            },
+            LIMIT,
+        )
         .map_err(|error| CommitError {
             state: CommitState::NotCommitted,
-            error: io::Error::other(error),
+            error,
         })?;
         let mut request = Request {
             path: path.to_owned(),
@@ -1877,6 +1896,9 @@ impl Storage for Hosted {
     }
 
     fn create(&self, path: &str, bytes: &[u8]) -> Result<()> {
+        if bytes.len() > LIMIT {
+            return Err(io::Error::from(io::ErrorKind::FileTooLarge).into());
+        }
         let mut request = Request {
             path: path.to_owned(),
             ..Request::default()
@@ -1953,6 +1975,60 @@ impl Storage for Hosted {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn refused_uploads_release_their_bytes_and_share_one_guest_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::create_dir(directory.path().join("notebook")).unwrap();
+        let served = Arc::new(Served {
+            storage: crate::session::Notebook::open(
+                directory.path().join("notebook"),
+                directory.path().join("cache"),
+            )
+            .unwrap()
+            .into_storage(),
+            images: Mutex::default(),
+            snapshots: Mutex::default(),
+            puts: Mutex::default(),
+            guests: Mutex::default(),
+            writers: Mutex::default(),
+            host: Mutex::default(),
+            room: Mutex::default(),
+        });
+        let peer = [1; 16];
+        let put = |handle, offset, bytes| {
+            served.answer(
+                &peer,
+                kind::PUT,
+                Request {
+                    handle: Some(handle),
+                    offset: Some(offset),
+                    bytes: Some(bytes),
+                    ..Request::default()
+                },
+            )
+        };
+        put(1, 0, vec![1; 3]).unwrap();
+        put(2, 0, vec![2; 2]).unwrap();
+        assert!(put(1, 2, vec![3]).is_err());
+        assert_eq!(
+            served.puts.lock().unwrap().get(&(peer, 2)).unwrap(),
+            &[2; 2]
+        );
+        assert!(!served.puts.lock().unwrap().contains_key(&(peer, 1)));
+        put(1, 0, vec![4]).unwrap();
+        assert!(put(1, 1, Vec::new()).is_err());
+        served
+            .puts
+            .lock()
+            .unwrap()
+            .insert((peer, 3), vec![0; LIMIT - 2]);
+        assert!(put(2, 2, vec![5]).is_err());
+        assert!(!served.puts.lock().unwrap().contains_key(&(peer, 2)));
+        assert!(put(3, (LIMIT - 2) as u64, vec![6; 3]).is_err());
+        assert!(served.puts.lock().unwrap().is_empty());
+        put(4, 0, vec![7]).unwrap();
+    }
 
     /// A commit's writes, found by comparing images, rebuild the image after it from the one
     /// before, and a change touching most of the file is left to be read whole.

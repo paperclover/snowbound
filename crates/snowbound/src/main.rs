@@ -6630,7 +6630,7 @@ impl ApplicationHandler<UserEvent> for App {
                 WindowEvent::Ime(ime) => state.input(ui::Event::Ime(ime)),
                 WindowEvent::DroppedFile(path) => {
                     let at = platform::drop_point(&state.window);
-                    state.place_file(&path, at)?;
+                    state.import_file(&path, at, true);
                     state.window.request_redraw();
                 }
                 WindowEvent::PinchGesture { delta, .. } => state.pinch(1.0 + delta as f32)?,

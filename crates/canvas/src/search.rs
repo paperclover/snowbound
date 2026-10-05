@@ -516,11 +516,7 @@ pub fn page_matches(editor: &CanvasEditor, query: &Query) -> Vec<PageMatch> {
                 start = span.end;
             }
             for hit in query.find(&shown) {
-                let end = source[hit.end - 1]
-                    + paragraph.text()[source[hit.end - 1]..]
-                        .chars()
-                        .next()
-                        .map_or(0, char::len_utf8);
+                let end = source[hit.end - 1] + 1;
                 let (Ok(from), Ok(to)) = (
                     paragraph.utf16_offset(source[hit.start]),
                     paragraph.utf16_offset(end),

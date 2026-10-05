@@ -22,17 +22,23 @@ pub use math::Math;
 /// Picture and attachment payloads travel with the model (queued intents replay them),
 /// as base64 text.
 mod payload {
-    use base64::Engine;
+    use base64::{Engine, display::Base64Display, engine::general_purpose::STANDARD};
     use std::sync::Arc;
+
+    struct Encoded<'a>(&'a [u8]);
+
+    impl serde::Serialize for Encoded<'_> {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.collect_str(&Base64Display::new(self.0, &STANDARD))
+        }
+    }
 
     pub fn serialize<S: serde::Serializer>(
         bytes: &Option<Arc<[u8]>>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         match bytes {
-            Some(bytes) => {
-                serializer.serialize_some(&base64::engine::general_purpose::STANDARD.encode(bytes))
-            }
+            Some(bytes) => serializer.serialize_some(&Encoded(bytes)),
             None => serializer.serialize_none(),
         }
     }
@@ -42,7 +48,7 @@ mod payload {
     ) -> Result<Option<Arc<[u8]>>, D::Error> {
         let text: Option<String> = serde::Deserialize::deserialize(deserializer)?;
         text.map(|text| {
-            base64::engine::general_purpose::STANDARD
+            STANDARD
                 .decode(text)
                 .map(Arc::from)
                 .map_err(serde::de::Error::custom)

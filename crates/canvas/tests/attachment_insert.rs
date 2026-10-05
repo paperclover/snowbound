@@ -7,8 +7,8 @@
 use canvas::{editor::CanvasEditor, layout::TextEngine};
 use draw::edit::Movement;
 use onestore::{
-    Arena, Section, Store,
-    op::{Edit, Op},
+    Arena, PageCreation, Section, Store,
+    op::{Edit, Op, SectionOp},
     page::{Attachment, PageObject, ParagraphContent},
 };
 use std::sync::Arc;
@@ -59,6 +59,80 @@ fn file(name: &str, bytes: Vec<u8>, preview: Option<Arc<[u8]>>) -> Attachment {
         preview,
         recording: None,
         tags: Vec::new(),
+    }
+}
+
+#[test]
+fn a_file_attached_from_the_title_stores_in_the_body() {
+    let mut image = onestore::create_section("files.one", "First page", "Author").unwrap();
+    let arena = Arena::default();
+    let mut section = Section::open(&arena, image.clone()).unwrap();
+    section
+        .apply(
+            "Author",
+            &Edit {
+                at: 133_000_000_000_000_000,
+                ops: vec![Op::Section(SectionOp::Create(
+                    PageCreation::new(None, Some("Attachment from title"), "Author").unwrap(),
+                ))],
+            },
+        )
+        .unwrap();
+    let (space, ..) = section.pages().unwrap()[1].clone();
+    let mut engine = TextEngine::default();
+    let mut editor = CanvasEditor::from_page(section.page(space).unwrap(), &mut engine).unwrap();
+    let title = editor
+        .outlines()
+        .iter()
+        .find(|outline| outline.title)
+        .unwrap()
+        .id;
+    editor.focus_outline(title).unwrap();
+    let attached = file(
+        "attachment.txt",
+        b"Snowbound bounded import fixture\n".to_vec(),
+        Some(native_icon()),
+    );
+    editor
+        .insert_attachment(&mut engine, attached.clone())
+        .unwrap();
+    assert!(!editor.active_outline().title);
+    let ops = editor
+        .take_ops()
+        .unwrap()
+        .into_iter()
+        .map(|op| Op::Page { space, op })
+        .collect();
+    section
+        .apply(
+            "Author",
+            &Edit {
+                at: 133_000_000_010_000_000,
+                ops,
+            },
+        )
+        .unwrap();
+    section.seal().unwrap().unwrap().apply(&mut image).unwrap();
+    let arena = Arena::default();
+    let mut reopened = Section::open(&arena, image.clone()).unwrap();
+    assert_eq!(reopened.pages().unwrap()[1].1, "Attachment from title");
+    let page = reopened.page(space).unwrap();
+    let files: Vec<_> = page
+        .objects
+        .iter()
+        .filter_map(|object| match object {
+            PageObject::Outline(outline) if !outline.title => Some(&outline.paragraphs),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|paragraph| match &paragraph.content {
+            ParagraphContent::Attachment(file) => Some(file),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(files, [&attached]);
+    if let Some(path) = std::env::var_os("CANVAS_TITLE_ATTACHMENT_EXPORT") {
+        std::fs::write(path, image).unwrap();
     }
 }
 

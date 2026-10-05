@@ -3,10 +3,7 @@
 
 use crate::{State, platform};
 use canvas::editor::{Clip, Piece};
-use std::{
-    error::Error,
-    path::{Path, PathBuf},
-};
+use std::{error::Error, path::PathBuf};
 
 /// Copy offers text and HTML, or a picture as PNG, beside Snowbound's lossless clip.
 pub(crate) struct Copied {
@@ -123,7 +120,7 @@ impl State {
         match self.clipboard.pasted() {
             Some(Pasted::Files(paths)) => {
                 for path in paths {
-                    self.place_file(&path, None)?;
+                    self.import_file(&path, None, true);
                 }
             }
             Some(Pasted::Clip(clip)) => {
@@ -178,21 +175,6 @@ impl State {
             None => {}
         }
         Ok(())
-    }
-
-    /// A pasted file, or one dropped at `at`, a window point: a picture file as its picture,
-    /// as OneNote 2010 pastes one (lab, 2026-09-30), and any other file attached.
-    pub(crate) fn place_file(
-        &mut self,
-        path: &Path,
-        at: Option<[f32; 2]>,
-    ) -> Result<(), Box<dyn Error>> {
-        match notebook::fs::read(path) {
-            Ok(bytes) if draw::RasterImage::measure(&bytes).is_ok() => {
-                self.insert_picture(bytes, at)
-            }
-            _ => self.attach(path, at),
-        }
     }
 
     /// Puts an encoded picture at the caret, or where it is dropped at `at`, a window point,
